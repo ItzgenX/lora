@@ -50,6 +50,14 @@ ckpt_path: ???     # e.g. outputs/train/seg/runs/2024-01-01/00-00-00/checkpoint-
 size: 512          # square canvas; must match what training/calc used
 seed: 42
 
+# ---- Device -----------------------------------------------------------
+# null (default) = auto-detect a GPU and REFUSE to run if none is visible
+# (see src/utils.py resolve_device() — this script must never silently fall
+# back to CPU). Set explicitly to override, e.g.:
+#   python seg_inference.py device=cuda:1 ...
+#   python seg_inference.py device=cpu ...       (explicit opt-in to CPU)
+device: null
+
 # =============================================================================
 # MODEL LOADING — LOCAL vs INTERNET  (one switch: local_files_only)
 # =============================================================================

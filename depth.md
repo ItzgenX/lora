@@ -371,6 +371,31 @@ python depth_map_calculations.py --dataset_dir /path/custome_dataset --data_dir 
 ```
 In a dry run the scan is capped to the first N images; split JSONLs contain only the entries whose images were in that capped set (the rest are reported as "not in the scanned subset — expected").
 
+### 5.2c GPU resolution — never silently falls back to CPU [VERIFIED]
+
+**Problem this fixes**: `depth_map_calculations.py` (and every other pipeline entrypoint) used to pick a device with `"cuda" if torch.cuda.is_available() else "cpu"`. If CUDA wasn't detected for ANY reason — CPU-only torch build, driver mismatch, wrong conda env, `CUDA_VISIBLE_DEVICES` unset/empty — the script silently ran on CPU. Nothing printed a warning; the run just looked normal but never touched the GPU. This was hit for real on a Linux env that worked fine on Windows.
+
+**Fix**: all 6 pipeline entrypoints (both calc scripts, both training scripts, both inference scripts) now call `resolve_device()` / the equivalent `accelerator.device` check from `src/utils.py`. Behavior:
+
+- Prints full GPU diagnostics **every run**: `torch.cuda.is_available()`, device count, `CUDA_VISIBLE_DEVICES`, and each visible GPU's name + VRAM.
+- If no device was explicitly requested and no GPU is visible → **raises `RuntimeError`** with a concrete fix checklist (check `nvidia-smi`, check `torch.version.cuda`, check `CUDA_VISIBLE_DEVICES`). It does **not** silently run on CPU.
+- `--device cpu` is still honoured as an **explicit opt-in** (prints a loud reminder it'll be slow), for real CPU testing.
+- `--device cuda:N` pins a specific GPU index; errors if that index isn't visible.
+
+**Verified by execution** (`src/utils.py::resolve_device`, isolated test with monkeypatched `torch.cuda.is_available`):
+| Case | Result |
+|---|---|
+| Real GPU present, no `--device` passed | returns `"cuda"` — PASS |
+| No GPU (simulated), no `--device` passed | raises `RuntimeError` — PASS |
+| No GPU (simulated), `--device cpu` | returns `"cpu"`, allowed — PASS |
+| No GPU (simulated), `--device cuda` | raises `RuntimeError` — PASS |
+
+### 5.2d Batch size auto-scales to GPU VRAM (12GB local vs cluster GPUs)
+
+`--batch_size` now defaults to `None` (was `4`). When left unset, `auto_batch_size()` (`src/utils.py`) scales it from the detected GPU's total VRAM relative to a 12GB baseline: `max(4, round(4 * gpu_gb / 12))`. On a 12GB GPU this returns `4` (unchanged from the old hardcoded default). Pass `--batch_size N` explicitly to disable auto-scaling entirely.
+
+**Verification status — be precise about what's actually been checked**: VERIFIED on a real ~12GB GPU (returns `4`, matching the previously-hardcoded, already-proven-safe value). The scale-up behavior for much larger GPUs (e.g. a 98GB cluster GPU → ~32) is a **reasoned extrapolation, not executed** — no such hardware was available to test against. If a run on a larger GPU ever OOMs, override with `--batch_size` explicitly.
+
 ### 5.3 skip_encode — Training vs Inference Path
 
 ```python
@@ -434,6 +459,62 @@ _socket.gethostname = lambda: str(cfg.get("tag", "loradapter"))
 ```
 
 Verified result: `events.out.tfevents.1782770112.depth.13012.0` — the field is `depth` (from `cfg.tag = "depth"`).
+
+### 5.8 Training Timing — Measured Numbers and Self-Measurement Recipe
+
+VRAM and disk numbers below are hardware-independent (a property of the model/batch/tensors) and apply directly to your training machine. **Timing (seconds/step, epoch time, 5-epoch ETA) is GPU-speed-dependent and must be measured on your own training machine** — the self-measurement command below takes ~3-5 minutes and gives you the real number.
+
+**Measured (12GB dev GPU, 639 real local images, batch_size=4, grad_accum=4, gradient_checkpointing=True, bf16=True):**
+- Peak VRAM: **~90.6% of a 12GB card** at batch_size=4 — identical for depth and seg (confirms `skip_encode=True` keeps the encoder out of the training forward pass, measured not assumed). Do not raise batch_size on a 12GB card.
+- Steady-state optimizer-step time (after ~20-step warmup settles): **~3.44-3.47 s/step** on the dev GPU — reference only, re-measure on your own machine.
+- One-time first-step warmup (CUDA/cuDNN compilation): ~29s, a one-off cost per process launch, not per-step.
+- Validation (256 images, no_grad): ~31-35s per `val_steps` trigger (dev-GPU reference).
+- Checkpoint grid generation (10 images, full 50-step diffusion sampling): ~52s per event — doubles to ~104s when `best_model/` AND the regular `checkpoint-epochN/` both fire on the same trigger (as happens whenever val/loss improves). Dev-GPU reference; re-measure for your own ETA.
+
+**Get your real number** — run this for ~3-5 minutes on your own training machine (it will not disrupt anything — it's a normal short training run):
+```bash
+python depth_training.py experiment=train_depth epochs=1 val_steps=999999 ckpt_steps=999999
+```
+Let it run past the first ~20 steps (the first step includes one-time warmup and is not representative). Read the stabilized `s/it` value from the tqdm progress line, e.g. `Steps: 50%|##### | 20/N [01:34<01:08, 3.45s/it, ...]` → `3.45` is your real per-step measurement.
+
+Then compute your real epoch/5-epoch time:
+```
+steps_per_epoch = ceil(TRAIN_IMAGES / (batch_size * gradient_accumulation_steps))
+pure_training_time_per_epoch = steps_per_epoch * measured_seconds_per_step
+checkpoint_overhead_per_epoch ≈ (val triggers * ~33s) + (ckpt triggers * ~52-104s)  [also hardware-dependent, same caveat]
+total_epoch_time ≈ pure_training_time_per_epoch + checkpoint_overhead_per_epoch
+5_epoch_time ≈ total_epoch_time * 5
+```
+With `59,766` train images, `batch_size=4`, `grad_accum=4`: `steps_per_epoch = ceil(59766/16) = 3736`.
+
+### 5.9 Checkpoint Resume — Verified Limitation
+
+`lora.struct.ckpt_path=<path>` (see `add_lora_from_config()` in `src/utils.py`) **does** correctly reload the mapper + LoRA weight tensors — verified by executing a real resume: the log printed `loaded checkpoint for lora struct` and the resumed run's loss reflected the already-trained weights, not a cold random init.
+
+**It does NOT restore**: `global_step`, optimizer momentum/variance state, or the LR scheduler's position. Verified by execution: a resumed run's step 1 showed `lr=2.00e-07` — **identical** to a completely fresh run's step 1 — proving the warmup/cosine schedule restarts from scratch on every resume, regardless of how far the original run had progressed.
+
+**Practical implication**: if training is interrupted mid-run (e.g. across sessions on a multi-hour full-data run) and you resume via `ckpt_path`, the resumed run's LR curve does NOT continue from where the original left off — it warms up from `lr_warmup_steps` again. This is a weight warm-start, not a true training-state checkpoint/resume. Plan session boundaries around this (e.g. prefer to let one epoch fully complete before stopping, since `epochs`/checkpoint folders are epoch-aligned) rather than assuming an interrupted run picks back up exactly where it left off.
+
+### 5.10 `training_params.txt` — Know What Parameters Produced a Given Run
+
+Every training run writes `outputs/train/depth/runs/YYYY-MM-DD/HH-MM-SS/training_params.txt` — a plain-text snapshot of the parameters that run used (GPU, batch_size, gradient_accumulation_steps, effective batch, epochs, learning_rate, val_steps/ckpt_steps, dataset paths + real image counts, model paths, resume path).
+
+**Why not just use Hydra's own `.hydra/config.yaml`?** Hydra's snapshot is a raw config dump (harder to skim) and doesn't include derived facts like the real dataset image counts. This file is a single, human-readable summary of exactly what produced the checkpoints sitting next to it.
+
+Implementation: `write_training_params_txt()` in `src/utils.py`, called from both `depth_training.py`/`seg_training.py` on the main process only. **Verified by execution**: an initial version read the dataset manifest paths using the process's current working directory, which under Hydra's `chdir=true` is the run's own output folder, not the repo root — silently producing "unknown images" for both train/val counts. Fixed by resolving relative paths against `get_original_cwd()` (the same pattern already used elsewhere in these two files); re-verified the fix produces the correct real image counts (639/137 on the local test dataset) for both depth and seg.
+
+### 5.11 No Runtime Auto-Scaling — `recommend_training_params.py` Instead
+
+`depth_training.py`/`seg_training.py` used to auto-scale `data.batch_size`/`gradient_accumulation_steps` to the detected GPU at runtime (a function called `auto_scale_training_hardware()`). **This was removed entirely** — for a project whose whole point is a defensible, reproducible comparison between depth and seg conditioning, a value that silently depends on which GPU happened to run the job undermines being able to say "these exact numbers produced this exact model." `configs/experiment/train_depth.yaml`/`train_seg.yaml` are now plain, fixed values — what's written is exactly what runs, full stop.
+
+In its place: `recommend_training_params.py` (repo root) — a standalone advisor that detects your GPU and reads your real dataset manifests, then **prints** a recommended set of hyperparameters. It never writes or modifies any YAML file; you review the output and paste the values in yourself.
+
+```bash
+python recommend_training_params.py
+python recommend_training_params.py --data_dir data/depth_training --epochs 10
+```
+
+**Verified by execution**: run against the real local dataset (639 images) on a 12GB dev GPU, correctly recommended `batch_size=4`, `gradient_accumulation_steps=4`, `gradient_checkpointing=true` (matching the independently-measured-safe values from §5.8) and `steps_per_epoch=40`. Also verified against a synthetic 59,766-line manifest (matching this project's real target dataset size) — correctly computed `steps_per_epoch=3736`, `total_steps=18680`, matching the manual calculation in §5.8 exactly. The batch/accum-scaling formula for GPUs other than ~12GB was separately verified across 4 simulated sizes (12/24/48/98GB) to still hold the effective batch at exactly 16 in every case — same capping logic that was bug-fixed in the now-removed runtime version, re-verified intact in this standalone tool.
 
 ---
 

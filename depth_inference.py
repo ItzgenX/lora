@@ -71,7 +71,7 @@ from torchvision import transforms
 
 from hydra.utils import get_original_cwd
 from src.model import ModelBase
-from src.utils import add_lora_from_config
+from src.utils import add_lora_from_config, resolve_device
 from src.data.transforms import SquarePad
 
 torch.set_float32_matmul_precision("high")
@@ -138,7 +138,10 @@ def make_inference_grid(
 
 @hydra.main(config_path="configs", config_name="inference_depth")
 def main(cfg):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Resolve device LOUDLY: prints full GPU diagnostics and raises a clear
+    # error (instead of silently running on CPU) unless device=cpu was
+    # explicitly passed. See src/utils.py resolve_device() for why this exists.
+    device = resolve_device(cfg.device)
 
     # Resolve output_dir from the original repo root (not Hydra's run dir).
     # Hydra sets chdir=true so Path.cwd() is the run dir — always use _root

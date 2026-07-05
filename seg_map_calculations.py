@@ -43,12 +43,24 @@ QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Re-compute everything (force overwrite of existing PNGs) ---
   python seg_map_calculations.py --data_dir data/ --no_skip
 
+  # --- Dataset-SCAN mode: dataset lives outside the repo; scans for raw_image.jpg,
+  #     saves seg maps to a SIBLING folder (mirrored structure), rebuilds
+  #     seg_training/*.jsonl from data/{train,val,test}.jsonl (see §5.3b in SEGMENTATION.md) ---
+  python seg_map_calculations.py --dataset_dir /path/to/custome_dataset --data_dir data/ --image_path target
+
 JSON ENTRY FORMAT produced:
   {"raw_image_path": "data/raw/000417/raw_image.jpg",
    "seg_path":       "data/raw_seg/000417/raw_image.png",
    "prompt":         "..."}
 
-    ###python seg_map_calculations.py   --dataset_dir D:/MyWorkplace/WorkStation/custome_dataset --data_dir data/ --image_path target
+GPU / DEVICE:
+  --device defaults to auto-detect: uses the first visible CUDA GPU, and
+  REFUSES to run (raises with a fix checklist) if none is visible -- this
+  script never silently falls back to CPU. Pass --device cpu to explicitly
+  opt into CPU, or --device cuda:N to pin a specific GPU on a multi-GPU box.
+  --batch_size defaults to auto-scaling from the detected GPU's VRAM (see
+  src/utils.py auto_batch_size()) -- pass --batch_size explicitly to disable
+  auto-scaling and use an exact value.
 """
 
 import argparse
@@ -63,6 +75,7 @@ from tqdm import tqdm
 
 from src.data.transforms import build_seg_square_preprocess
 from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, SegmentationEncoder
+from src.utils import resolve_device, auto_batch_size
 
 # LOCKED model (references.md §9). Use --local_files_only False for first download.
 DEFAULT_SEG_MODEL = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
@@ -159,8 +172,9 @@ def precompute_segmentation_maps(
         False = allow downloading from HF hub on first use.
       • out_path_fn: optional callable(image_path: Path) -> Path. When given, it
         FULLY decides where each seg PNG is saved (overrides output_dir/input_dir).
-        Used by dataset-scan mode to save the map IN the image's own folder as
-        <folder>_seg_map.png. When None, the default _seg_out_path placement is used.
+        Used by dataset-scan mode to save the map into a SIBLING folder next to
+        the dataset root (mirrored structure), named <folder>_seg_map.png. When
+        None, the default _seg_out_path placement is used.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -763,7 +777,12 @@ def main():
         "--size", type=int, default=512,
         help="Square size for seg maps. Default 512 (matches cfg.size).",
     )
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument(
+        "--batch_size", type=int, default=None,
+        help="Images per GPU batch. Default: auto-scaled from the detected GPU's "
+             "VRAM (baseline 4 on a 12GB GPU; larger GPUs get a proportionally "
+             "larger batch automatically). Pass a number to disable auto-scaling.",
+    )
     parser.add_argument(
         "--model", type=str,
         default="checkpoints/local_models/segformer-b5-cityscapes",
@@ -788,8 +807,10 @@ def main():
         help="Squaring before the encoder (references.md §5). Default: letterbox.",
     )
     parser.add_argument(
-        "--device", type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        "--device", type=str, default=None,
+        help="Device: 'cuda', 'cuda:N', or 'cpu'. Default: auto-detect a GPU and "
+             "REFUSE to run if none is visible (never silently falls back to CPU). "
+             "Pass --device cpu explicitly if you really want CPU.",
     )
     parser.add_argument(
         "--no_skip", action="store_true",
@@ -816,8 +837,10 @@ def main():
         "--dataset_dir", type=str, default=None,
         help="Activates DATASET-SCAN mode. Recursively scans this folder for files "
              "named --image_name (default raw_image.jpg), computes a seg map for each, "
-             "and saves it IN the image's own folder as <folder>_seg_map.png. Requires "
-             "--data_dir (the folder holding train/val/test.jsonl) to recover each "
+             "and saves it into a SIBLING folder next to --dataset_dir (e.g. "
+             "<dataset_dir>_seg_map/), mirroring the internal folder structure, named "
+             "<folder>_seg_map.png. The source dataset folder is never written into. "
+             "Requires --data_dir (the folder holding train/val/test.jsonl) to recover each "
              "image's prompt + split. "
              "Example: --dataset_dir /data/custome_dataset --data_dir data/ --image_path target",
     )
@@ -832,7 +855,7 @@ def main():
     if not args.dataset_dir and not args.data_dir and not args.input_dir:
         parser.error(
             "Provide one of:\n"
-            "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps in-folder)\n"
+            "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps to a sibling folder)\n"
             "  --data_dir data/   (builds data/seg_training/*.json from JSONL paths)\n"
             "  --input_dir data/raw   (directory mode — PNGs only, no JSON)"
         )
@@ -851,14 +874,28 @@ def main():
         os.environ["HF_HUB_OFFLINE"]      = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+    # Resolve device LOUDLY: prints full GPU diagnostics and raises a clear
+    # error (instead of silently running on CPU) unless --device cpu was
+    # explicitly passed. See src/utils.py resolve_device() for why this exists.
+    args.device = resolve_device(args.device)
+
+    # Auto-scale batch_size to the detected GPU's VRAM UNLESS the user passed
+    # --batch_size explicitly (sentinel default is None). See src/utils.py
+    # auto_batch_size() — verified on a ~12GB GPU, reasoned (not executed) for
+    # much larger GPUs; override with --batch_size if it ever OOMs.
+    if args.batch_size is None:
+        args.batch_size = auto_batch_size(default=4, device=args.device)
+
     print(f"Device           : {args.device}")
     print(f"Size             : {args.size}x{args.size}   resize_mode: {args.resize_mode}")
+    print(f"Batch            : {args.batch_size}")
     print(f"Model            : {args.model}")
     print(f"local_files_only : {args.local_files_only}")
 
     if args.dataset_dir:
-        # DATASET-SCAN mode: find raw_image.jpg by scanning, save maps in-folder,
-        # rebuild seg_training/{train,val,test}.jsonl from the original splits.
+        # DATASET-SCAN mode: find raw_image.jpg by scanning, save maps to a
+        # SIBLING folder (mirrored structure), rebuild
+        # seg_training/{train,val,test}.jsonl from the original splits.
         dataset_dir = Path(args.dataset_dir).resolve()
         data_dir    = Path(args.data_dir).resolve()
         out_dir     = Path(args.output_dir).resolve() if args.output_dir else data_dir / "seg_training"

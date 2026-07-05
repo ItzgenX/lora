@@ -41,7 +41,19 @@ QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Re-compute everything (force overwrite of existing PNGs) ---
   python depth_map_calculations.py --data_dir data/ --no_skip
 
-  ###python depth_map_calculations.py --dataset_dir D:/MyWorkplace/WorkStation/custome_dataset --data_dir data/ --image_path target
+  # --- Dataset-SCAN mode: dataset lives outside the repo; scans for raw_image.jpg,
+  #     saves depth maps to a SIBLING folder (mirrored structure), rebuilds
+  #     depth_training/*.jsonl from data/{train,val,test}.jsonl (see §5.2b in DEPTH.md) ---
+  python depth_map_calculations.py --dataset_dir /path/to/custome_dataset --data_dir data/ --image_path target
+
+GPU / DEVICE:
+  --device defaults to auto-detect: uses the first visible CUDA GPU, and
+  REFUSES to run (raises with a fix checklist) if none is visible -- this
+  script never silently falls back to CPU. Pass --device cpu to explicitly
+  opt into CPU, or --device cuda:N to pin a specific GPU on a multi-GPU box.
+  --batch_size defaults to auto-scaling from the detected GPU's VRAM (see
+  src/utils.py auto_batch_size()) -- pass --batch_size explicitly to disable
+  auto-scaling and use an exact value.
 """
 
 import argparse
@@ -56,6 +68,7 @@ from tqdm import tqdm
 
 from src.annotators.midas import DepthEstimator
 from src.data.transforms import SquarePad
+from src.utils import resolve_device, auto_batch_size
 
 
 def parse_bool(value):
@@ -941,8 +954,11 @@ def main():
     # ---- Processing options ---------------------------------------------- #
     parser.add_argument("--size",       type=int, default=512,
                         help="Square spatial size for depth maps. Default: 512")
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Images per GPU batch. Default: 4")
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="Images per GPU batch. Default: auto-scaled from the detected "
+                             "GPU's VRAM (baseline 4 on a 12GB GPU; larger GPUs get a "
+                             "proportionally larger batch automatically). Pass a number here "
+                             "to disable auto-scaling and use exactly that value.")
     # --model accepts EITHER a local folder path (offline, the default) OR a
     # HuggingFace id (when --local_files_only False, downloads into checkpoints/local_models).
     parser.add_argument("--model",      type=str,
@@ -955,9 +971,11 @@ def main():
                         help="True (default) = load --model strictly from local disk (offline), "
                              "never download; pass a local folder path as --model. "
                              "False = allow download into checkpoints/local_models.")
-    parser.add_argument("--device",     type=str,
-                        default="cuda" if torch.cuda.is_available() else "cpu",
-                        help="Device: 'cuda' or 'cpu'. Default: cuda if available")
+    parser.add_argument("--device",     type=str, default=None,
+                        help="Device: 'cuda', 'cuda:N', or 'cpu'. Default: auto-detect a GPU "
+                             "and REFUSE to run if none is visible (this script must never "
+                             "silently fall back to CPU). Pass --device cpu explicitly if you "
+                             "really want to run on CPU.")
     parser.add_argument("--no_skip", action="store_true",
                         help="Re-compute even if depth PNG already exists.")
     parser.add_argument("--image_path", type=str, default="source",
@@ -976,8 +994,10 @@ def main():
     parser.add_argument("--dataset_dir", type=str, default=None,
                         help="Activates DATASET-SCAN mode. Recursively scans this folder "
                              "for files named --image_name (default raw_image.jpg), computes "
-                             "a depth map for each, and saves it IN the image's own folder as "
-                             "<folder>_depth_map.png. Requires --data_dir (the folder holding "
+                             "a depth map for each, and saves it into a SIBLING folder next to "
+                             "--dataset_dir (e.g. <dataset_dir>_depth_map/), mirroring the internal "
+                             "folder structure, named <folder>_depth_map.png. The source dataset "
+                             "folder is never written into. Requires --data_dir (the folder holding "
                              "train/val/test.jsonl) to recover each image's prompt + split. "
                              "Example: --dataset_dir /data/custome_dataset --data_dir data/ --image_path target")
     parser.add_argument("--image_name", type=str, default="raw_image.jpg",
@@ -997,7 +1017,7 @@ def main():
     if not args.dataset_dir and not args.data_dir and not args.input_dir and not args.json_file:
         parser.error(
             "Provide one of:\n"
-            "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps in-folder)\n"
+            "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps to a sibling folder)\n"
             "  --data_dir data/              (builds depth_training/*.jsonl from JSONL paths)\n"
             "  --input_dir data/raw          (directory mode)\n"
             "  --json_file data/train.jsonl  (single-JSONL mode)"
@@ -1013,13 +1033,26 @@ def main():
             "  Example: --dataset_dir /data/custome_dataset --data_dir data/ --image_path target"
         )
 
+    # Resolve device LOUDLY: prints full GPU diagnostics and raises a clear
+    # error (instead of silently running on CPU) unless --device cpu was
+    # explicitly passed. See src/utils.py resolve_device() for why this exists.
+    args.device = resolve_device(args.device)
+
+    # Auto-scale batch_size to the detected GPU's VRAM UNLESS the user passed
+    # --batch_size explicitly (sentinel default is None). See src/utils.py
+    # auto_batch_size() — verified on a ~12GB GPU, reasoned (not executed) for
+    # much larger GPUs; override with --batch_size if it ever OOMs.
+    if args.batch_size is None:
+        args.batch_size = auto_batch_size(default=4, device=args.device)
+
     print(f"Device : {args.device}")
     print(f"Size   : {args.size}x{args.size}")
     print(f"Batch  : {args.batch_size}")
 
     if args.dataset_dir:
-        # DATASET-SCAN mode: find raw_image.jpg by scanning, save maps in-folder,
-        # rebuild depth_training/{train,val,test}.jsonl from the original splits.
+        # DATASET-SCAN mode: find raw_image.jpg by scanning, save maps to a
+        # SIBLING folder (mirrored structure), rebuild
+        # depth_training/{train,val,test}.jsonl from the original splits.
         dataset_dir = Path(args.dataset_dir).resolve()
         data_dir    = Path(args.data_dir).resolve()
         out_dir     = Path(args.output_dir).resolve() if args.output_dir else data_dir / "depth_training"

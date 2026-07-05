@@ -33,13 +33,18 @@ seg_model_name: nvidia/segformer-b5-finetuned-cityscapes-1024-1024
 seg_model_path: checkpoints/local_models/segformer-b5-cityscapes
 
 # =============================================================================
-# HARDWARE  —  12 GB GPU (single card, same as depth)
+# HARDWARE  —  plain, fixed values. NOTHING here auto-scales at runtime.
 # =============================================================================
-#   Effective batch = batch_size(4) x grad_accum(4) = 16 (matches depth exactly)
-#   For cluster: add  accelerate launch --num_processes=N  to the launch command.
-#   Per-GPU settings stay the same — only the effective batch and wall-clock change.
-#
-gradient_checkpointing: true           # REQUIRED on 12 GB (saves ~1.5 GB VRAM)
+# Identical mechanism (or rather, deliberate lack of one) to DEPTH's
+# train_depth.yaml — see that file's HARDWARE section for the full reasoning.
+# data.batch_size, gradient_accumulation_steps, and gradient_checkpointing
+# below are exactly what runs. For a suggested starting point on your actual
+# GPU + dataset (prints only, never edits this file):
+#   python recommend_training_params.py
+#   For cluster: accelerate launch --num_processes=N seg_training.py ...
+#   (values below are PER-GPU; re-run recommend_training_params.py and edit
+#   this file yourself if cluster GPUs have a different VRAM size)
+gradient_checkpointing: true           # REQUIRED on 12 GB — saves ~800MB VRAM (measured) at ~20% compute cost
 gradient_accumulation_steps: 4        # 4 bsz x 4 accum = 16 effective batch
 size: 512                              # square canvas; must match SD1.5 native resolution
 
@@ -47,20 +52,32 @@ size: 512                              # square canvas; must match SD1.5 native 
 # 1. GENERAL TRAINING PARAMETERS  (identical to depth — required for valid comparison)
 # =============================================================================
 #
-# ── DATASET MATH (60K train / 4K val / 4K test) ──────────────────────────────
-#   effective batch 16 -> 60,000 / 16 = 3,750 optimizer steps / epoch
-#   val_steps  = 500  ->  7-8 val/loss checks per epoch  (cheap: no_grad + few batches)
-#   ckpt_steps = 1000 ->  3-4 step-level checkpoint saves per epoch (heavy: weights + images)
+# ── DATASET MATH (YOUR real dataset: 59,766 train / 3,314 val / 3,327 test) ──
+#   effective batch = batch_size(4) x grad_accum(4) = 16
+#   steps / epoch    = ceil(59,766 / 16) = 3,736 optimizer steps
+#   5 epochs total   = 3,736 x 5 = 18,680 optimizer steps
+#   val_steps  = 500  ->  ~7 val/loss checks per epoch  (cheap: no_grad + few batches)
+#   ckpt_steps = 1000 ->  ~3-4 step-level checkpoint saves per epoch (heavy: weights + images)
+#   (VERIFIED 2026-07-02: peak VRAM ~11.1GB/12GB at batch_size=4 on a reference
+#   12GB GPU -- IDENTICAL to depth's measured peak (skip_encode=True means the
+#   SegFormer encoder is NOT in the training forward pass, confirmed by real
+#   measurement, not assumed). Per-step wall-clock time is HARDWARE-DEPENDENT
+#   and was only measured on a reference GPU, not the actual A2000/Linux
+#   target -- see SEGMENTATION.md training-timing section for the exact
+#   self-measurement command to run once on real target hardware.)
+#   CHECKPOINT RESUME: same verified limitation as depth (see train_depth.yaml)
+#   -- weights reload correctly, but LR schedule / global_step restart from 0.
 #
 learning_rate: 1.0e-4
-lr_warmup_steps: 500               # ~13 % of epoch 1 (500 / 3750 steps)
+lr_warmup_steps: 500               # ~13 % of epoch 1 (500 / 3736 steps)
 lr_scheduler: cosine               # decays 1e-4 -> ~0 over the full run
 
-epochs: 5                          # 5 x 3,750 = 18,750 optimizer steps
+epochs: 5                          # 5 x 3,736 = 18,680 optimizer steps (YOUR dataset)
 
 # ── DECOUPLED val/checkpoint triggers ──────────────────────────────────────────
 # val_steps  : compute val/loss (+ update best_model/ if improved). CHEAP.
-# ckpt_steps : write weights + N monitoring images to disk. HEAVY.
+# ckpt_steps : write weights + N monitoring images to disk. HEAVY (measured
+#              ~52s per 10-image grid + ~33s val -- see depth's comment block).
 # These are INDEPENDENT — validate every 500 but only save disk every 1000.
 val_steps:  500
 ckpt_steps: 1000

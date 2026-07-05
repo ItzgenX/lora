@@ -8,16 +8,30 @@ QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Smoke test (after --dry_run_n 15 calc run; 15 images, 3 short epochs) ---
   python depth_training.py experiment=train_depth epochs=3 data.batch_size=1 gradient_accumulation_steps=1 val_steps=5 ckpt_steps=10
 
-  # --- Full training (60K dataset, 5 epochs, single 12GB GPU) ---
+  # --- Full training run ---
   python depth_training.py experiment=train_depth
 
-  # --- Full training — 4x12GB cluster ---
+  # --- Full training — 4-GPU cluster ---
   accelerate launch --num_processes=4 depth_training.py experiment=train_depth
+
+GPU / HARDWARE:
+  data.batch_size, gradient_accumulation_steps, and gradient_checkpointing in
+  configs/experiment/train_depth.yaml are plain, fixed values -- nothing here
+  rescales them at runtime. What's written in the YAML is exactly what runs;
+  run `python recommend_training_params.py` once to get a suggested starting
+  point for your specific GPU + dataset (it only prints a recommendation, it
+  never edits the YAML for you). This script REFUSES to run on CPU (no silent
+  fallback) -- see print_gpu_diagnostics()/the device check right after
+  Accelerator() below.
 
   # --- Resume from checkpoint ---
   python depth_training.py experiment=train_depth "lora.struct.ckpt_path=outputs/train/depth/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
 
 OUTPUT: outputs/train/depth/runs/YYYY-MM-DD/HH-MM-SS/
+  training_params.txt  <- plain-text snapshot of the params this run used --
+                          read this to know what settings produced the
+                          checkpoints in this folder (GPU, effective batch,
+                          real dataset image counts, schedule, model paths).
   best_model/          <- weights of the best val/loss checkpoint
   checkpoint-epochN/   <- per-epoch + per-ckpt_steps checkpoints with sample images
   logs/tensorboard/    <- TensorBoard event files
@@ -43,7 +57,7 @@ import random
 from functools import reduce
 from PIL import Image, ImageDraw
 
-from src.utils import add_lora_from_config, save_checkpoint
+from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt
 
 
 torch.set_float32_matmul_precision("high")
@@ -242,11 +256,35 @@ def main(cfg):
         mixed_precision="bf16" if cfg.get("bf16", True) else "no",
     )
 
+    # Accelerate silently uses CPU if no GPU is visible -- print full GPU
+    # diagnostics and refuse to train on CPU, so a misconfigured environment
+    # (wrong conda env, CPU-only torch build, driver mismatch) fails LOUDLY
+    # here instead of training unnoticeably slowly. See src/utils.py.
+    # Diagnostics print ONLY on the main process -- with `accelerate launch
+    # --num_processes=4` every rank would otherwise print its own copy,
+    # producing 4x interleaved/duplicated noise in cluster logs. The device
+    # check itself still runs on EVERY rank (a single bad rank must still
+    # fail loudly, even if the main process's GPU is fine).
+    if accelerator.is_main_process:
+        print_gpu_diagnostics()
+    if accelerator.device.type != "cuda":
+        raise RuntimeError(
+            f"accelerate selected device {accelerator.device!r}, not a GPU. Training on "
+            f"CPU is never intended for this pipeline. Check `nvidia-smi` and that this "
+            f"conda env's torch build has CUDA support "
+            f"(python -c \"import torch; print(torch.version.cuda)\")."
+        )
+
     logger = get_logger(__name__)
 
     logger.info("==================================")
     logger.info(cfg)
     logger.info(output_path)
+
+    # Snapshot the parameters this run uses into a plain-text file next to
+    # the checkpoints, so it's always clear what settings produced them.
+    if accelerator.is_main_process:
+        write_training_params_txt(cfg, output_path, str(accelerator.device), original_cwd=_root)
 
     cfg = hydra.utils.instantiate(cfg)
     model: ModelBase = cfg.model

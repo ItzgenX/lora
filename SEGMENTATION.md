@@ -380,6 +380,10 @@ data/seg_training/train.jsonl   (+ val, test)       ← rebuilt from the origina
 python seg_map_calculations.py --dataset_dir /path/custome_dataset --data_dir data/ --image_path target --dry_run_n 6
 ```
 
+### 5.3c GPU resolution — never silently falls back to CPU [VERIFIED]
+
+Identical mechanism to DEPTH.md §5.2c/§5.2d (same `src/utils.py::resolve_device` / `auto_batch_size` functions, shared by both pipelines). `seg_map_calculations.py --device` now defaults to auto-detect-and-refuse (never silent CPU); `--batch_size` defaults to VRAM-based auto-scaling. See DEPTH.md §5.2c for the full verification table (4 tests: real GPU / no-GPU-auto / no-GPU-explicit-cpu / no-GPU-explicit-cuda, all PASS via a monkeypatched `torch.cuda.is_available`).
+
 ### 5.4 NEAREST Interpolation for Class IDs
 
 When `SegJsonDataset` loads a saved seg PNG and resizes it, it uses `NEAREST` interpolation, not bilinear. This is critical:
@@ -417,6 +421,10 @@ During training `batch["seg"]` contains the colour map loaded from the saved PNG
 ### 5.7 Checkpoint Grid, val_steps/ckpt_steps, test.json
 
 Identical to the depth pipeline — see DEPTH.md §5.4–5.6. The seg trainer (`seg_training.py`) is a direct mirror of `train_depth.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
+
+### 5.7b Training Timing, Checkpoint Resume, and `training_params.txt` — see DEPTH.md §5.8–5.10
+
+Same execution-over-assertion caveats, same self-measurement recipe (swap `depth_training.py` for `seg_training.py`), same verified checkpoint-resume limitation (weights reload correctly; LR schedule/global_step restart from 0), same `training_params.txt` snapshot written to `outputs/train/seg/runs/.../training_params.txt` after auto-scaling. One seg-specific fact, measured not assumed: peak VRAM at `batch_size=4` was **identical to depth's measured value**, confirming `skip_encode=True` genuinely keeps the (much larger) SegFormer-b5 encoder out of the training forward pass; it isn't just architecturally true, it was checked with a real run.
 
 ### 5.8 SegFormer-b5 vs b0 — Why b0 is Wrong
 
