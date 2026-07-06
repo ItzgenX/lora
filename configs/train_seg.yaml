@@ -18,12 +18,10 @@ val_steps: 1000
 ckpt_steps: 1000
 
 prompt: null
-use_empty_prompt_eval: false
 
-n_samples: 1
 seed: 42
 val_batches: 4
-save_grid: true
+log_every_steps: 50   # mirror step/loss/lr into the run's .log file every N optimizer steps
 
 # Segmentation-specific monitoring knobs (resolved by seg_training.py via cfg.get()).
 # Set here as base defaults; the experiment yaml overrides with the real values.
@@ -34,7 +32,6 @@ grid_include_empty_prompt: false
 
 bf16: false
 ignore_check: false
-log_cond: false
 tag: ''
 local_files_only: true
 

@@ -1,4 +1,19 @@
-﻿import json
+﻿"""
+src/data/local.py
+-----------------
+Datasets and data modules for training.
+
+LAYOUT OF THIS FILE (two halves):
+  1. ORIGINAL CLASSES (ImageFolderDataset / ZipDataset / ImageDataModule):
+     the repo's original dataset classes, kept unmodified. They load only
+     (image, caption) — original training computes depth LIVE from the image,
+     so no depth field is needed. Used by the original train.py entrypoint.
+  2. OUR ADDITIONS (Depth*Dataset / Depth*DataModule): classes that ALSO
+     load a PRE-COMPUTED depth map from disk, so training never has to run the
+     DPT model. Used by depth_training.py via configs/data/local_depth.yaml.
+     (The segmentation twin lives in src/data/local_seg.py.)
+"""
+import json
 import os
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import transforms
@@ -8,8 +23,13 @@ import torch
 import numpy as np
 
 
+# ============================================================================ #
+#  ORIGINAL CLASSES (unmodified — used by the original train.py)               #
+# ============================================================================ #
 
 def sort_key(p: Path):
+    # Sort "2.jpg" before "10.jpg" (numeric order) when stems are numbers;
+    # fall back to plain string order for non-numeric names.
     try:
         return int(p.stem)
     except:
@@ -132,9 +152,9 @@ class DepthImageFolderDataset(Dataset):
 
     MOTIVATION:
         The original ImageFolderDataset only loads the RGB image.  During training
-        the depth estimator (DPT) then runs on every image every step â€” very slow.
+        the depth estimator (DPT) then runs on every image every step — very slow.
         This dataset loads both the image and a depth PNG that was pre-computed
-        once by precompute_depth.py.  Training therefore never needs to run DPT.
+        once by depth_map_calculations.py.  Training therefore never needs to run DPT.
 
     EXPECTED FILE STRUCTURE:
         image_directory/
@@ -142,7 +162,7 @@ class DepthImageFolderDataset(Dataset):
             dog.png
             house.jpeg
             ...
-        depth_directory/        <- created by precompute_depth.py
+        depth_directory/        <- created by depth_map_calculations.py
             cat.png             <- greyscale depth for cat.jpg
             dog.png
             house.png
@@ -193,7 +213,7 @@ class DepthImageFolderDataset(Dataset):
             key=sort_key,
         )
 
-        # Warn early if any depth maps are missing so the user runs precompute_depth.py
+        # Warn early if any depth maps are missing so the user runs depth_map_calculations.py
         missing = [
             p.name for p in self.image_paths
             if not (depth_directory / (p.stem + ".png")).exists()
@@ -231,11 +251,11 @@ class DepthImageFolderDataset(Dataset):
             image = self.image_transform(image)
 
         # ---- Depth map (normalised to [0, 1], 3-channel) --------------------
-        # The depth PNG was saved as greyscale by precompute_depth.py.
+        # The depth PNG was saved as greyscale by depth_map_calculations.py.
         # "L" mode = 8-bit single channel.  ToTensor converts to [1, H, W] float.
         depth = Image.open(depth_path).convert("L")
         depth = self.depth_transform(depth)              # [1, H, W] in [0, 1]
-        depth = depth.repeat(3, 1, 1)                    # [3, H, W] â€” replicate channels
+        depth = depth.repeat(3, 1, 1)                    # [3, H, W] — replicate channels
         # This matches the output format of DepthEstimator (midas.py) exactly.
 
         return {"jpg": image, "depth": depth, "caption": label}
@@ -361,8 +381,8 @@ class DepthJsonDataset(Dataset):
         ...
 
     Paths can be:
-      - Absolute  â†’ used as-is
-      - Relative  â†’ resolved relative to the project root first; if not found,
+      - Absolute  → used as-is
+      - Relative  → resolved relative to the project root first; if not found,
                     relative to the JSON file's directory.
 
     Each __getitem__ returns:
@@ -425,7 +445,7 @@ class DepthJsonDataset(Dataset):
             )
 
     def _resolve(self, p: str) -> Path:
-        """Resolve a path string: absolute â†’ as-is; relative â†’ try project_root, then json dir."""
+        """Resolve a path string: absolute → as-is; relative → try project_root, then json dir."""
         p = Path(p)
         if p.is_absolute():
             return p
@@ -453,7 +473,7 @@ class DepthJsonDataset(Dataset):
             image = self.image_transform(image)
 
         # ---- Depth map -------------------------------------------------------
-        # Saved as 8-bit grayscale by precompute_depth.py.
+        # Saved as 8-bit grayscale by depth_map_calculations.py.
         # ToTensor converts [0,255] -> [0,1], output is [1, H, W].
         # Replicated to 3 channels to match DepthEstimator's output format.
         # Fail loudly with a specific message if the manifest entry is malformed,
@@ -480,7 +500,7 @@ class DepthJsonDataModule:
     Pairs with DepthJsonDataset and exposes the standard
     train_dataloader() / val_dataloader() interface expected by depth_training.py.
 
-    CONFIG EXAMPLE (configs/data/local_depth_json.yaml):
+    CONFIG EXAMPLE (configs/data/local_depth.yaml):
         _target_: src.data.local.DepthJsonDataModule
         json_file: dataset.json         # path relative to project root
         val_json_file: null             # optional, falls back to train set
@@ -527,7 +547,7 @@ class DepthJsonDataModule:
                 project_root=_img_root,
             )
         else:
-            # No separate val set â†’ reuse training set (common for small datasets)
+            # No separate val set → reuse training set (common for small datasets)
             self.val_dataset = self.train_dataset
 
     def train_dataloader(self):

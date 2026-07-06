@@ -1,5 +1,3 @@
-from torchvision.transforms.v2 import Transform
-import torchvision.transforms.v2.functional as Fv2
 from PIL import Image, ImageFile, ImageStat
 
 # Tolerate minor JPEG defects (e.g. a missing/odd end-of-image marker) instead
@@ -164,18 +162,6 @@ class SquarePad:
         return max(colors, key=lambda entry: entry[0])[1]
 
 
-class TopCrop(Transform):
-    # use standard crop transform of v2
-    # but always crops from the top
-
-    def __init__(self, size):
-        super().__init__()
-        self.size = size
-
-    def _transform(self, inpt, params):
-        return Fv2.crop(inpt, 0, 0, self.size, self.size)
-
-
 # ============================================================================ #
 #  SEGMENTATION PIPELINE — shared preprocessing builder                        #
 # ============================================================================ #
@@ -183,12 +169,12 @@ class TopCrop(Transform):
 from torchvision import transforms as _tv   # local alias: avoids shadowing outer scope
 
 
-def build_seg_square_preprocess(size: int, resize_mode: str = "letterbox"):
+def build_seg_square_preprocess(size: int):
     """
     Build the ONE canonical RGB preprocessing pipeline for the SEGMENTATION pipeline.
 
     WHY THIS EXISTS (and why it belongs here, not in a seg-specific file):
-      Both calculate_segmentation_map.py (offline calc) and inference_seg.py (live
+      Both seg_map_calculations.py (offline calc) and seg_inference.py (live
       inference) must apply byte-for-byte identical preprocessing so the seg map the
       network sees at inference exactly matches what was saved for training. The only
       way to guarantee that is to import the SAME function in both places — this is it.
@@ -204,44 +190,31 @@ def build_seg_square_preprocess(size: int, resize_mode: str = "letterbox"):
       (asserted by SegmentationEncoder._predict_ids).
 
     Args:
-        size:        final square side in pixels (e.g. 512). Must match cfg.size
-                     and the size used when the offline seg PNGs were computed.
-        resize_mode: "letterbox" (default) — pads the shorter side to a square
-                       with a flat local-average fill BEFORE resizing to (size, size).
-                       Keeps the full driving-scene frame, no content cropped,
-                       no aspect distortion (references.md §5).
-                     "stretch" — resizes straight to (size, size), distorting
-                       aspect ratio but also producing a correct square.
-                     "crop" is EXCLUDED for this project (would cut driving-scene
-                       frame edges — ruled out in references.md §5).
+        size: final square side in pixels (e.g. 512). Must match cfg.size
+              and the size used when the offline seg PNGs were computed.
 
-    Correctness note: both modes produce a (size, size) square PIL image before
-    the ToTensor step, so SegmentationEncoder always receives exactly (size, size)
+    RESIZE STRATEGY IS FIXED: letterbox — SquarePad pads the shorter side to a
+    square with a flat local-mean fill, THEN Resize is a uniform scale (no
+    distortion). This is a FINAL user decision (2026-07-06, references.md §9):
+      • "crop" was excluded from the start (cuts driving-scene frame edges).
+      • "stretch" (direct Resize to square) was evaluated with real side-by-side
+        encoder previews (outputs/viz/resize_mode_preview.png) and REJECTED —
+        the aspect distortion shifted segmentation classes (sky read as
+        "building" in the test scene), and the former resize_mode toggle was
+        REMOVED so training and inference can never be run in different modes
+        by accident. Do not re-add a mode switch without a new decision.
+
+    Correctness note: the padded image is a (size, size) square before the
+    ToTensor step, so SegmentationEncoder always receives exactly (size, size)
     input and never triggers the kind of internal forced-crop that MiDaS does.
     """
-    # Tail shared by both modes: PIL [0,255] -> tensor [0,1] -> [-1,1].
-    # mean=std=0.5 maps [0,1] linearly to [-1,1] (the SD1.5 VAE / encoder range).
-    seg_to_tensor_tail = [
-        _tv.ToTensor(),                                    # [0,255] -> [0,1]
-        _tv.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # [0,1] -> [-1,1]
-    ]
-
-    if resize_mode == "letterbox":
-        # SquarePad pads the shorter side (flat local-average fill) to make
-        # the image square; THEN Resize is a uniform scale (no distortion)
-        # because the input is already square after padding.
-        seg_head = [SquarePad(), _tv.Resize((size, size))]
-    elif resize_mode == "stretch":
-        # Direct Resize to a square — keeps all content but distorts aspect ratio.
-        seg_head = [_tv.Resize((size, size))]
-    else:
-        # Fail loudly: a silent fallback here would corrupt train/inference parity.
-        raise ValueError(
-            f"resize_mode must be 'letterbox' or 'stretch' (got {resize_mode!r}). "
-            f"'crop' is excluded — it cuts driving-scene frame edges (references.md §5)."
-        )
-
-    return _tv.Compose(seg_head + seg_to_tensor_tail)
+    return _tv.Compose([
+        SquarePad(),                    # pad shorter side -> square (flat local-mean fill)
+        _tv.Resize((size, size)),       # uniform scale — input already square, no distortion
+        _tv.ToTensor(),                 # PIL [0,255] -> tensor [0,1]
+        # mean=std=0.5 maps [0,1] linearly to [-1,1] (the SD1.5 VAE / encoder range).
+        _tv.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+    ])
 
 
 if __name__ == "__main__":

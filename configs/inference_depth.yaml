@@ -8,7 +8,7 @@
 # USAGE — from a JSON manifest (recommended):
 #   python depth_inference.py \
 #       ckpt_path=outputs/train/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-3000 \
-#       inference.json_file=dataset.json \
+#       inference.json_file=data/depth_training/test.jsonl \
 #       inference.output_dir=results
 #
 # USAGE — single image:
@@ -91,7 +91,7 @@ lora:
 inference:
   # Input — choose ONE:
   images:    []         # list of image paths, e.g. ["data/cat.jpg", "data/dog.jpg"]
-  json_file: null       # OR path to JSON manifest with "image" and "prompt" per entry
+  json_file: null       # OR path to JSONL manifest (raw_image_path + prompt per entry)
 
   prompts:   []         # prompts for 'images' list mode; leave empty to use JSON prompts
 

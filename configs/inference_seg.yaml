@@ -102,9 +102,9 @@ inference:
   output_dir: outputs/inference/seg/results     # relative to repo root (resolved in seg_inference.py)
   save_generated_only: false   # true → save only predicted image, mirroring folder structure
 
-  # Preprocessing:
-  resize_mode: letterbox       # letterbox (default) | stretch — squaring before encoder
-                               # Must match the mode used in seg_map_calculations.py
+  # Preprocessing: letterbox squaring is FIXED project-wide (stretch option
+  # removed by user decision 2026-07-06 — see DEPTH.md §5.14a); there is
+  # deliberately no knob here, so inference can never disagree with training.
 
   # Generation:
   n_samples:           1    # number of generated images per input image

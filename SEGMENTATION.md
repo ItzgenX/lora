@@ -1,7 +1,56 @@
-# Segmentation Pipeline — Zero to Hero Guide
+﻿# Segmentation Pipeline — Zero to Hero Guide
 
 **Pipeline**: CTRLorALTer segmentation-conditioning arm (ECCV 2024, arXiv:2405.07913)  
 **What it does**: Fine-tunes LoRA blocks inside a Stable Diffusion 1.5 UNet so the model generates images that respect a user-supplied semantic segmentation map. The seg signal (19-class Cityscapes colour palette) is injected via the same mapper-network architecture used by the depth pipeline, keeping the base model frozen.
+
+---
+
+## 0 · Seg Concepts From Zero — read DEPTH.md §0 first (shared foundations), then this
+
+DEPTH.md §0 explains diffusion, the VAE, the UNet loss, CFG, LoRA, FiLM, letterbox, and the training numbers — all of it applies here unchanged. **DEPTH.md §0.0 is the plain-words glossary for every technical term used in BOTH docs** (tensor, logits, argmax, JSONL, Hydra, VRAM, buffer, id2label, SSOT, …) — if any word in this file feels new, it's defined there. This section covers only what is *different* about segmentation.
+
+### 0.1 What semantic segmentation is
+
+A segmentation model answers, for **every pixel**, "what kind of thing is this?" — not "how far away" (that's depth, a number per pixel) but "which category" (a label per pixel). Our model is **SegFormer-b5** trained on **Cityscapes**, a driving-scene dataset with **19 classes**: road, sidewalk, building, wall, fence, pole, traffic light, traffic sign, vegetation, terrain, sky, person, rider, car, truck, bus, train, motorcycle, bicycle (IDs 0–18, in exactly this order — verified against the model's own `id2label`).
+
+### 0.2 Why the conditioning is a COLOUR map, not a grayscale ID ramp
+
+Class IDs are categorical — class 13 (car) is not "one more than" class 12 (rider). If we fed the raw IDs as a grayscale image (id/18), the conv network would treat car≈rider as *numerically similar*, inventing an ordering that doesn't exist. Instead each class gets a fixed, well-separated RGB colour (`SEG_CITYSCAPES_PALETTE` in `src/encoders/seg_encoder.py` — the single source of truth): road is always purple, person always red, sky always steel-blue. Same approach as ControlNet's seg conditioning.
+
+### 0.3 Why we SAVE raw IDs but TRAIN on colours
+
+On disk the maps are 8-bit grayscale PNGs holding raw IDs 0–18 (they look almost black in a viewer — that's correct!). The dataset colourises them at load time (`seg_colorize_ids`). Why not save colour PNGs directly? IDs are canonical and tiny, can be re-coloured without re-running the 82M-param model, and are hand-editable. The palette is applied by ONE shared function everywhere, so a class can never get two different colours.
+
+### 0.4 Why NEAREST interpolation is a hard rule
+
+Resizing an ID map with bilinear interpolation averages neighbouring pixels: between a road pixel (0) and a car pixel (13) it would invent value 6 — "traffic light", a class that isn't there. NEAREST copies the closest pixel instead, so only real labels survive. This is enforced in `src/data/local_seg.py` (`Image.NEAREST`) and is a silent-corruption bug if it ever regresses.
+
+### 0.5 The parity trick: one brain, two mouths
+
+`SegmentationEncoder` has two entry points sharing the same internals (`_predict_ids()`): `label_ids()` (returns raw IDs — used ONLY by the offline calc script) and `forward()` (returns the colour map — what live inference calls). Because both run byte-for-byte the same prediction code and the same palette, the map saved for training and the map computed live at inference are guaranteed identical — verified on real images: palette-colourised IDs vs `forward()` output differ by exactly 0.0.
+
+### 0.6 b5, not b0
+
+SegFormer comes in sizes b0 (3.7M params) to b5 (82M). b5 is locked in because conditioning quality IS the point of this pipeline: b0 loses thin structures (poles, pedestrians, traffic lights) that matter most in driving scenes. The cost is only in the offline calc step and at inference — during training the encoder never runs at all (`skip_encode=True`), which is why depth and seg training measured *identical* VRAM.
+
+### 0.7 Segmentation is NOT in the paper
+
+CTRLorALTer's paper conditions on depth, HED edges, and human pose — never segmentation. This whole pipeline is our extension, built to mirror the depth pipeline exactly (same LoRA rank, mapper, injection points, configs) so the two can be compared fairly. That's also why "does it match the paper?" is answerable for depth but meaningless for seg — seg's correctness standard is the verification suite in §9 of the audit (encoder-slot contract, parity, class-order check, coherence on real images).
+
+### 0.8 The domain-mismatch caveat (know this before judging outputs)
+
+SegFormer-b5-Cityscapes knows *driving scenes*. On the local dev dataset (lifestyle/indoor photos) it produces coherent but oddly-labeled regions — walls become "building", a laptop desk becomes "road"-ish blobs. That is NOT a bug; the model is doing its job on out-of-domain input. On the real driving dataset the labels are semantically right (see AM.jpeg's map: road/buildings/sky exactly where they should be).
+
+### 0.9 Self-test — seg edition
+
+1. Why do the saved seg PNGs look black in an image viewer? *(0.3: they hold class IDs 0–18, not colours — 18/255 is nearly black.)*
+2. Why colour palette instead of feeding IDs directly? *(0.2: IDs are categorical; a ramp fakes an ordering; colours give each class a distinct identity.)*
+3. What breaks if someone changes NEAREST to bilinear? *(0.4: fabricated in-between classes at every boundary — silent corruption.)*
+4. How is train/inference parity guaranteed for seg? *(0.5: label_ids() and forward() share _predict_ids() + one shared palette function; verified 0.0 diff.)*
+5. Why doesn't the heavy b5 encoder slow training? *(0.6: skip_encode=True — training loads pre-saved PNGs; the encoder runs only offline and at inference.)*
+6. Why can't MiDaS be reused as the seg encoder? *(§4.1: regression vs classification — it has no class information at all.)*
+7. Why is "does seg match the paper?" the wrong question? *(0.7: seg isn't in the paper; it's our extension, verified by execution instead.)*
+8. Why did indoor photos give weird classes like "fence" on furniture? *(0.8: Cityscapes domain mismatch — expected, not a bug.)*
 
 ---
 
@@ -46,13 +95,13 @@ RAW IMAGE (arbitrary aspect ratio)
         v
   [Stage C -- seg_map_calculations.py]  (run ONCE offline)
         |
-        +-- build_seg_square_preprocess(size=512, resize_mode="letterbox")
+        +-- build_seg_square_preprocess(size=512)   # letterbox squaring built in (fixed)
         |     (same factory used by seg_inference.py -- parity guaranteed)
         +-- SegmentationEncoder.label_ids(tensor)
         |     (SegFormer-b5 prediction --> raw class IDs [0..18])
         +-- Save as 8-bit grayscale PNG (mode "L", values 0..18)
-        |       --> data/raw_seg/.../img.png
-        +-- Write data/seg_training/{train,val,test}.json
+        |       --> <dataset>_seg_map/000417/000417_seg_map.png  (sibling folder)
+        +-- Write data/seg_training/{train,val,test}.jsonl
                (keys: raw_image_path, seg_path, prompt)
 
         |
@@ -75,7 +124,7 @@ RAW IMAGE (arbitrary aspect ratio)
         v
   [Stage D -- seg_inference.py]
         |
-        +-- build_seg_square_preprocess(size=512, resize_mode="letterbox")
+        +-- build_seg_square_preprocess(size=512)   # letterbox squaring built in (fixed)
         |   (SAME factory function as Stage C -- parity by construction)
         +-- LIVE encoder call: SegmentationEncoder.forward(image) --> colour map
         |   (skip_encode=False: SegFormer runs in model.sample() path)
@@ -94,7 +143,7 @@ Key behaviours:
 
 - **Locked model (b5 only)**: SegFormer-b5 was chosen over b0–b4 for best boundary precision on driving-scene classes (pedestrians, vehicles, traffic lights). The model is frozen (`requires_grad=False`). b0 gives worse boundary accuracy and must not be used — see the bug note in §7.
 - **Manual ImageNet normalisation**: The encoder applies ImageNet mean/std normalisation manually in `_predict_ids()` rather than using `SegformerImageProcessor`. This is intentional: the Hugging Face image processor resizes internally to its own resolution, breaking compatibility with our fixed preprocessing chain.
-- **19 Cityscapes classes**: IDs 0–18. Any pixel with an unknown class gets ID 0 (road) — no out-of-range values.
+- **19 Cityscapes classes**: IDs 0–18. Out-of-range values are impossible by construction — the ID is an argmax over exactly 19 class scores, so every pixel always gets one of the 19 real classes (there is no "unknown" class; see §0.8 for what happens on out-of-domain images).
 - **Output of `label_ids()`**: raw class IDs `[B, H, W]` int64 — used ONLY by the offline calc script.
 - **Output of `forward()`**: colour map `[B, 3, H, W]` float `[0, 1]` — used at live inference.
 - **Parity guarantee**: both `label_ids()` and `forward()` share the same `_predict_ids()` internals. Only the final step differs (IDs vs colour lookup). Running `label_ids()` then `seg_colorize_ids()` on the saved PNG produces bit-identical output to calling `forward()` live.
@@ -255,7 +304,7 @@ Both the offline calc script (via `SegJsonDataset`) and the live encoder (`Segme
 
 ### 5.3 Image Discovery and Path Control — how the pipeline finds your images
 
-Same mechanics as DEPTH.md §5.2 — read that for the complete explanation. This section states the seg-specific values and repeats the critical `--image_root` rule.
+Same mechanics as DEPTH.md §5.2 — read that for the complete explanation. This section states the seg-specific values (sibling folder `_seg_map`, raw-ID PNGs).
 
 #### The JSONL file types and their key names
 
@@ -265,12 +314,12 @@ data/train.jsonl                          ← source split
    ▲ key name set by --image_path (default "source", commonly "target")
 
 data/seg_training/train.jsonl             ← seg training manifest (output of Stage C)
-  {"raw_image_path": "data/raw/000417/raw_image.jpg",
-   "seg_path":       "data/raw_seg/000417/raw_image.png",
+  {"raw_image_path": ".../custome_dataset/000417/raw_image.jpg",
+   "seg_path":       ".../custome_dataset_seg_map/000417/000417_seg_map.png",
    "prompt": "..."}
 ```
 
-The seg-map is always `.png` (lossless, preserves integer class-ID values). Other files in the same folder — including other `.jpg` and `.png` files — are completely ignored; the script processes only paths listed in the JSONL, never scans directories.
+The seg-map is always `.png` (lossless, preserves integer class-ID values). The seg map now lives in a **sibling folder** named `_seg_map`, mirroring the dataset structure (see below).
 
 #### `--image_path` — which key holds the image path
 
@@ -278,49 +327,42 @@ The seg-map is always `.png` (lossless, preserves integer class-ID values). Othe
 python seg_map_calculations.py --data_dir data/ --image_path target
 ```
 
-Pass whatever key your JSONL uses. Default is `"source"`.
+Pass whatever key your JSONL uses. Default is `"source"`; your dataset uses `"target"`.
 
-#### `--image_root` — REQUIRED when images are outside the repo
+#### Where the seg maps are saved — a SIBLING folder, derived automatically (2026-07-07)
 
-`--image_root` serves two purposes: (1) resolving relative paths to absolute, and (2) computing the correct nested output path under `data/raw_seg/`. **Without it, all seg maps write to the same file and overwrite each other.**
+Exactly like depth (DEPTH.md §5.2). `--data_dir` looks at the image paths in your JSONLs, finds the folder common to all of them (the dataset root, e.g. `.../custome_dataset`), and saves each seg map into a **sibling folder** next to it — `.../custome_dataset_seg_map/` — mirroring the structure, named after the image's **folder**:
 
 ```
-# Without --image_root — ALL images → data/raw_seg/raw_image.png  ← COLLISION
-# With --image_root /workstation:
-/workstation/dataset/sceneA/lvl1/raw_image.jpg  → data/raw_seg/dataset/sceneA/lvl1/raw_image.png
-/workstation/dataset/sceneB/lvl1/raw_image.jpg  → data/raw_seg/dataset/sceneB/lvl1/raw_image.png
-/workstation/dataset/run_001/cam_left/raw_image.jpg → data/raw_seg/dataset/run_001/cam_left/raw_image.png
+.../custome_dataset/000417/raw_image.jpg  →  .../custome_dataset_seg_map/000417/000417_seg_map.png
 ```
 
-Set `--image_root` to the COMMON ROOT of all image paths in your JSONL. Folder depth can be arbitrary.
+This is IDENTICAL to `--dataset_dir` scan mode (§5.3b) — the two were unified on 2026-07-07 and proven to produce byte-identical manifest entries. The old design saved to `data/raw_seg/` named after the image filename, which (every image being `raw_image.jpg`) overwrote all maps into one file. Two guards now prevent that: folder-based naming, and a **collision guard** that aborts before any GPU work if two images would share a PNG. `--image_root` still exists but is only for resolving **relative** JSONL paths; your paths are absolute, so it is not needed.
 
 #### The full seg discovery → output flow (VERIFIED by execution)
 
 ```
 data/train.jsonl                               ← --data_dir
-  {"target": "data/raw/000417/raw_image.jpg", "prompt": "..."}
+  {"target": ".../custome_dataset/000417/raw_image.jpg", "prompt": "..."}
        │
        │ --image_path target
        ▼
-  _get_image_path(entry, "target")
-       │  → "data/raw/000417/raw_image.jpg"
+  _get_image_path(entry, "target")   → ".../custome_dataset/000417/raw_image.jpg"  (absolute)
        ▼
-  image_root / raw_str    (repo_root / raw_str when --image_root not set)
-       │  → /repo/data/raw/000417/raw_image.jpg
-       │
-       │ other files in same folder (other.jpg, mask.png, etc.) NOT touched
+  dataset root = folder common to ALL images  →  .../custome_dataset
+  sibling      = dataset root + "_seg_map"     →  .../custome_dataset_seg_map
        ▼
   SegmentationEncoder.label_ids(image)   → class-ID map [H, W] integer
-       │
        ▼
-  seg_colorize_ids(ids, palette) → RGB colour map [3, 512, 512]   saved as PNG
-       │  → data/raw_seg/000417/raw_image.png   (nested structure preserved)
+  saved AS RAW IDs — 8-bit grayscale PNG, values 0..18 (colour is applied
+       │  later, at training-data LOAD time, by seg_colorize_ids — §0.3)
+       │  → .../custome_dataset_seg_map/000417/000417_seg_map.png
        ▼
   data/seg_training/train.jsonl  (output — VERIFIED mapping)
   {
-    "raw_image_path": "data/raw/000417/raw_image.jpg",   ← original path, unchanged
-    "seg_path":       "data/raw_seg/000417/raw_image.png",
-    "prompt":         "..."                               ← verbatim
+    "raw_image_path": ".../custome_dataset/000417/raw_image.jpg",              ← absolute, unchanged
+    "seg_path":       ".../custome_dataset_seg_map/000417/000417_seg_map.png",
+    "prompt":         "..."                                                    ← verbatim
   }
 ```
 
@@ -328,16 +370,17 @@ data/train.jsonl                               ← --data_dir
 
 | Situation | Command |
 |---|---|
-| Images inside repo, JSONL key = `"source"` | `python seg_map_calculations.py --data_dir data/` |
-| Images inside repo, JSONL key = `"target"` | `... --image_path target` |
-| Images outside repo | `... --image_path target --image_root /path/to/common/root` |
-| Quick smoke-test | `... --dry_run_n 5` |
+| Your dataset (key = `"target"`, absolute paths) | `python seg_map_calculations.py --data_dir data/ --image_path target` |
+| Same, but scan the folder for images | `... --dataset_dir /path/to/custome_dataset --data_dir data/ --image_path target` |
+| JSONL key = `"source"` (default) | `python seg_map_calculations.py --data_dir data/` |
+| Relative image paths in JSONL | add `--image_root /path/to/common/root` |
+| Quick smoke-test | add `--dry_run_n 5` |
 
-**Never omit `--image_root` when images are outside the repo.**
+`--data_dir` and `--dataset_dir` both save to the sibling folder and both refuse to overwrite.
 
 ### 5.3b Dataset-scan mode (`--dataset_dir`) — save maps in a SIBLING, mirrored tree [VERIFIED]
 
-Identical to DEPTH.md §5.2b, with `_seg_map` instead of `_depth_map`. For a dataset outside the repo, the script **scans** for `raw_image.jpg` and saves each seg map into a **new sibling folder** next to the dataset root, mirroring its internal structure. **The source dataset folder is never written into.**
+Same saving behavior as `--data_dir` above (sibling `_seg_map` folder, mirrored, folder-named maps), with ONE difference: instead of trusting the JSONL paths to *find* images, the script **scans `--dataset_dir` recursively** for `raw_image.jpg`. Use it when you want disk to decide which images exist; use plain `--data_dir` when the JSONLs already list them. Either way the maps land in the same place, and `--data_dir` is still required (it supplies each image's prompt + split).
 
 **Command:**
 ```bash
@@ -399,7 +442,7 @@ The depth pipeline triplicates its preprocessing across three files. The seg pip
 
 ```python
 # src/data/transforms.py
-def build_seg_square_preprocess(size, resize_mode="letterbox"):
+def build_seg_square_preprocess(size):   # letterbox built in — stretch removed 2026-07-06
     ...
 ```
 
@@ -420,11 +463,19 @@ During training `batch["seg"]` contains the colour map loaded from the saved PNG
 
 ### 5.7 Checkpoint Grid, val_steps/ckpt_steps, test.json
 
-Identical to the depth pipeline — see DEPTH.md §5.4–5.6. The seg trainer (`seg_training.py`) is a direct mirror of `train_depth.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
+Identical to the depth pipeline — see DEPTH.md §5.4–5.6. The seg trainer (`seg_training.py`) is a direct mirror of `depth_training.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
 
 ### 5.7b Training Timing, Checkpoint Resume, and `training_params.txt` — see DEPTH.md §5.8–5.10
 
-Same execution-over-assertion caveats, same self-measurement recipe (swap `depth_training.py` for `seg_training.py`), same verified checkpoint-resume limitation (weights reload correctly; LR schedule/global_step restart from 0), same `training_params.txt` snapshot written to `outputs/train/seg/runs/.../training_params.txt` after auto-scaling. One seg-specific fact, measured not assumed: peak VRAM at `batch_size=4` was **identical to depth's measured value**, confirming `skip_encode=True` genuinely keeps the (much larger) SegFormer-b5 encoder out of the training forward pass; it isn't just architecturally true, it was checked with a real run.
+Same execution-over-assertion caveats, same self-measurement recipe (swap `depth_training.py` for `seg_training.py`), same verified checkpoint-resume limitation (weights reload correctly; LR schedule/global_step restart from 0), same `training_params.txt` snapshot written to `outputs/train/seg/runs/.../training_params.txt`. One seg-specific fact, measured not assumed: peak VRAM at `batch_size=4` was **identical to depth's measured value**, confirming `skip_encode=True` genuinely keeps the (much larger) SegFormer-b5 encoder out of the training forward pass; it isn't just architecturally true, it was checked with a real run.
+
+### 5.7c 2026-07-05 fixes — see DEPTH.md §5.12–5.14 (applies to seg identically)
+
+Three updates shared with depth, executed and verified on the seg side too:
+1. **Manifest collision fixed + maps regenerated** (DEPTH.md §5.12): the seg manifests had the same all-rows-point-to-one-PNG bug; 913/913 seg maps were regenerated with the fixed flat-fill SquarePad, manifests rebuilt (639/137/137, verifier PASS), regenerated PNG IDs confirmed within 0..18 on real files. Since 2026-07-07 both `--data_dir` and `--dataset_dir` save collision-free maps to the sibling `_seg_map` folder — either command is safe for this dataset.
+2. **`val/psnr_fixed` / `val/ssim_fixed` + `log_every_steps`** (DEPTH.md §5.13): identical implementation in `seg_training.py` (same `compute_psnr_ssim`, same fixed-scene protocol) — this is what makes the final depth-vs-seg comparison objective. Dead YAML keys (`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond`) removed from the seg configs too.
+3. **Batch-shape kernel jitter** (DEPTH.md §5.14): seg's measured form is 2–5 argmax flips per 262k pixels between saved PNGs and live single-image output (boundary ties). Acceptance: ID-mismatch fraction ≤ 1e-4; palette-colourisation vs `forward()` must stay exactly 0.0 (it does — shared `_predict_ids` + shared palette).
+4. **resize_mode: FINAL — letterbox only, stretch REMOVED** (2026-07-06, DEPTH.md §5.14a): the user evaluated stretch with real encoder previews (`outputs/viz/resize_mode_preview.png`) and rejected it (aspect distortion shifted seg classes — sky read as "building"). The former seg-side switch (`--resize_mode` flag, `inference.resize_mode` key, `build_seg_square_preprocess`'s `resize_mode` parameter) was deleted from the code so train and inference can never disagree by accident.
 
 ### 5.8 SegFormer-b5 vs b0 — Why b0 is Wrong
 
@@ -442,7 +493,7 @@ Two old experiment configs (`train_seg_12gb.yaml`, `train_seg_cluster.yaml`) inc
 
 ```yaml
 size: 512
-learning_rate: 2.0e-4
+learning_rate: 1.0e-4             # IDENTICAL to depth — required for a valid comparison
 lr_warmup_steps: 500
 lr_scheduler: cosine
 epochs: 5
@@ -450,7 +501,7 @@ val_steps: 500
 ckpt_steps: 1000
 val_batches: 64
 n_grid_images: 10
-grid_include_empty_prompt: true   # seg includes empty-prompt panel (unlike depth)
+grid_include_empty_prompt: false  # OFF, same as depth (true adds a 4th RAW SEG GEN panel)
 bf16: true
 gradient_checkpointing: true
 gradient_accumulation_steps: 4
@@ -475,9 +526,9 @@ size: ${size}
 local_files_only: ${local_files_only}
 ```
 
-### Dead keys (same as depth pipeline)
+### Dead keys — REMOVED (2026-07-05, same as depth pipeline)
 
-`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond` — present in base config, not read by `seg_training.py`.
+`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond` were deleted from `configs/train_seg.yaml` + `configs/experiment/train_seg.yaml` (they were read by nothing in the seg training path). `log_every_steps: 50` added instead (see DEPTH.md §5.13).
 
 ### Broken configs (deleted)
 
@@ -501,8 +552,7 @@ checkpoints/local_models/
 **Model download note**: The b5 model is NOT bundled in the repo. On first run with `local_files_only: false` it auto-downloads from Hugging Face to the HF cache (`~/.cache/huggingface/`). To make it available offline, copy the HF cache to `checkpoints/local_models/segformer-b5-cityscapes/` and set `local_files_only: true`.
 
 Activate the conda environment before any Python command:
-```powershell
-. "D:\MyWorkplace\installedSW\miniforge3\shell\condabin\conda-hook.ps1"
+```bash
 conda activate loradapter
 ```
 
@@ -512,15 +562,15 @@ Dry run on 1 image first:
 ```powershell
 python seg_map_calculations.py --data_dir data/ --dry_run_n 1 --local_files_only False
 ```
-Success: no errors; seg PNG written to `data/raw_seg/`; class IDs in `[0, 18]`.
+Success: no errors; seg PNG written to the sibling `<dataset>_seg_map/` folder; class IDs in `[0, 18]`.
 
 Full run (after b5 model is cached):
 ```powershell
-python seg_map_calculations.py --data_dir data/
+python seg_map_calculations.py --data_dir data/ --image_path target
 ```
 Success:
-- `data/raw_seg/` populated (one 8-bit PNG per image)
-- `data/seg_training/train.jsonl`, `val.json`, `test.json` written
+- `<dataset>_seg_map/` populated (one 8-bit PNG per image, mirrored structure)
+- `data/seg_training/train.jsonl`, `val.jsonl`, `test.jsonl` written
 - Verification output shows `0 failures`
 - Dataset sizes: 639 train / 137 val / 137 test
 
@@ -548,7 +598,7 @@ Per-checkpoint log pattern (every 1000 steps):
 TensorBoard: `tensorboard --logdir outputs/train/seg/runs/`
 
 Expected tags (same structure as depth, by design):
-- Scalars: `train/loss`, `train/lr`, `val/loss`
+- Scalars: `train/loss`, `train/lr`, `train/grad_norm`, `train/epoch`, `val/loss`, `val/psnr_fixed`, `val/ssim_fixed`
 - Images: `val/sample_00` … `val/sample_09`
 - Tensors: `val/prompts/text_summary`
 
@@ -556,13 +606,20 @@ The tfevents hostname field will be `seg` (from `cfg.tag = "seg"`), not the mach
 
 ### Stage D — Inference
 
-```powershell
+```bash
+# single image + prompt:
 python seg_inference.py \
   ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \
-  inference.input_dir=data/raw
+  "inference.images=[/path/to/raw_image.jpg]" \
+  "inference.prompts=['your prompt here']"
+
+# or a whole manifest:
+python seg_inference.py \
+  ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+  inference.json_file=data/seg_training/test.jsonl
 ```
 
-Success: 4-panel JPG grids written to `outputs/inference/seg/`.
+Success: 4-panel JPG grids written to `outputs/inference/seg/results/`.
 
 ---
 
@@ -570,7 +627,7 @@ Success: 4-panel JPG grids written to `outputs/inference/seg/`.
 
 1. **b5 model now in `checkpoints/local_models/segformer-b5-cityscapes/`**: Copied from HF cache on 2026-06-30. `local_files_only: true` is safe. If re-cloning to a new machine, copy the three files (`config.json`, `preprocessor_config.json`, `pytorch_model.bin`) from the HF cache (`~/.cache/huggingface/hub/models--nvidia--segformer-b5-finetuned-cityscapes-1024-1024/snapshots/<latest>/`) to `checkpoints/local_models/segformer-b5-cityscapes/`.
 
-2. **`train_seg_12gb.yaml` and `train_seg_cluster.yaml` are stale and buggy**: Both reference b0 and have wrong JSON paths. Unlike the equivalent depth configs, they have not been deleted. Do not use them. The correct config is `configs/experiment/train_seg.yaml`.
+2. **`train_seg_12gb.yaml` and `train_seg_cluster.yaml` — DELETED** (2026-06-30, verified gone from `configs/experiment/`): they referenced b0 and had wrong JSON paths. The one and only seg experiment config is `configs/experiment/train_seg.yaml`.
 
 3. **`max_train_steps` does not stop training**: Same limitation as the depth pipeline — see DEPTH.md §8, item 1.
 
@@ -654,11 +711,12 @@ python seg_map_calculations.py --data_dir data/ [flags]
 | `--model` | `checkpoints/local_models/segformer-b5-cityscapes` | Local path to SegFormer-b5. **Locked — do not change to b0 or any other variant.** See §4.1 for why b5 is non-negotiable. | Only if you moved the model files. |
 | `--local_files_only` | `True` | Offline-only loading from the local model path. | Keep `True` now that b5 is in `checkpoints/local_models/`. |
 | `--device` | `cuda` if available | `cuda` or `cpu`. | `cpu` is very slow for SegFormer-b5 (~10x slower). |
-| `--resize_mode` | `letterbox` | How to make the image square before SegFormer. `letterbox` = edge-replication padding (locked default). `stretch` = squash to square (silently distorts geometry). **Never change this.** See DEPTH.md §5.1 for the full argument. | Do not change. |
+| *(removed)* `--resize_mode` | — | This flag no longer exists (2026-07-06): letterbox squaring (flat local-mean fill, DEPTH.md §5.1) is built into `build_seg_square_preprocess()` after the stretch option was evaluated and rejected (DEPTH.md §5.14a). There is deliberately no knob to get preprocessing out of sync. | — |
 | `--no_skip` | off | Recompute seg PNGs even if they already exist. | Add if you changed `--model` or `--size` and need to regenerate. |
-| `--raw_dir` | `<data_dir>/raw` | Root of raw image tree. | Only if images are not under `<data_dir>/raw/`. |
-| `--seg_dir` | `<data_dir>/raw_seg` | Where seg-ID PNGs are saved. | Only to redirect output. |
-| `--output_dir` | `<data_dir>/seg_training` | Where the output `train.jsonl`, `val.jsonl`, `test.jsonl` manifests are written. | Only to redirect manifest location. |
+| `--image_path` | `source` | JSONL key holding the image path. Your dataset uses `target`. | Always set `--image_path target`. |
+| `--dataset_dir` | *(none)* | Optional: scan this folder for `raw_image.jpg` instead of trusting JSONL paths. Saves to the same sibling folder either way. | Add if you want disk (not the JSONL) to decide which images exist. |
+| `--image_root` | *(none)* | Base prepended to **relative** JSONL image paths. Your paths are absolute, so it is not needed. | Only if your JSONL stores relative paths. |
+| `--output_dir` | `<data_dir>/seg_training` | Where the output manifests are written. (The seg PNGs always go to the sibling `<dataset>_seg_map/` folder, derived automatically.) | Only to redirect manifest location. |
 
 ---
 
@@ -722,7 +780,7 @@ python seg_inference.py \
 | `inference.prompts` | `[]` | Prompts matching `inference.images`. | Required when using `inference.images`. |
 | `inference.output_dir` | `outputs/inference/seg/results` | Where generated images are saved. Resolved from repo root. | Change per experiment. |
 | `inference.save_generated_only` | `false` | `true` = save only the predicted image (no 4-panel grid). | Set `true` for clean batch evaluation. |
-| `inference.resize_mode` | `letterbox` | Squaring method before SegFormer. **Must match `--resize_mode` used in Stage C (default: letterbox).** Changing this breaks train/inference parity. | Do not change. |
+| *(removed)* `inference.resize_mode` | — | Key deleted 2026-07-06: letterbox is built into the shared preprocessing factory, so inference physically cannot use a different squaring than Stage C. | — |
 | `inference.n_samples` | `1` | Images generated per input. | `2`–`4` for diversity. |
 | `inference.num_inference_steps` | `50` | Diffusion denoising steps. | `20` preview, `50` quality, `80`+ max. |
 | `inference.guidance_scale` | `7.5` | CFG scale. Higher = more prompt-driven. | `3`–`5` creative, `7.5` standard, `12`+ tight. |
@@ -734,7 +792,7 @@ python seg_inference.py \
 
 #### Smoke test (verify pipeline works, ~5 minutes)
 ```powershell
-python seg_map_calculations.py --data_dir data/ --dry_run_n 3
+python seg_map_calculations.py --data_dir data/ --image_path target --dry_run_n 3
 
 python seg_training.py experiment=train_seg `
   epochs=1 val_steps=10 ckpt_steps=20 val_batches=4 n_grid_images=2 `
@@ -789,3 +847,21 @@ python training_report.py
 python training_report.py --markdown   # GitHub-flavoured Markdown
 ```
 
+#### Why depth absorbs the letterbox band gracefully
+```Depth is a continuous number per pixel (0.0…1.0, "how far"). When MiDaS sees the flat pad band, it outputs some smooth, unremarkable value — you saw this in the band check: the depth band is a soft gradient with no structure. A flat band in, a bland smooth region out. The conditioning tells the model something vague and weak about that zone — "roughly uniform distance, nothing detailed" — which is close to the truth ("this area is filler").
+
+Why segmentation cannot mimic that
+Segmentation is categorical: the encoder's final step is an argmax over exactly 19 Cityscapes classes. There is no "padding", "void", or "unknown" class in its vocabulary — every single pixel must be declared road, building, sky, person… one of the 19 real things. So when SegFormer sees our flat brown band, it's forced to pick its least-bad guess — you saw it label the band "building" in the examples. The encoder is architecturally incapable of saying "this is nothing."
+
+That's the asymmetry: depth's band is a weak, honest-ish signal ("smooth region"), while seg's band is a confident false statement ("there is a building spanning the full width at the top of every image"). Categorical labels are inherently strong signals — there's no way to whisper in a language that only has 19 loud words.
+
+Why this is contained, not broken
+Two things keep it from being a real problem in practice:
+
+The lie is perfectly consistent. The band gets the same deterministic label at training and at inference (same flat fill → same argmax), so the model just learns "band zone = render the band filler" as a stable rule. It never contaminates the real content region, and generated pad zones can be cropped off afterward using last_padding_fracs (stored exactly for this).
+It's confined to a known, fixed region — top/bottom ~19% whose position is computable from the pad fractions, never overlapping actual scene content.
+If it ever needs fixing, two options exist (neither implemented, both documented)
+Mask the pad rows out of the training loss (the long-standing nice-to-have in references.md §5): the model is simply never graded on the band, so it never learns anything there. Cleanest fix, moderate effort.
+Invent a 20th "padding" color: since the band's position is known exactly from last_padding_fracs, we could stamp a dedicated 20th palette color over the band in both the saved maps and live encoder output (post-argmax). The mapper network would then see "padding" as its own honest category. Works, but adds a synthetic class and more moving parts — only worth it if band conditioning measurably hurts results.
+So, to state it as the one-liner you can repeat: depth's output space is continuous, so filler looks like filler; segmentation's output space is a closed list of 19 real-world objects, so filler is forced to impersonate one of them — we contain that with consistency and a known band position, rather than being able to eliminate it the way depth naturally does.
+```

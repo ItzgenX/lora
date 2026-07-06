@@ -76,7 +76,7 @@ from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
 
 from src.model import ModelBase
-from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt
+from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt, compute_psnr_ssim
 
 
 torch.set_float32_matmul_precision("high")
@@ -180,6 +180,7 @@ def _save_checkpoint_segmentation_images(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     prompts, images = [], []
+    psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
 
     for n, (idx, kind) in enumerate(zip(idxs, kinds)):
         item   = val_dataset[idx]
@@ -207,13 +208,30 @@ def _save_checkpoint_segmentation_images(
         img.save(out_dir / f"sample_{n:02d}_{kind}.jpg", quality=95)
         prompts.append(prompt)
         images.append(np.asarray(img))
+        # ── Quantitative metric (src/utils.py compute_psnr_ssim) ─────────────
+        # PSNR/SSIM of generation vs the real val image, FIXED scenes only:
+        # fixed scenes + fixed seed make the number comparable checkpoint-to-
+        # checkpoint (and against the depth run at matched steps — identical
+        # protocol both pipelines). "new" scenes change every checkpoint, so
+        # their score would mix scene difficulty into the trend — excluded.
+        if kind == "fixed":
+            orig_u8 = np.asarray(TF.to_pil_image(
+                ((item["jpg"].float() + 1) / 2).clamp(0, 1).cpu()
+            ).resize((cfg.size, cfg.size)).convert("RGB"))
+            pred_u8 = np.asarray(pred.resize((cfg.size, cfg.size)).convert("RGB"))
+            p_, s_ = compute_psnr_ssim(orig_u8, pred_u8)
+            psnrs.append(p_); ssims.append(s_)
 
     # ONE prompts.txt for all scenes (tagged [fixed]/[new]), next to the images.
     (out_dir / "prompts.txt").write_text(
         "\n".join(f"[{n}] [{k}] {p}" for n, (k, p) in enumerate(zip(kinds, prompts))),
         encoding="utf-8",
     )
-    return prompts, images
+    metrics = {}
+    if psnrs:
+        metrics = {"val/psnr_fixed": float(np.mean(psnrs)),
+                   "val/ssim_fixed": float(np.mean(ssims))}
+    return prompts, images, metrics
 
 
 def _segmentation_validation_loss(
@@ -508,7 +526,7 @@ def main(cfg):
             kinds    = ["fixed"] * len(_fixed_val_idxs) + ["new"] * len(new_idxs)
 
             with torch.no_grad():
-                prompts, images = _save_checkpoint_segmentation_images(
+                prompts, images, metrics = _save_checkpoint_segmentation_images(
                     model, dm.val_dataset, idxs, kinds, n_loras, cfg, cfg_mask,
                     accelerator.device, ckpt_dir, include_empty,
                 )
@@ -525,7 +543,16 @@ def main(cfg):
                             f"val/sample_{n:02d}", img, global_step, dataformats="HWC"
                         )
                     tracker.writer.add_text("val/prompts", " | ".join(prompts), global_step)
+                    # Quantitative per-checkpoint metric (fixed scenes, fixed
+                    # seed): comparable across checkpoints AND against the depth
+                    # run at matched steps. See src/utils.py compute_psnr_ssim
+                    # for why PSNR/SSIM (not FID/CLIP).
+                    for k, v in metrics.items():
+                        tracker.writer.add_scalar(k, v, global_step)
 
+            if metrics:
+                logger.info(f"[seg metric] {stem}: " + "  ".join(
+                    f"{k}={v:.4f}" for k, v in metrics.items()))
             logger.info(f"[seg grid] {stem}: {len(prompts)} scene images -> {ckpt_dir}")
 
         except Exception as e:
@@ -642,6 +669,18 @@ def main(cfg):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                # ── Periodic file-log line ───────────────────────────────────
+                # TensorBoard already gets every step; this mirrors the key
+                # numbers into the run's own seg_training.log (Hydra job log)
+                # every log_every_steps optimizer steps, so a run can be read
+                # back without opening TensorBoard.
+                if global_step % int(cfg.get("log_every_steps", 50)) == 0:
+                    logger.info(
+                        f"[train] step {global_step}/{max_train_steps}  "
+                        f"loss={loss_val:.4f}  lr={lr_val:.2e}  "
+                        f"grad_norm={_grad_norm if _grad_norm is not None else float('nan'):.3f}  "
+                        f"epoch={epoch_frac:.2f}")
 
                 # ── DECOUPLED step-level triggers ────────────────────────────
                 # val_steps  = how often to compute val/loss (cheap; also updates

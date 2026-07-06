@@ -14,12 +14,12 @@ val_batch_size: 4       # 4 is safe under no_grad; matches depth default (was 1)
 workers: 4
 val_workers: 2
 
-# resize_mode: letterbox — SquarePad pads the shorter side (edge-replicated) before
+# resize_mode: letterbox — SquarePad pads the shorter side (flat local-mean fill) before
 # Resize, keeping the full driving-scene frame. This RGB chain mirrors the SHARED
 # build_seg_square_preprocess() used by seg_map_calculations.py and seg_inference.py
 # (resize_mode="letterbox"); keep them consistent so train RGB and live inference match.
 transform:
-  - _target_: src.data.transforms.SquarePad      # pad shorter side -> square (edge-replicated)
+  - _target_: src.data.transforms.SquarePad      # pad shorter side -> square (flat local-mean fill)
   - _target_: torchvision.transforms.Resize
     size:
       - ${size}

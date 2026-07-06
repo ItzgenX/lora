@@ -20,7 +20,7 @@ defaults:
 # Both the local folder AND the hub id are listed below; the flag picks which.
 #   local_files_only: true  -> use LOCAL folders (*_model_path). Fully offline.
 #   local_files_only: false -> use HUB ids (*_model_name); downloads if missing.
-# The choice is made in train_seg.py (sets model.model_name / encoder.model).
+# The choice is made in seg_training.py (sets model.model_name / encoder.model).
 # Local paths are relative to the repo root; the code makes them absolute.
 local_files_only: true
 
@@ -102,7 +102,6 @@ data:
 # =============================================================================
 # 3. GLOBAL FALLBACK PROMPT  (identical to depth)
 # =============================================================================
-use_empty_prompt_eval: false
 prompt: null    # null -> each image uses its own "prompt" field from the JSON
 
 # =============================================================================
@@ -110,8 +109,7 @@ prompt: null    # null -> each image uses its own "prompt" field from the JSON
 # =============================================================================
 seed: 42
 val_batches: 64        # val/loss averaged over 64 x 4 = 256 val images (~6% of 4K set)
-n_samples: 1           # (inference only — unused during training)
-save_grid: true        # (kept for compatibility with base config)
+log_every_steps: 50    # mirror step/loss/lr into seg_training.log every N optimizer steps
 
 # ── Checkpoint-monitoring images ─────────────────────────────────────────────
 # Every checkpoint writes N labeled validation images into its own folder
@@ -127,8 +125,7 @@ grid_include_empty_prompt: false # OFF -> generate WITH prompt only (matches dep
 # 5. PRECISION  (identical to depth)
 # =============================================================================
 bf16: true
-ignore_check: true
-log_cond: true
+ignore_check: true                # live: silences the checkpoint-key completeness assert in add_lora_from_config
 tag: seg                          # DIFF: "seg" (was "depth") -> outputs/train/seg/...
 
 # =============================================================================
@@ -162,8 +159,8 @@ lora:
 
 # LAUNCH COMMANDS:
 #   Single 12 GB GPU:
-#     python train_seg.py experiment=train_seg
+#     python seg_training.py experiment=train_seg
 #
 #   Multi-GPU (if needed later):
-#     accelerate launch --num_processes=N train_seg.py experiment=train_seg
+#     accelerate launch --num_processes=N seg_training.py experiment=train_seg
 #     # With N GPUs, effective batch = 4 x 4 x N. Consider scaling LR by sqrt(N).

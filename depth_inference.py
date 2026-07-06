@@ -225,24 +225,24 @@ def main(cfg):
 
     if not entries:
         print("[ERROR] No input images provided.")
-        print("  Set inference.json_file=dataset.json")
+        print("  Set inference.json_file=data/depth_training/test.jsonl")
         print("  or  \"inference.images=[data/img.jpg]\"")
         return
 
     # ------------------------------------------------------------------ #
     # Image preprocessing — resize_mode: letterbox.  SquarePad pads the    #
-    # shorter side with edge-replication so the image is square BEFORE      #
-    # Resize; this prevents the encoder's internal better_resize() from     #
-    # silently center-cropping the frame (references.md §5).                #
+    # shorter side with a flat local-mean fill so the image is square       #
+    # BEFORE Resize; this prevents the encoder's internal better_resize()   #
+    # from silently center-cropping the frame (references.md §5).           #
     # Output: [1, 3, H, W] in [-1, 1].                                      #
     #                                                                       #
-    # PARITY-CRITICAL: byte-for-byte identical to (1) pre_depth_calculations#
+    # PARITY-CRITICAL: byte-for-byte identical to (1) depth_map_calculations#
     # .py and (2) configs/data/local_depth.yaml.  Changing one without the  #
     # others makes live inference diverge from the saved training depth.    #
     # ------------------------------------------------------------------ #
     size = cfg.size
     preprocess = transforms.Compose([
-        SquarePad(),                                       # shorter side → square (edge-replicated)
+        SquarePad(),                                       # shorter side → square (flat local-mean fill)
         transforms.Resize((size, size)),                   # square → size × size
         transforms.ToTensor(),                             # [0,255] → [0,1]
         transforms.Normalize(mean=[0.5]*3, std=[0.5]*3),  # [0,1] → [-1,1]

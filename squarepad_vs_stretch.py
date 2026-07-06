@@ -6,7 +6,6 @@ Usage:
   python squarepad_vs_stretch.py
   python squarepad_vs_stretch.py --image data/raw/000417/raw_image.jpg
   python squarepad_vs_stretch.py --image data/raw/000703/raw_image.jpg --out outputs/viz/squarepad_compare.png
-  python squarepad_vs_stretch.py --image data\wp3419589.jpg 
 """
 import argparse
 from pathlib import Path
@@ -53,7 +52,7 @@ def make_comparison(img_path: Path, out_path: Path):
     axes[0].axis("off")
 
     axes[1].imshow(np.asarray(sq_d))
-    axes[1].set_title("WITH SquarePad  (current)\nPads shorter side with edge pixels → no distortion\nbut you see the padding bands",
+    axes[1].set_title("WITH SquarePad  (current)\nPads shorter side with a flat local-mean fill → no distortion\nbut you see the padding bands",
                       color="#4ec9b0", fontsize=11, pad=6)
     axes[1].axis("off")
 

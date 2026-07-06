@@ -158,7 +158,7 @@ class SegmentationEncoder(nn.Module):
     a depth map. It is an nn.Module so accelerate's .prepare()/.to()/.eval()
     treat it identically to the midas encoder.
 
-    During TRAINING: this encoder is NOT called at all — train_seg.py feeds
+    During TRAINING: this encoder is NOT called at all — seg_training.py feeds
     pre-saved colour maps via skip_encode=True, bypassing this entirely. It
     runs ONLY at live inference inside model.sample() -> sample_easy() ->
     encoder(c). (Same pattern as depth: DepthEstimator runs live at inference,
@@ -168,7 +168,7 @@ class SegmentationEncoder(nn.Module):
       • forward(imgs)    -> colour map [B,3,size,size] in [0,1]
                             (what src/model.py calls as `encoder(c)` at inference)
       • label_ids(imgs)  -> raw class-IDs [B,size,size] long
-                            (used ONLY by calculate_segmentation_map.py, which
+                            (used ONLY by seg_map_calculations.py, which
                              saves raw IDs to disk; colourisation happens at
                              dataset load time in local_seg.py)
 
@@ -258,11 +258,12 @@ class SegmentationEncoder(nn.Module):
           1. Assert input contract: 4-D, 3-channel, in [-1, 1] (same asserts as midas).
           2. (x + 1.0) / 2.0  ->  [0, 1].
           3. Resize to seg_input_size (bilinear) — SegFormer's expected input scale.
-             A 512x512 input is already square (letterboxed upstream), so this is
-             a uniform rescale, never a crop. (Unlike MiDaS, SegFormer has no
-             forced internal center-crop — squaring upstream is still required to
-             prevent the LoRAdapter encoder call in sample_easy from receiving a
-             non-square tensor, but SegFormer itself handles any H×W cleanly.)
+             A 512x512 input is already square (letterboxed by SquarePad before it
+             reaches this encoder), so this is a uniform rescale, never a crop.
+             (Unlike MiDaS, SegFormer has no forced internal center-crop — squaring
+             the image beforehand is still required so the encoder call in
+             sample_easy never receives a non-square tensor, but SegFormer itself
+             handles any H×W cleanly.)
           4. ImageNet normalize: (x - mean) / std. Buffers broadcast and match
              the device/dtype of x automatically.
           5. SegFormer forward: logits [B, 19, H/4, W/4].
@@ -278,8 +279,9 @@ class SegmentationEncoder(nn.Module):
 
         x = (imgs + 1.0) / 2.0                       # [-1,1] -> [0,1]
 
-        # Resize to SegFormer's input scale. Already-square input (letterboxed
-        # upstream) makes this a uniform rescale, no distortion.
+        # Resize to SegFormer's input scale. The input is already square
+        # (letterboxed before it gets here), so this is a uniform rescale,
+        # no distortion.
         x = F.interpolate(
             x, size=(self.seg_input_size, self.seg_input_size),
             mode="bilinear", align_corners=False,
@@ -319,7 +321,7 @@ class SegmentationEncoder(nn.Module):
         """
         Offline-only entry point: return the raw class-ID map (NOT colourised).
 
-        Used ONLY by calculate_segmentation_map.py, which saves the raw IDs as
+        Used ONLY by seg_map_calculations.py, which saves the raw IDs as
         an 8-bit PNG (canonical, hand-editable, re-palette-able). The dataset
         (local_seg.py) then colourises at load time using seg_colorize_ids.
 

@@ -57,7 +57,7 @@ import random
 from functools import reduce
 from PIL import Image, ImageDraw
 
-from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt
+from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt, compute_psnr_ssim
 
 
 torch.set_float32_matmul_precision("high")
@@ -129,6 +129,7 @@ def _save_checkpoint_images(model, val_dataset, idxs, kinds, n_loras, cfg, cfg_m
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     prompts, images = [], []
+    psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
     for n, (idx, kind) in enumerate(zip(idxs, kinds)):
         item   = val_dataset[idx]
         depth  = item["depth"].unsqueeze(0).to(device)        # [1,3,H,W] in [0,1]
@@ -150,11 +151,28 @@ def _save_checkpoint_images(model, val_dataset, idxs, kinds, n_loras, cfg, cfg_m
         img.save(out_dir / f"sample_{n:02d}_{kind}.jpg", quality=95)
         prompts.append(prompt)
         images.append(np.asarray(img))
+        # ── Quantitative metric (references: src/utils.py compute_psnr_ssim) ──
+        # PSNR/SSIM of generation vs the real val image, FIXED scenes only:
+        # fixed scenes + fixed seed make the number comparable checkpoint-to-
+        # checkpoint (and across the depth vs seg runs at matched steps). The
+        # fresh "new" scenes change every checkpoint, so their score would mix
+        # scene difficulty into the trend — excluded on purpose.
+        if kind == "fixed":
+            orig_u8 = np.asarray(TF.to_pil_image(
+                ((item["jpg"].float() + 1) / 2).clamp(0, 1).cpu()
+            ).resize((cfg.size, cfg.size)).convert("RGB"))
+            pred_u8 = np.asarray(pred.resize((cfg.size, cfg.size)).convert("RGB"))
+            p_, s_ = compute_psnr_ssim(orig_u8, pred_u8)
+            psnrs.append(p_); ssims.append(s_)
     # ONE prompts file for all scenes (tagged fixed/new), next to the images.
     (out_dir / "prompts.txt").write_text(
         "\n".join(f"[{n}] [{k}] {p}" for n, (k, p) in enumerate(zip(kinds, prompts))),
         encoding="utf-8")
-    return prompts, images
+    metrics = {}
+    if psnrs:
+        metrics = {"val/psnr_fixed": float(np.mean(psnrs)),
+                   "val/ssim_fixed": float(np.mean(ssims))}
+    return prompts, images, metrics
 
 
 def _validation_loss(model, val_dataloader, n_loras, cfg, cfg_mask, accelerator, max_batches):
@@ -354,7 +372,7 @@ def main(cfg):
     if accelerator.is_main_process:
         # Keep personal/machine identifiers OUT of the tensorboard event filename.
         # torch's SummaryWriter embeds socket.gethostname() in the tfevents name
-        # (it was "events.out.tfevents.<time>.aditya.<pid>.0" — "aditya" = this
+        # (it was "events.out.tfevents.<time>.<hostname>.<pid>.0" — i.e. this
         # machine's hostname). Override it with the generic experiment tag so the
         # logs are shareable without leaking the username/hostname.
         import socket as _socket
@@ -454,7 +472,7 @@ def main(cfg):
             kinds = ["fixed"] * len(_fixed_val_idxs) + ["new"] * len(new_idxs)
 
             with torch.no_grad():
-                prompts, images = _save_checkpoint_images(
+                prompts, images, metrics = _save_checkpoint_images(
                     model, dm.val_dataset, idxs, kinds, n_loras, cfg, cfg_mask,
                     accelerator.device, ckpt_dir, include_empty)
             if is_best:
@@ -466,6 +484,15 @@ def main(cfg):
                         tracker.writer.add_image(f"val/sample_{n:02d}", img,
                                                  global_step, dataformats="HWC")
                     tracker.writer.add_text("val/prompts", " | ".join(prompts), global_step)
+                    # Quantitative per-checkpoint metric (fixed scenes, fixed
+                    # seed): comparable across checkpoints AND across the
+                    # depth-vs-seg runs at matched steps. See src/utils.py
+                    # compute_psnr_ssim for why PSNR/SSIM (not FID/CLIP).
+                    for k, v in metrics.items():
+                        tracker.writer.add_scalar(k, v, global_step)
+            if metrics:
+                logger.info(f"[metric] {stem}: " + "  ".join(
+                    f"{k}={v:.4f}" for k, v in metrics.items()))
             logger.info(f"[grid] {stem}: {len(prompts)} scene images -> {ckpt_dir}")
         except Exception as e:
             print("!!! ERROR generating checkpoint images !!!")
@@ -515,7 +542,7 @@ def main(cfg):
                 B = imgs.shape[0]
 
                 # ── DEPTH CHANGE: use pre-computed depth maps instead of images ──
-                # batch["depth"] is loaded from the cached PNG (precompute_depth.py).
+                # batch["depth"] is loaded from the cached PNG (depth_map_calculations.py).
                 # skip_encode=True means the DepthEstimator is NOT called here —
                 # the depth tensor goes directly to the mapper network.
                 depth_maps = batch["depth"].to(accelerator.device)
@@ -571,6 +598,18 @@ def main(cfg):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                # ── Periodic file-log line ─────────────────────────────────────
+                # TensorBoard already gets every step; this mirrors the key
+                # numbers into the run's own depth_training.log (Hydra job log)
+                # every log_every_steps optimizer steps, so a run can be read
+                # back without opening TensorBoard.
+                if global_step % int(cfg.get("log_every_steps", 50)) == 0:
+                    logger.info(
+                        f"[train] step {global_step}/{max_train_steps}  "
+                        f"loss={loss_val:.4f}  lr={lr_val:.2e}  "
+                        f"grad_norm={_grad_norm if _grad_norm is not None else float('nan'):.3f}  "
+                        f"epoch={epoch_frac:.2f}")
 
                 # ── DECOUPLED step-level triggers ──────────────────────────────
                 # val_steps  = how often to compute val/loss (cheap; also updates

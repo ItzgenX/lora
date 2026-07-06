@@ -122,7 +122,11 @@ def _depth_out_path(src_path: str, output_dir: Path, input_dir: Path | None) -> 
             return output_dir / rel.parent / (rel.stem + ".png")
         except ValueError:
             pass
-    return output_dir / (src.stem + ".png")
+    # Fallback: keep the image's OWN parent folder in the output path.
+    # Returning a bare "<stem>.png" here was the 2026-07 bug — every image is
+    # named raw_image.jpg, so all maps collapsed onto one file and overwrote
+    # each other. Keeping the parent folder makes each path unique.
+    return output_dir / src.parent.name / (src.stem + ".png")
 
 
 def precompute_depths_from_paths(
@@ -160,6 +164,23 @@ def precompute_depths_from_paths(
         return out_path_fn(Path(p)) if out_path_fn is not None else _depth_out_path(p, output_dir, input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- Collision guard: no two images may save to the SAME PNG --------- #
+    # Before doing any GPU work, check where every image WILL be saved. If two
+    # images resolve to the same output file, the second would overwrite the
+    # first and training would pair images with the wrong map (the 2026-07 bug).
+    # Stop loudly and show one colliding pair instead of overwriting silently.
+    seen = {}
+    for p in image_paths:
+        key = os.path.normcase(str(_resolve_out(p)))
+        if key in seen:
+            raise SystemExit(
+                f"[FATAL] Two images would write the SAME depth map file:\n"
+                f"    {seen[key]}\n    {p}\n  both -> {key}\n"
+                f"  Each image needs its own map. This means the output naming "
+                f"lost the per-image folder — check the dataset layout."
+            )
+        seen[key] = p
+
     # ---- Load DPT model -------------------------------------------------- #
     print(f"\nLoading depth estimator: {model_name}  (local_files_only={local_files_only})")
     depth_estimator = DepthEstimator(size=size, model=model_name, local_files_only=local_files_only)
@@ -168,9 +189,9 @@ def precompute_depths_from_paths(
 
     # ---- Image preprocessing --------------------------------------------- #
     # DepthEstimator expects [B, 3, H, W] in [-1, 1].
-    # resize_mode: letterbox — pad the shorter side to square with edge-
-    # replication, THEN resize to (size × size).  This keeps the full image
-    # frame intact (no content cropped) while satisfying the encoder's
+    # resize_mode: letterbox — pad the shorter side to square with a flat
+    # local-mean fill, THEN resize to (size × size).  This keeps the full
+    # image frame intact (no content cropped) while satisfying the encoder's
     # requirement for a square input (references.md §5).
     #
     # PARITY-CRITICAL DUPLICATION WARNING: this exact chain is repeated in
@@ -182,7 +203,7 @@ def precompute_depths_from_paths(
     # If you change one, change all three. Parity is verified by the Step-4
     # cross-stage check (float-vs-float diff must be 0.0).
     preprocess = transforms.Compose([
-        SquarePad(),                                       # shorter side → square (edge-replicated)
+        SquarePad(),                                       # shorter side → square (flat local-mean fill)
         transforms.Resize((size, size)),                   # square → size × size
         transforms.ToTensor(),                             # [0,255] → [0,1]
         transforms.Normalize(mean=[0.5]*3, std=[0.5]*3),  # [0,1] → [-1,1]
@@ -364,131 +385,131 @@ def build_depth_training_jsons(
     image_root: Path = None,
 ) -> None:
     """
-    Create depth_training/{train,val,test}.jsonl from data/{train,val,test}.jsonl.
+    Build depth_training/{train,val,test}.jsonl from data/{train,val,test}.jsonl.
 
-    For each source JSONL this function:
-      1. Reads every entry's image path + prompt via _get_image_path() —
-         handles both the 'source' key (existing data/ JSONLs) and the
-         'raw_image_path' key (DepthJsonDataset format).
-      2. Runs precompute_depths_from_paths() to compute (or look up cached)
-         depth PNGs for all images in that JSONL.
-      3. In a SINGLE PASS over zip(source_entries, abs_image_paths), builds
-         each output entry from its own source entry — never from a separately
-         sorted list that could silently drift in index.  Each output entry
-         carries exactly three fields:
-           raw_image_path  — forward-slash relative path to the source image
-           depth_path      — forward-slash relative path to the depth PNG
-           prompt          — text caption, copied verbatim
-      4. Writes depth_training/<name>.jsonl (one JSON object per line).
-      5. Calls _verify_depth_training_jsonl() and prints PASS/FAIL.
+    This is the --data_dir path. It behaves IDENTICALLY to --dataset_dir scan
+    mode in where it saves maps: it does NOT hardcode an output folder. Instead
+    it looks at the image paths in your JSONLs, finds the folder common to all
+    of them (the dataset root, e.g. .../custome_dataset), and saves each map
+    into a SIBLING folder next to it (.../custome_dataset_depth_map/), mirroring
+    the internal structure. So every image gets its OWN uniquely-named map and
+    none can overwrite another.
+
+    Steps:
+      0. Read every split's entries + resolve absolute image paths (in lockstep,
+         so entry<->image never drift). Pool all images to find the dataset root.
+      1. For each split, compute (or reuse cached) depth PNGs, saved via
+         _sibling_map_path — named after the image's FOLDER (unique), never the
+         image filename (all 'raw_image.jpg' -> would collide).
+      2. Build each output entry atomically from its OWN source entry
+         (zip(entries, images)), with ABSOLUTE forward-slash paths:
+             raw_image_path, depth_path, prompt (prompt copied verbatim).
+      3. Write the manifest and verify it with the full 5-check verifier
+         (including the global anti-collision check).
 
     Args:
-        data_dir   : folder containing train.jsonl / val.jsonl / test.jsonl.
-                     Uses _find_split_jsonl() to discover files whose names may
-                     differ — any *.jsonl whose stem contains "train"/"val"/"test"
-                     is accepted if the exact default name is absent.
-        raw_dir    : root of the raw image tree (data/raw/).
-                     Used by _depth_out_path() to mirror the folder structure
-                     into depth_dir (data/raw/000417/img.jpg ->
-                     depth_dir/000417/img.png).
-        depth_dir  : where depth PNGs are saved (data/raw_depth/).
-        output_dir : where the new three-field JSONLs are written
-                     (default data/depth_training/).
-        subset_n   : if set, only process the first N entries per JSONL —
-                     use this for a dry run before committing to the full dataset.
+        data_dir   : folder with train.jsonl / val.jsonl / test.jsonl.
+        output_dir : where the three-field manifests are written (data/depth_training/).
+        image_path : key in the source JSONL holding the image path (e.g. "target").
+        image_root : optional root prepended to RELATIVE image paths.
+        subset_n   : if set, only the first N entries per split (dry run).
+        raw_dir, depth_dir : legacy args, no longer used for saving (the sibling
+                     folder is derived from the images). Kept so the CLI stays
+                     backward-compatible.
     """
     cwd = Path.cwd()
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_dir_abs = raw_dir if raw_dir.is_absolute() else cwd / raw_dir
+    _root = image_root if image_root is not None else cwd
 
+    # ---- Step 0: read all splits, resolve images, find ONE dataset root ---- #
+    split_entries = {}   # split -> list[entry]
+    split_images  = {}   # split -> list[abs Path], aligned 1:1 with entries
+    all_images    = []
     for split in ["train", "val", "test"]:
         src_path = _find_split_jsonl(data_dir, split)
         if src_path is None:
             print(f"\n[WARN] No JSONL for split '{split}' found in {data_dir} — skipping.")
             continue
-
         with open(src_path, "r", encoding="utf-8") as f:
             all_entries = [json.loads(line) for line in f if line.strip()]
-
-        # Optionally slice to the first N for a dry run
         entries = all_entries[:subset_n] if subset_n else all_entries
-
-        print(f"\n{'='*56}")
-        print(f"  {src_path.name}: processing {len(entries)} entries"
-              + (f" (dry-run subset of {len(all_entries)} total)" if subset_n else ""))
-        print(f"{'='*56}")
-
-        # ---- Step 1: resolve absolute image paths in entry order ----------- #
-        # Priority: image_root / relative_path  >  cwd / relative_path
-        # If --image_root /mnt/data is given and JSONL says "images/foo.jpg",
-        # the actual path becomes /mnt/data/images/foo.jpg.
-        # Without --image_root, falls back to resolving relative to CWD as before.
-        _root = image_root if image_root is not None else cwd
-        abs_image_paths = []
+        abs_paths = []
         for entry in entries:
-            raw_str = _get_image_path(entry, image_path)
-            p = Path(raw_str)
-            abs_p = p if p.is_absolute() else _root / p
-            abs_image_paths.append(abs_p)
+            p = Path(_get_image_path(entry, image_path))
+            abs_p = (p if p.is_absolute() else _root / p).resolve()
+            abs_paths.append(abs_p)
             if not abs_p.exists():
                 print(f"  [WARN] Image not found on disk: {abs_p}")
+        split_entries[split] = entries
+        split_images[split]  = abs_paths
+        all_images.extend(abs_paths)
 
-        # ---- Step 2: compute / look up depth PNGs -------------------------- #
-        # _depth_out_path() inside here mirrors data/raw/<id>/img.jpg ->
-        # depth_dir/<id>/img.png, preserving the sub-folder structure.
+    if not all_images:
+        print("[ERROR] No images found in any split — nothing to do.")
+        return
+
+    # Dataset root = deepest folder shared by ALL images (no hardcoding).
+    # Sibling folder next to it holds the maps, mirroring the structure —
+    # exactly like --dataset_dir scan mode, so both commands agree.
+    dataset_root = Path(os.path.commonpath([str(p) for p in all_images]))
+    if dataset_root.is_file():          # only one image -> commonpath is the file itself
+        dataset_root = dataset_root.parent
+    sibling_root = dataset_root.parent / (dataset_root.name + "_depth_map")
+    sibling_root.mkdir(parents=True, exist_ok=True)
+    print(f"\nDataset root : {dataset_root}")
+    print(f"Depth maps   : {sibling_root}  (sibling folder, mirrored structure)")
+
+    out_fn = lambda p: _sibling_map_path(Path(p), dataset_root, sibling_root, "_depth_map")
+
+    # ---- Per split: compute maps, then write + verify the manifest -------- #
+    for split in ["train", "val", "test"]:
+        if split not in split_entries:
+            continue
+        entries         = split_entries[split]
+        abs_image_paths = split_images[split]
+
+        print(f"\n{'='*56}")
+        print(f"  {split}: processing {len(entries)} entries"
+              + (" (dry-run subset)" if subset_n else ""))
+        print(f"{'='*56}")
+
         path_to_depth = precompute_depths_from_paths(
             image_paths=[str(p) for p in abs_image_paths],
-            output_dir=depth_dir,
+            output_dir=sibling_root,
             size=size,
             batch_size=batch_size,
             model_name=model_name,
             device=device,
             skip_existing=skip_existing,
-            input_dir=raw_dir_abs,
             local_files_only=local_files_only,
+            out_path_fn=out_fn,
         )
 
-        # ---- Step 3: build output entries — ONE PASS, atomic per source ---- #
-        # zip(entries, abs_image_paths) is the only correct pattern here.
-        # DO NOT iterate path_to_depth independently — its iteration order is
-        # not guaranteed to match entry order, and any separate zip/merge would
-        # be the exact silent-mismatch bug this design rules out.
+        # Build entries in ONE pass, each from its OWN source (zip keeps them
+        # aligned). ABSOLUTE forward-slash paths: the dataset lives outside the
+        # repo, so relative-to-repo paths would break when the repo moves.
         out_entries = []
         n_skipped = 0
         for entry, abs_img_p in zip(entries, abs_image_paths):
             depth_abs_str = path_to_depth.get(str(abs_img_p))
-
             if depth_abs_str is None:
                 print(f"  [WARN] No depth result for {abs_img_p} — entry skipped.")
                 n_skipped += 1
                 continue
-
-            # Normalize to forward-slash, relative to cwd
-            raw_rel = Path(_get_image_path(entry, image_path)).as_posix()
-            try:
-                depth_rel = Path(depth_abs_str).relative_to(cwd).as_posix()
-            except ValueError:
-                # depth_abs_str is already relative or on a different drive
-                depth_rel = Path(depth_abs_str).as_posix()
-
-            # One entry, built atomically from its own source entry
             out_entries.append({
-                "raw_image_path": raw_rel,
-                "depth_path":     depth_rel,
+                "raw_image_path": abs_img_p.as_posix(),
+                "depth_path":     Path(depth_abs_str).resolve().as_posix(),
                 "prompt":         entry["prompt"],
             })
 
-        # ---- Step 4: write output JSONL (one object per line) ------------- #
         out_path = output_dir / f"{split}.jsonl"
         with open(out_path, "w", encoding="utf-8") as f:
             for entry in out_entries:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        skip_note = f"  ({n_skipped} skipped due to depth errors)" if n_skipped else ""
+        skip_note = f"  ({n_skipped} skipped)" if n_skipped else ""
         print(f"\n  Written {len(out_entries)} entries -> {out_path}{skip_note}")
-
-        # ---- Step 5: verify every entry ------------------------------------ #
-        _verify_depth_training_jsonl(out_path)
+        _verify_scan_training_jsonl(out_path, "depth_path", "_depth_map")
 
 
 # ============================================================================ #
@@ -522,13 +543,40 @@ def _sibling_map_path(
 
 def _verify_scan_training_jsonl(jsonl_path: Path, map_key: str, suffix: str) -> tuple[int, int]:
     """
-    Verify a scan-mode output JSONL. For each entry checks:
-      1. Required keys present: raw_image_path, <map_key>, prompt.
-      2. The map file exists on disk.
-      3. The map lives in a SIBLING tree, NOT inside the image's own folder
-         (the source dataset folder must never be written into).
-      4. The map's leaf folder name matches the image's leaf folder name
-         (mirrored structure) and the map is named <folder_name><suffix>.png.
+    Verify a scan-mode output JSONL — the LAST line of defence before training
+    trusts this file. Training reads each line as:
+        "for THIS image, condition on THIS map, with THIS prompt"
+    so a wrong line here silently poisons training (no crash, no warning —
+    the model just learns from mismatched pairs). That is why every check
+    below fails LOUDLY with the entry number and the exact reason.
+
+    Per-entry checks (each line of the JSONL):
+      1. KEYS      — raw_image_path, <map_key> (e.g. "depth_path"), prompt all
+                     present. A missing key would crash the dataloader later,
+                     far from the real cause; catch it here instead.
+      2. ON DISK   — the map file actually exists. A path that "looks right"
+                     but points at nothing means training dies mid-epoch.
+      3. SIBLING   — the map lives in the sibling tree, NOT inside the image's
+                     own source folder (the source dataset is read-only by
+                     project rule; an in-folder map means the wrong mode ran).
+      4. MIRRORED  — the map's parent folder name equals the image's parent
+                     folder name (e.g. both "000417"), and the map file is
+                     named <folder_name><suffix>.png. This is what guarantees
+                     image 000417 is paired with 000417's map and no other.
+
+    Whole-file check (across ALL lines together):
+      5. UNIQUE    — no two entries may point at the SAME map file.
+                     THIS CHECK EXISTS BECAUSE OF A REAL BUG (2026-07-02): a
+                     non-scan run named every map after the image FILENAME,
+                     and since every image in this dataset is 'raw_image.jpg',
+                     all 913 maps overwrote each other into ONE file — and
+                     every manifest row pointed at that single survivor.
+                     Per-entry checks 1-4 cannot see that: each individual
+                     line looked fine; only comparing lines against EACH OTHER
+                     exposes it. Duplicate raw_image_path is flagged too (the
+                     same source image listed twice would double-weight it in
+                     training).
+
     Returns (n_passed, n_failed) and prints a one-line PASS/FAIL summary.
     """
     with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -536,6 +584,7 @@ def _verify_scan_training_jsonl(jsonl_path: Path, map_key: str, suffix: str) -> 
 
     passed = failed = 0
     for i, entry in enumerate(entries):
+        # ---- check 1: all three required keys present ---------------------- #
         missing = [k for k in ("raw_image_path", map_key, "prompt") if k not in entry]
         if missing:
             print(f"  [FAIL] entry {i}: missing keys {missing}")
@@ -545,23 +594,31 @@ def _verify_scan_training_jsonl(jsonl_path: Path, map_key: str, suffix: str) -> 
         raw_p = Path(entry["raw_image_path"])
         map_p = Path(entry[map_key])
 
+        # ---- check 2: the map file really exists on disk ------------------- #
         if not map_p.exists():
             print(f"  [FAIL] entry {i}: map file not on disk: {map_p}")
             failed += 1
             continue
 
+        # ---- check 3: map is in the SIBLING tree, source folder untouched -- #
         if map_p.parent == raw_p.parent:
             print(f"  [FAIL] entry {i}: map was written INTO the source dataset "
                   f"folder (expected a sibling tree): {map_p.parent}")
             failed += 1
             continue
 
+        # ---- check 4a: mirrored structure — same leaf folder name ---------- #
+        # image .../custome_dataset/000417/raw_image.jpg
+        # map   .../custome_dataset_depth_map/000417/...  <- "000417" must match
         if map_p.parent.name != raw_p.parent.name:
             print(f"  [FAIL] entry {i}: mirrored leaf folder name mismatch — "
                   f"image={raw_p.parent.name!r}  map={map_p.parent.name!r}")
             failed += 1
             continue
 
+        # ---- check 4b: map filename is <folder_name><suffix>.png ----------- #
+        # Named after the FOLDER (unique per image), never after the image
+        # FILENAME (identical 'raw_image' for every image -> collisions).
         expected = raw_p.parent.name + suffix + ".png"
         if map_p.name != expected:
             print(f"  [FAIL] entry {i}: map name {map_p.name!r} != expected {expected!r}")
@@ -569,6 +626,30 @@ def _verify_scan_training_jsonl(jsonl_path: Path, map_key: str, suffix: str) -> 
             continue
 
         passed += 1
+
+    # ---- check 5: GLOBAL uniqueness — the anti-collision check ------------- #
+    # Count how many entries share each map path / image path. In a healthy
+    # manifest every image has its OWN map, so every count is exactly 1.
+    from collections import Counter
+    map_counts = Counter(os.path.normcase(str(Path(e[map_key])))
+                         for e in entries if map_key in e)
+    img_counts = Counter(os.path.normcase(str(Path(e["raw_image_path"])))
+                         for e in entries if "raw_image_path" in e)
+    dup_maps = {p: n for p, n in map_counts.items() if n > 1}
+    dup_imgs = {p: n for p, n in img_counts.items() if n > 1}
+    if dup_maps:
+        # Show the worst offender so the collision is obvious at a glance.
+        worst_path, worst_n = max(dup_maps.items(), key=lambda kv: kv[1])
+        print(f"  [FAIL] {len(dup_maps)} map file(s) referenced by MULTIPLE entries "
+              f"(worst: {worst_n} entries -> {worst_path}). Every image must have "
+              f"its OWN map — this is the stem-collision bug; re-run in scan mode "
+              f"(--dataset_dir) with --no_skip.")
+        failed += sum(dup_maps.values())          # every colliding entry is invalid
+        passed = max(0, passed - sum(dup_maps.values()))
+    if dup_imgs:
+        print(f"  [FAIL] {len(dup_imgs)} source image(s) listed more than once "
+              f"(would be double-weighted in training).")
+        failed += sum(n - 1 for n in dup_imgs.values())
 
     status = "PASS" if failed == 0 else "FAIL"
     print(f"  [{status}] {jsonl_path.name}: {passed}/{len(entries)} entries valid"
@@ -648,12 +729,30 @@ def build_depth_training_from_scan(
     )
 
     # ---- Step 3: index computed depths by NORMALISED absolute image path --- #
+    # THE HEART OF THE IMAGE<->MAP MAPPING. path_to_depth came back from the
+    # compute step as {source image path -> its saved map path}, one pair per
+    # image, so the pairing is guaranteed by construction (each map was saved
+    # while processing exactly that image, into <folder>_depth_map.png).
+    # We re-key it by NORMALISED ABSOLUTE path because the same file can be
+    # spelled many ways ("D:/data/x.jpg", "d:\\data\\x.jpg", a relative path,
+    # different case on Windows) — Path.resolve() collapses all of them to one
+    # canonical absolute form and os.path.normcase() removes case/slash
+    # differences. Without this, a JSONL that spells the path differently
+    # from the scanner would silently match NOTHING.
     depth_by_img = {
         os.path.normcase(str(Path(img).resolve())): dep
         for img, dep in path_to_depth.items()
     }
 
     # ---- Step 4: rebuild each split manifest, matching by absolute path ---- #
+    # The ORIGINAL data/{train,val,test}.jsonl are the single source of truth
+    # for TWO things the scan cannot know: which PROMPT belongs to each image,
+    # and which SPLIT (train/val/test) it belongs to. We walk each original
+    # split file, look up the image's freshly computed map in depth_by_img,
+    # and write a new line that carries all three together. The split
+    # boundaries are therefore preserved EXACTLY — an image that was in val
+    # stays in val; nothing is ever re-shuffled here (re-shuffling would leak
+    # training images into validation and make val/loss a lie).
     for split in ("train", "val", "test"):
         src = _find_split_jsonl(data_dir, split)
         if src is None:
@@ -666,19 +765,28 @@ def build_depth_training_from_scan(
         out_entries = []
         n_skipped = 0
         for entry in entries:
+            # The key holding the image path in the ORIGINAL jsonl is
+            # configurable (--image_path, default "target" for this dataset).
             raw_str = _get_image_path(entry, image_path)
+            # Same normalisation as Step 3 — both sides of the lookup MUST be
+            # normalised identically or the match fails for spelling reasons.
             key = os.path.normcase(str(Path(raw_str).resolve()))
             dep = depth_by_img.get(key)
             if dep is None:
                 # Image not among the scanned/computed set (in a full run this
                 # means the file was missing on disk; in a dry run it just wasn't
-                # in the capped subset). Skip to keep the mapping honest.
+                # in the capped subset). Skip rather than guess — a skipped line
+                # is visible in the count below; a wrong pairing would be
+                # invisible and poison training.
                 n_skipped += 1
                 continue
+            # Write ABSOLUTE paths (as_posix -> forward slashes, valid on both
+            # Windows and Linux): the dataset lives OUTSIDE the repo, so
+            # relative-to-repo paths would break the moment the repo moves.
             out_entries.append({
                 "raw_image_path": Path(raw_str).resolve().as_posix(),
                 "depth_path":     Path(dep).resolve().as_posix(),
-                "prompt":         entry["prompt"],
+                "prompt":         entry["prompt"],   # copied VERBATIM — never edited
             })
 
         out_path = output_dir / f"{split}.jsonl"

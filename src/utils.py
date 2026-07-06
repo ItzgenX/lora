@@ -406,3 +406,70 @@ def save_checkpoint(unet_sds: dict[str, dict[str, torch.Tensor]], mapper_network
 def roll_list(l, n):
     # consistent with torch.roll
     return l[-n:] + l[:-n]
+
+
+# ============================================================================ #
+#  PER-CHECKPOINT QUANTITATIVE METRIC — shared by depth_training.py and         #
+#  seg_training.py                                                              #
+#                                                                               #
+#  WHY THIS EXISTS: the project's end goal is an OBJECTIVE depth-vs-seg          #
+#  comparison. Eyeballing checkpoint grids alone can't decide "which             #
+#  conditioning is better"; a number logged per checkpoint can. PSNR + SSIM     #
+#  between each FIXED validation scene's generation and its real image are     #
+#  used because:                                                                #
+#    • the FIXED scenes + the fixed generation seed make the value comparable   #
+#      across checkpoints of one run AND across the depth run vs the seg run    #
+#      (identical protocol, same val set, same seed);                           #
+#    • FID needs thousands of samples per point to be meaningful — useless at   #
+#      10 images per checkpoint;                                                #
+#    • CLIP similarity would need CLIP weights, which are not among the local   #
+#      offline models (local_files_only must stay true end-to-end).             #
+#  These are structural-fidelity proxies, not absolute quality scores: watch    #
+#  the TREND across checkpoints, and compare depth vs seg at MATCHED steps.     #
+# ============================================================================ #
+
+def compute_psnr_ssim(img_a, img_b):
+    """
+    PSNR (dB) + SSIM between two uint8 RGB images of identical shape.
+
+    img_a, img_b: numpy uint8 arrays [H, W, 3] (e.g. np.asarray(pil_img)).
+    Returns (psnr: float, ssim: float). Pure numpy — no new dependencies.
+
+    SSIM follows Wang et al. 2004 on the GRAYSCALE image with the standard
+    constants (K1=0.01, K2=0.03, L=255) and an 8x8 non-overlapping uniform
+    window — a standard simplification that is fully adequate for TREND
+    comparison across checkpoints, which is the only use here.
+    """
+    import numpy as np
+
+    a = np.asarray(img_a, dtype=np.float64)
+    b = np.asarray(img_b, dtype=np.float64)
+    assert a.shape == b.shape, f"shape mismatch: {a.shape} vs {b.shape}"
+
+    # ---- PSNR on RGB ----
+    mse = np.mean((a - b) ** 2)
+    psnr = 99.0 if mse == 0 else 10.0 * np.log10(255.0 ** 2 / mse)
+
+    # ---- SSIM on grayscale, 8x8 block statistics (uniform window) ----
+    def to_gray(x):
+        return 0.299 * x[..., 0] + 0.587 * x[..., 1] + 0.114 * x[..., 2]
+
+    ga, gb = to_gray(a), to_gray(b)
+    win = 8
+    H, W = ga.shape
+    H8, W8 = H - H % win, W - W % win
+
+    def blocks(g):
+        return (g[:H8, :W8]
+                .reshape(H8 // win, win, W8 // win, win)
+                .transpose(0, 2, 1, 3)
+                .reshape(-1, win * win))
+
+    A, B = blocks(ga), blocks(gb)
+    mu_a, mu_b = A.mean(1), B.mean(1)
+    var_a, var_b = A.var(1), B.var(1)
+    cov = ((A - mu_a[:, None]) * (B - mu_b[:, None])).mean(1)
+    C1, C2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+    ssim_map = (((2 * mu_a * mu_b + C1) * (2 * cov + C2)) /
+                ((mu_a ** 2 + mu_b ** 2 + C1) * (var_a + var_b + C2)))
+    return float(psnr), float(ssim_map.mean())

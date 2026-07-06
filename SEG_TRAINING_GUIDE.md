@@ -232,7 +232,7 @@ During training, the raw image goes through this exact chain
 ```python
 # ── RGB IMAGE (same as depth) ──────────────────────────────────────────────── #
 # configs/data/local_seg.yaml — transform list:
-SquarePad()                           # pad to square (edge-replication, no crop)
+SquarePad()                           # pad to square (flat local-mean fill, no crop)
 Resize((512, 512))                    # square → 512×512
 ToTensor()                            # uint8 [0,255] → float [0,1]
 Normalize(mean=[0.5]*3, std=[0.5]*3)  # [0,1] → [-1,1]

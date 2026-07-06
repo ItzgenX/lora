@@ -1,7 +1,125 @@
-# Depth Pipeline — Zero to Hero Guide
+﻿# Depth Pipeline — Zero to Hero Guide
 
 **Pipeline**: CTRLorALTer depth-conditioning arm (ECCV 2024, arXiv:2405.07913)  
 **What it does**: Fine-tunes LoRA blocks inside a Stable Diffusion 1.5 UNet so the model generates images that respect a user-supplied depth map. The depth signal is injected via a learned mapper network (not a ControlNet adapter), keeping the base model frozen.
+
+---
+
+## 0 · Concepts From Zero — read this once and the rest of the doc makes sense
+
+No prior diffusion knowledge assumed. Each concept below is (a) explained plainly, (b) tied to the exact place it lives in THIS repo, and (c) connected to a number you actually see when you run things. SEGMENTATION.md shares all of these concepts and adds its own §0 for seg-specific ones.
+
+### 0.0 Plain-words glossary — every technical word used anywhere in these two docs
+
+Read once; come back whenever a word feels new. Nothing below this table uses a term that isn't either here or explained where it first appears.
+
+| Word | Plain meaning |
+|---|---|
+| **tensor** | A grid of numbers with a shape — a 512×512 RGB image is a `[3, 512, 512]` tensor (3 colour channels × height × width). Everything a neural network touches is a tensor. `[B, 3, 512, 512]` means a **B**atch of B such images processed together. |
+| **uint8 / float32 / 8-bit** | Number formats. uint8 = whole numbers 0–255 (how PNGs store pixels — "8-bit" means the same). float32 = decimal numbers (how models compute). bf16 = half-size decimals (see §0.10). |
+| **JSONL / manifest** | A plain text file with one JSON record per line. Our "manifests" are JSONLs where each line says: this image + this map + this prompt. Training reads them line by line. |
+| **YAML** | A human-readable settings file format (`key: value`). Everything configurable in this project lives in `configs/*.yaml`. |
+| **Hydra** | The library that reads our YAML configs, lets you override any value from the command line (`epochs=5`), and creates the dated run output folder automatically. |
+| **conda env** | An isolated Python installation with pinned package versions (`loradapter` here) so the project always runs against the same libraries. |
+| **accelerate** | Hugging Face's training launcher — handles GPU placement, mixed precision (bf16), and multi-GPU (`accelerate launch --num_processes=4`) without changing the training code. |
+| **TensorBoard** | The curve viewer. Training writes numbers into `logs/tensorboard/`; `tensorboard --logdir ...` shows them as graphs in your browser. |
+| **tqdm** | The progress bar in the terminal (`Steps: 50%\|#### \| 3.45s/it`). "s/it" = seconds per step. |
+| **VRAM** | The GPU's own memory (12 GB on the dev card). Models + images must fit in it. |
+| **OOM** | "Out of memory" — the crash when VRAM runs out. Fixed by lowering batch_size or enabling gradient checkpointing. |
+| **gradient / backprop** | The direction-and-size of the weight change that would reduce the current error, computed by backpropagation ("backprop") after every forward pass. Training = repeat: forward → gradients → nudge weights. |
+| **optimizer / AdamW** | The algorithm that applies those nudges. AdamW is the standard choice — it adapts the step size per weight. `optimizer.step()` in the code is one nudge. |
+| **grad_norm** | The overall size of all gradients combined — the number logged as `train/grad_norm`. Spikes = instability; we clip it at 1.0. |
+| **no_grad** | A "don't track gradients" mode used during validation/generation — faster and lighter because no training bookkeeping happens. |
+| **RNG / seed / OS entropy** | RNG = random number generator. A **seed** (42 here) makes randomness repeatable — same seed, same "random" numbers. "OS entropy" = truly unseeded randomness (different every run). |
+| **convolution / conv** | The basic image-network operation: a small filter slides across the image producing a new feature map. A "conv layer" is a layer of such filters. |
+| **ResNet block** | A standard building unit inside the UNet: two conv layers plus a shortcut connection. The UNet is a stack of these — our LoRA adapters attach to the first conv of each block. |
+| **cross-attention** | The layer where image features "look at" the text embedding — the mechanism that lets the prompt steer generation. |
+| **logits** | A model's raw, unnormalised scores before picking a winner — for seg, 19 numbers per pixel (one per class). |
+| **argmax** | "Pick the index of the biggest number." Turning 19 per-pixel scores into the one winning class ID is an argmax. |
+| **bilinear / NEAREST (interpolation)** | Two ways to resize images. Bilinear blends neighbouring pixels smoothly (right for photos/depth). NEAREST copies the closest pixel unblended (required for class-ID maps — see SEGMENTATION.md §0.4). |
+| **normalisation** | Rescaling numbers into a standard range, e.g. pixels [0,255] → [-1,1], or a depth map to [0,1] by its own min/max ("min-max"), or shifting by dataset statistics ("ImageNet normalisation" — the mean/std of the dataset SegFormer was trained on). |
+| **checkpoint** | A saved snapshot of the trainable weights at some step, written to its own folder — you can generate from it or resume from it later. |
+| **buffer** | A tensor stored inside a model that moves to the GPU with it but is never trained (e.g. the palette, the ImageNet mean/std). |
+| **id2label** | The lookup table inside the SegFormer checkpoint mapping class ID → class name (0→"road", 11→"person"…). We verified our palette order against it. |
+| **SSOT** | "Single source of truth" — the one place a value is defined; everything else imports it (e.g. the palette lives only in `seg_encoder.py`). |
+| **PSNR / SSIM** | Peak Signal-to-Noise Ratio and Structural Similarity — two standard image-similarity scores (higher = more similar). Used per checkpoint, see §0.12. |
+| **CLI flag** | A `--something` option passed on the command line (`--no_skip`, `--data_dir data/`). |
+| **DPT / MiT-B5** | Just architecture names: DPT = the transformer design MiDaS uses for depth; MiT-B5 = the backbone size inside SegFormer-b5. |
+
+### 0.1 What a diffusion model is
+
+Take a photo and add a little random noise. Add more. After ~1000 rounds it's pure static. A diffusion model is a neural network trained to run that film **backwards**: shown a noisy image, it predicts what noise was added, so you can subtract it. Generation = start from pure static and denoise step by step until a clean image emerges. Think of a sculptor who "sees the statue inside the marble": each denoising step chips away a bit more noise toward a coherent image. At inference we use 50 steps (`num_inference_steps: 50` in the inference YAMLs) — a shortcut schedule through those ~1000 training noise levels.
+
+### 0.2 Latent diffusion, the VAE, and why "512" appears everywhere
+
+Denoising a full 512×512×3 image ~50 times is expensive. Stable Diffusion instead works on a compressed version: a **VAE** (variational autoencoder) squeezes the image into a 64×64×4 "latent" (a blueprint), diffusion happens on the blueprint, and the VAE decodes the final blueprint back to 512×512 pixels. That's why `size: 512` is fixed in our configs — it's SD1.5's native canvas (the VAE compresses it 8× to 64×64). In the code: `SD15.get_input()` in `src/model.py` does the VAE encoding.
+
+### 0.3 The UNet and the loss number you watch
+
+The denoiser network is a **UNet** — an hourglass-shaped conv network that takes (noisy latent, timestep, text) and predicts **the noise itself** (the "epsilon objective"). Training is disarmingly simple: take a training image, add a *known* random noise, ask the UNet to predict that noise, and score it with mean-squared error. That MSE **is** `train/loss` in TensorBoard. It never goes to 0 (predicting exact random noise is impossible); healthy values hover around 0.02–0.3 depending on the random timestep drawn, which is why the curve is jagged — watch the *trend*, not single points. `val/loss` is the same computation on held-out images with a fixed RNG seed, which is why it moves smoothly.
+
+### 0.4 Text conditioning, the tokenizer, and classifier-free guidance
+
+Your prompt is chopped into tokens by SD1.5's CLIP **tokenizer**, embedded by the CLIP text encoder, and fed to the UNet via cross-attention — that's how "a red car" steers denoising. Both our pipelines use this identical text path.
+**Classifier-free guidance (CFG)**: during training, 5% of the time the prompt is replaced with "" (`c_dropout=0.05` in `src/model.py`), so the model also learns to denoise "blind". At inference we run it both with and without the prompt and push the result *away* from blind and *toward* prompted, scaled by `guidance_scale: 7.5`. The same 5% dropout is applied to the conditioning map — that's what makes the map's influence steerable too.
+
+### 0.5 LoRA — why our checkpoints are 120 MB, not 4 GB
+
+Fine-tuning all of SD1.5 (~860M params) is heavy and destroys its general knowledge. **LoRA** (Low-Rank Adaptation) freezes the original weight matrix `W` and learns only a small correction: two thin matrices `A` (down to rank 128) and `B` (back up), so the effective weight is `W + B·A`. Sticky notes on a textbook: the book is untouched; the notes carry your changes. `B` starts as all-zeros (`nn.init.zeros_` in `src/lora.py`), so at step 0 the correction is exactly nothing and training starts from vanilla SD1.5 behaviour. Only A, B and the mapper are saved — hence ~120 MB checkpoints (`lora-checkpoint.pt` + `mapper-checkpoint.pt`).
+
+### 0.6 The CTRLorALTer trick — conditional LoRA via FiLM
+
+Plain LoRA is static — the same correction for every image. This paper's idea: make the correction **depend on the conditioning map**. A small **mapper network** (`FixedStructureMapper15`) reads the 512×512 map and produces, per UNet block, a pair of vectors; inside each LoRA the down-projected activation gets multiplied by `gamma(c) + 1.0` and shifted by `beta(c)` — a technique called **FiLM** (feature-wise linear modulation). The `+1.0` matters: when gamma's output starts near 0, the scale starts near 1 = "change nothing", the same safe-start principle as B's zero-init. Injection points: the **first conv of every ResNet block** in the UNet (`adaption_mode: only_res_conv`, matching `0.conv1`/`1.conv1` in `src/model.py::add_lora_to_unet`). So: map → mapper → per-block FiLM signals → LoRA corrections → the generated image follows the map's layout.
+
+### 0.7 Structure conditioning: depth maps and the two encoders
+
+A **depth map** is a grayscale image where brightness = relative distance (bright = near, dark = far, per-image min-max normalised to [0,1]). We get it from **MiDaS** (`Intel/dpt-hybrid-midas`, `src/annotators/midas.py` — untouched stock code, confirmed by git history). A **seg map** labels every pixel with a class (road/person/car/... — SEGMENTATION.md §0). Both are "structure": they say WHERE things go, while the prompt says WHAT they look like.
+
+### 0.8 Our big deliberate divergence from the stock repo (and why)
+
+Stock LoRAdapter computes depth **live** from the raw image at every training step (`cond = encoder(img)` inside the forward pass). We instead:
+- **Training: pre-saved maps.** Stage A/C compute every map once, offline (`depth_map_calculations.py` / `seg_map_calculations.py`), and training loads PNGs (`skip_encode=True` bypasses the encoder — §5.3). Why: the encoder (especially SegFormer-b5, 82M params) would otherwise run on every step of every epoch, again and again, for identical outputs — measured to keep VRAM identical between depth and seg training precisely because neither encoder runs during training.
+- **Inference: live encoder.** You hand the script a raw photo, it computes the map on the fly (`model.sample()` → `encoder(c)`), because at inference each image is seen once and convenience wins.
+- **The parity rule (the single most important rule in this repo)**: saved-for-training maps and live-at-inference maps MUST come from the same model, same preprocessing, same value range — otherwise the model trains on one "dialect" of maps and is quizzed in another. Everything in §5 (letterbox, shared preprocessing, parity checks) exists to enforce this.
+
+### 0.9 Letterbox in one paragraph (full story: §5.1, §5.14a)
+
+Our images are 1280×800; the model needs squares. Cropping cuts content (rejected), stretching distorts shapes and even changes what the segmenter sees (evaluated with real previews and rejected — §5.14a). So we **letterbox**: pad top/bottom with a flat local-mean colour, then resize. The pad-fill used to be a stretched copy of the edge row, which produced a striped band that the model *learned to draw* (see §5.1's 2026-07-05 fix — the flat fill removed it). Extra reason the square matters: MiDaS silently center-crops any non-square input internally, so feeding it a square is a correctness requirement, not a style choice (§5.1).
+
+### 0.10 Training mechanics decoded (every number in train_depth.yaml)
+
+- **batch_size: 4** — images per forward pass; the most a 12 GB GPU fits (measured ~90.6% VRAM).
+- **gradient_accumulation_steps: 4** — gradients from 4 mini-batches are summed before one weight update, simulating a batch of 4×4=**16** (the "effective batch") without the memory cost. One weight update = one "optimizer step" = one tick of `global_step`.
+- **learning_rate: 1e-4, lr_warmup_steps: 500, lr_scheduler: cosine** — how big each weight nudge is; ramped up gently for 500 steps (a cold start with full LR can wreck the zero-init'd adapters), then decayed along a cosine curve to ~0 so training "settles".
+- **bf16: true** — 16-bit floats: half the memory, GPU-native, numerically safe for training.
+- **gradient_checkpointing: true** — trades ~20% speed for ~800 MB VRAM by recomputing activations during backprop instead of storing them. Required on 12 GB.
+- **epochs: 5** — full passes over the training set; steps/epoch = ceil(N_images / 16).
+- **seed: 42** — fixes the random generator for reproducible sampling/validation.
+
+### 0.11 train / val / test — three jobs, never mixed
+
+- **train** (639 local / 59,766 real): the model learns from these.
+- **val** (137 / 3,314): never trained on; used for `val/loss` (overfitting detector — if train/loss falls while val/loss rises, the model is memorising), for picking `best_model/`, and as the source of checkpoint monitoring images.
+- **test** (137 / 3,327): touched by NOTHING during training — kept clean as the final honest benchmark. If we peeked at it for decisions, its verdict would be worthless.
+
+### 0.12 What a checkpoint gives you and how we judge it
+
+Every `ckpt_steps` (and every epoch end) a checkpoint folder is written: LoRA+mapper weights, N=10 labeled sample images (ORIGINAL | DEPTH MAP | PREDICTED), and prompts.txt. Half the scenes are **fixed** (same every checkpoint → watch the same scenes improve), half **fresh** (re-drawn → generalisation peek). Two numbers accompany every save: `val/psnr_fixed` and `val/ssim_fixed` — pixel- and structure-similarity between each fixed scene's generation and its real photo. Because the scenes and the sampling seed are fixed, these numbers are comparable across checkpoints *and* between the depth run and the seg run at matched steps — this is the objective evidence for the final "depth vs seg: which conditions better" verdict (§5.13).
+
+### 0.13 Self-test — if you can answer these, you're the hero
+
+1. Why does `train/loss` never reach 0, and why is it so jagged while `val/loss` is smooth? *(0.3: predicting random noise exactly is impossible; val uses a fixed seed.)*
+2. Why are checkpoints 120 MB when SD1.5 is ~4 GB? *(0.5: only LoRA A/B + mapper are saved; the base model is frozen.)*
+3. What does `skip_encode=True` do and where is it used vs not used? *(0.8/§5.3: bypasses the live encoder — training/validation use it with pre-saved maps; live inference never does.)*
+4. Why must training maps and inference maps use identical preprocessing? *(0.8: otherwise train/inference distribution mismatch — the model is trained on one dialect and quizzed in another.)*
+5. Why letterbox and not crop or stretch? *(0.9/§5.14a: crop loses driving-scene content; stretch distorts geometry and shifted seg classes in a real preview.)*
+6. Why did the old padding produce a striped band, and why did generated images show it too? *(§5.1: stretched 1-px edge row → each busy pixel became a vertical stripe; the model learned the pattern from training data.)*
+7. What was the manifest-collision bug and what now prevents it? *(§5.12: all rows pointed at one overwritten map file because every image is raw_image.jpg. Three guards now: both `--data_dir` and `--dataset_dir` name maps after the per-image folder, a collision guard aborts before any GPU work if two images would share a PNG, and verifier check 5 fails loudly on any duplicate map path.)*
+8. What's the effective batch and why does it matter more than batch_size? *(0.10: batch_size × grad_accum = 16 — it's what learning dynamics (and the LR choice) actually depend on.)*
+9. Why is `lora.struct.ckpt_path` resume only a "weight warm-start"? *(§5.9: weights reload, but optimizer state/LR schedule/global_step restart from 0 — verified by execution.)*
+10. Why do the depth and seg configs have to be identical except the conditioning block? *(§0.12/§9 of the task: otherwise the depth-vs-seg comparison measures config differences, not conditioning quality — verified 29/29 params identical.)*
+11. Why does `gamma(c) + 1.0` have the `+1.0`? *(0.6: scale starts at ≈1 = "change nothing" — a safe identity start, like B's zero-init.)*
+12. Why must the image be square BEFORE it reaches MiDaS? *(§5.1: MiDaS internally center-crops non-square input — you'd silently lose the frame edges.)*
 
 ---
 
@@ -27,7 +145,7 @@ Supporting files:
 |------|------|
 | `src/annotators/midas.py` | `DepthEstimator` class wrapping Intel/dpt-hybrid-midas |
 | `src/data/local.py` | `DepthJsonDataset`, `DepthJsonDataModule` |
-| `src/data/transforms.py` | `SquarePad` (edge-replication padding) |
+| `src/data/transforms.py` | `SquarePad` (flat local-mean fill padding) |
 | `configs/train_depth.yaml` | Base training config (required keys + defaults) |
 | `configs/experiment/train_depth.yaml` | Unified experiment overrides (use this one) |
 | `configs/inference_depth.yaml` | Inference config |
@@ -43,12 +161,13 @@ RAW IMAGE (arbitrary aspect ratio)
         v
   [Stage A -- depth_map_calculations.py]  (run ONCE offline)
         |
-        +-- SquarePad (edge-replication) --> square image (no distortion)
+        +-- SquarePad (flat local-mean fill) --> square image (no distortion)
         +-- Resize to 512x512
         +-- ToTensor + Normalize [-1,1]
         +-- DepthEstimator (DPT-hybrid-midas)  -->  per-image min-max --> [0,1] depth
-        +-- Scale x255, save as 8-bit grayscale PNG   --> data/raw_depth/.../img.png
-        +-- Write data/depth_training/{train,val,test}.json
+        +-- Scale x255, save as 8-bit grayscale PNG
+               --> <dataset>_depth_map/000417/000417_depth_map.png  (sibling folder)
+        +-- Write data/depth_training/{train,val,test}.jsonl
                (keys: raw_image_path, depth_path, prompt)
 
         |
@@ -106,7 +225,7 @@ Here is the full image journey through the depth pipeline:
 RAW IMAGE (e.g. 1280×800)
     │
     ▼ [Stage A preprocessing — depth_map_calculations.py]
-    SquarePad()             → 1280×1280  (edge-replication, no distortion)
+    SquarePad()             → 1280×1280  (flat local-mean fill, no distortion)
     Resize(512, 512)        → 512×512    (our pipeline canvas)
     ToTensor + Normalize    → [-1, 1]
     │
@@ -195,9 +314,11 @@ Our `SegmentationEncoder` in `src/encoders/seg_encoder.py` was deliberately desi
 
 ## 5 · Key Design Concepts
 
-### 5.1 SquarePad (edge-replication padding)
+### 5.1 SquarePad (flat local-mean fill padding)
 
-`src.data.transforms.SquarePad` pads the shorter dimension to make the image square using edge-pixel replication (not zero-padding, not centre-crop). This preserves spatial content at borders.
+`src.data.transforms.SquarePad` pads the shorter dimension to make the image square using a **single flat fill colour per pad region** — the mean colour of a thin (8 px) strip just inside that edge (not zero-padding, not centre-crop, and since 2026-07-05 no longer edge-replication). This preserves spatial content at borders.
+
+**Flat-fill fix (2026-07-05, VERIFIED)**: the previous version stretched a 1-px boundary strip to fill the pad region. That is correct edge-replicate padding by definition — but every pixel of real horizontal detail in that single boundary row (sky/building edges, power lines, sensor noise) survived exactly and was repeated straight down the pad band, producing a smeared multicolour striped band on busy edge rows. The model then **learned** that band from the training data (it appeared in generated output too, not just conditioning panels). The flat local-mean fill has zero internal variation by construction, so it cannot band regardless of how busy the edge row is. A `fill_mode="mode"` option (most-frequent colour, never a blend) exists for the case where `SquarePad` is ever applied directly to a categorical/palette map — not needed by any current code path. Verified by the module's own self-check (`python -m src.data.transforms`, both PASS lines) and by numeric + visual inspection of regenerated maps. **All cached maps computed before this fix carry the old artifact — regenerated 2026-07-05 with `--no_skip` (913/913 depth + seg). Checkpoints trained before 2026-07-05 will keep showing the band — that's the old learned pattern, not a fix failure.** Note: the vehicle hood visible at the *bottom* of real driving frames is real sensor content, not a padding artifact — it needs no fixing. `last_padding_fracs` keeps its exact (left, top, right, bottom)-fractions contract.
 
 **Why it's required**: MiDaS's `better_resize()` internally crops to a square before running. Without `SquarePad`, a landscape image would lose its left and right portions inside the DPT encoder. The padding is applied **in all three preprocessing sites** to ensure consistency:
 
@@ -241,68 +362,48 @@ python depth_map_calculations.py --data_dir data/ --image_path target
 
 The key name flows from CLI → `_get_image_path(entry, image_path)` → file open. Nothing else in the script hard-codes a key name.
 
-#### `--image_root` — required whenever images live OUTSIDE the repo
+#### Where the depth maps are saved — a SIBLING folder, derived automatically (2026-07-07)
 
-`--image_root` does two things, both needed for external datasets:
-
-1. **Path resolution**: prepend to relative paths in JSONL to build the absolute path to each image.
-2. **Folder mirroring**: used as the base to compute where the depth PNG goes inside `data/raw_depth/`, preserving the full nested structure.
-
-**Without `--image_root` — collision disaster (VERIFIED):**
-
-If your images are external (e.g. `/workstation/dataset/sceneA/subdir/raw_image.jpg`) and you don't set `--image_root`, ALL depth maps land at the same path `data/raw_depth/raw_image.png` and every image overwrites the previous one. This is silent data loss.
-
-**With `--image_root /workstation` — correct nested output (VERIFIED):**
+You do NOT choose an output folder and you cannot cause an overwrite. `--data_dir` looks at the image paths in your JSONLs, finds the folder common to all of them (the **dataset root**, e.g. `.../custome_dataset`), and saves each map into a **sibling folder next to it** — `.../custome_dataset_depth_map/` — mirroring the internal structure. The map file is named after the image's **folder**, so every image gets a unique map:
 
 ```
-/workstation/dataset/sceneA/lvl1/raw_image.jpg      → data/raw_depth/dataset/sceneA/lvl1/raw_image.png
-/workstation/dataset/sceneB/lvl1/raw_image.jpg      → data/raw_depth/dataset/sceneB/lvl1/raw_image.png
-/workstation/dataset/run_001/cam_left/raw_image.jpg → data/raw_depth/dataset/run_001/cam_left/raw_image.png
+.../custome_dataset/000417/raw_image.jpg  →  .../custome_dataset_depth_map/000417/000417_depth_map.png
+.../custome_dataset/000420/raw_image.jpg  →  .../custome_dataset_depth_map/000420/000420_depth_map.png
 ```
 
-The folder depth can be arbitrary — any nesting is preserved. Folders can have any names. Other images in the same end-folder (e.g. `thumbnail.jpg`, `mask.png`) are naturally ignored because the script only processes paths listed in the JSONL — it never scans directories.
+This is IDENTICAL to what `--dataset_dir` scan mode does (§5.2b) — the two modes were unified on 2026-07-07 so they always agree, and both were proven to produce byte-identical manifest entries for the same image.
 
-**Rule: set `--image_root` to the COMMON ROOT of all image paths in your JSONL.**
+**Why the old design was replaced:** `--data_dir` used to save maps into `data/raw_depth/` named after the image *filename*. Because every image in this dataset is named `raw_image.jpg`, all 913 maps overwrote each other into one file (the 2026-07 bug). Two safeguards now make that impossible:
+1. Maps are named after the per-image **folder**, not the filename.
+2. A **collision guard** runs before any GPU work — if two images would ever write the same PNG, the script aborts loudly and prints both image paths.
 
-```bash
-# Images at /workstation/custom_dataset/... — relative paths in JSONL
-python depth_map_calculations.py --data_dir data/ --image_path target \
-  --image_root /workstation
-
-# Images at /workstation/custom_dataset/... — absolute paths in JSONL
-# (image_root is NOT used for resolution here, but still needed for folder mirroring)
-python depth_map_calculations.py --data_dir data/ --image_path target \
-  --image_root /workstation
-```
+`--image_root` still exists, but only to resolve **relative** image paths in the JSONL (prepend this base). Your `data/*.jsonl` store **absolute** paths, so you don't need it.
 
 #### The full discovery → depth → output flow (VERIFIED by execution)
 
 ```
 data/train.jsonl                               ← --data_dir
-  {"target": "data/raw/000417/raw_image.jpg", "prompt": "..."}
+  {"target": ".../custome_dataset/000417/raw_image.jpg", "prompt": "..."}
        │
        │ --image_path target
        ▼
   _get_image_path(entry, "target")
-       │  → "data/raw/000417/raw_image.jpg"
+       │  → ".../custome_dataset/000417/raw_image.jpg"   (absolute, used as-is)
        ▼
-  image_root / raw_str    (repo_root / raw_str when --image_root not set)
-       │  → /repo/data/raw/000417/raw_image.jpg   (resolved absolute path)
-       │
-       │ other files in same folder (thumbnail.jpg, mask.png, etc.)
-       │ are NOT touched — only JSONL-listed paths are processed
+  dataset root = folder common to ALL images  →  .../custome_dataset
+  sibling      = dataset root + "_depth_map"   →  .../custome_dataset_depth_map
        ▼
   DepthEstimator.forward(image)   → depth tensor [1, 512, 512] in [0,1]
        │
        ▼
-  _depth_out_path: mirrors nested folder structure under --image_root
-       │  → data/raw_depth/000417/raw_image.png
+  _sibling_map_path: mirror structure, name after the FOLDER
+       │  → .../custome_dataset_depth_map/000417/000417_depth_map.png
        ▼
   data/depth_training/train.jsonl  (output — VERIFIED mapping)
   {
-    "raw_image_path": "data/raw/000417/raw_image.jpg",   ← original path, unchanged
-    "depth_path":     "data/raw_depth/000417/raw_image.png",
-    "prompt":         "this is a close up of a person holding a map..."  ← verbatim
+    "raw_image_path": ".../custome_dataset/000417/raw_image.jpg",              ← absolute, unchanged
+    "depth_path":     ".../custome_dataset_depth_map/000417/000417_depth_map.png",
+    "prompt":         "this is a close up of a person holding a map..."         ← verbatim
   }
 ```
 
@@ -310,16 +411,17 @@ data/train.jsonl                               ← --data_dir
 
 | Situation | Command |
 |---|---|
-| Images inside repo, JSONL key = `"source"` (default) | `python depth_map_calculations.py --data_dir data/` |
-| Images inside repo, JSONL key = `"target"` | `... --image_path target` |
-| Images outside repo, any key | `... --image_path target --image_root /path/to/common/root` |
-| Quick smoke-test | `... --dry_run_n 5` |
+| Your dataset (key = `"target"`, absolute paths) | `python depth_map_calculations.py --data_dir data/ --image_path target` |
+| Same, but scan the folder for images instead of trusting JSONL paths | `... --dataset_dir /path/to/custome_dataset --data_dir data/ --image_path target` |
+| JSONL key = `"source"` (default) | `python depth_map_calculations.py --data_dir data/` |
+| Relative image paths in JSONL | add `--image_root /path/to/common/root` |
+| Quick smoke-test | add `--dry_run_n 5` |
 
-**Never omit `--image_root` when images are outside the repo.** Without it, all depth maps write to the same file and your data is silently corrupted.
+`--data_dir` and `--dataset_dir` both save to the sibling folder and both refuse to overwrite — you cannot corrupt your data by picking the "wrong" one.
 
 ### 5.2b Dataset-scan mode (`--dataset_dir`) — save maps in a SIBLING, mirrored tree [VERIFIED]
 
-This is the mode for a dataset that lives OUTSIDE the repo, where each scene folder contains `raw_image.jpg` (plus possibly other files). Instead of trusting JSONL paths to *find* images, the script **scans the folder** and finds `raw_image.jpg` directly. The depth map is saved into a **new sibling folder** next to the dataset root, mirroring the dataset's internal structure — **the source dataset folder is never written into.**
+Same saving behavior as `--data_dir` above (sibling folder, mirrored, folder-named maps), with ONE difference: instead of trusting the JSONL paths to *find* images, the script **scans `--dataset_dir` recursively** for `raw_image.jpg` and uses whatever is on disk. Use it when you want disk to be the source of truth for which images exist; use plain `--data_dir` when the JSONLs already list exactly the images you want. Either way the maps land in the same place. The `--data_dir` argument is still required (it supplies each image's prompt + split).
 
 **Command:**
 ```bash
@@ -407,7 +509,7 @@ During training the depth map is loaded from `batch["depth"]` (the pre-computed 
 
 During inference the raw image is fed to the live `DepthEstimator` inside `model.sample()`. The preprocessing chain must be identical to Stage A to ensure the mapper sees the same distribution of depth maps.
 
-### 5.3 Conditional LoRA (StructLoRA / NewStructLoRAConv)
+### 5.3b Conditional LoRA (StructLoRA / NewStructLoRAConv)
 
 LoRA adapters are inserted into the UNet's residual-conv layers only (`adaption_mode: only_res_conv`). Rank = 128. The mapper network takes a 128-dim depth embedding and outputs per-layer delta-weights. The base UNet is frozen throughout.
 
@@ -438,19 +540,19 @@ These are **independent**. You can validate every 50 steps and checkpoint every 
 
 ### 5.6 Why test.jsonl Is Never Touched During Training
 
-`data/depth_training/test.jsonll` is written by `depth_map_calculations.py` alongside `train.jsonl` and `val.jsonl`, but **no training or validation config ever reads it**. It exists so you can run a final held-out evaluation after training is complete, using `depth_inference.py`.
+`data/depth_training/test.jsonl` is written by `depth_map_calculations.py` alongside `train.jsonl` and `val.jsonl`, but **no training or validation config ever reads it**. It exists so you can run a final held-out evaluation after training is complete, using `depth_inference.py`.
 
 Training configs (`configs/experiment/train_depth.yaml`) reference only:
 ```yaml
-json_file:     data/depth_training/train.jsonll
-val_json_file: data/depth_training/val.jsonll
+json_file:     data/depth_training/train.jsonl
+val_json_file: data/depth_training/val.jsonl
 ```
 
 The test split stays clean.
 
 ### 5.7 Hostname Override in TensorBoard
 
-TensorBoard embeds `socket.gethostname()` in the tfevents filename. Without intervention this would produce `events.out.tfevents.<ts>.aditya.<pid>.0`, leaking the machine name.
+TensorBoard embeds `socket.gethostname()` in the tfevents filename. Without intervention this would produce `events.out.tfevents.<ts>.<your-machine-hostname>.<pid>.0`, leaking the machine name into shareable log files.
 
 The code overrides it before calling `accelerator.init_trackers`:
 ```python
@@ -516,6 +618,40 @@ python recommend_training_params.py --data_dir data/depth_training --epochs 10
 
 **Verified by execution**: run against the real local dataset (639 images) on a 12GB dev GPU, correctly recommended `batch_size=4`, `gradient_accumulation_steps=4`, `gradient_checkpointing=true` (matching the independently-measured-safe values from §5.8) and `steps_per_epoch=40`. Also verified against a synthetic 59,766-line manifest (matching this project's real target dataset size) — correctly computed `steps_per_epoch=3736`, `total_steps=18680`, matching the manual calculation in §5.8 exactly. The batch/accum-scaling formula for GPUs other than ~12GB was separately verified across 4 simulated sizes (12/24/48/98GB) to still hold the effective batch at exactly 16 in every case — same capping logic that was bug-fixed in the now-removed runtime version, re-verified intact in this standalone tool.
 
+### 5.12 Manifest-Collision Bug Fixed (2026-07-05), then Mode-Unified (2026-07-07) [VERIFIED]
+
+**The bug**: the old `--data_dir` mode wrote each map as `<stem>.png` into one flat folder (`data/raw_depth/`). Every image in this dataset is named `raw_image.jpg`, so all 913 maps overwrote each other into ONE file, and every manifest row pointed at that single survivor — training would have run *silently* with the same conditioning map for every image. It first surfaced on 2026-07-05 and was hit again on Linux on 2026-07-07 (running `--data_dir` without `--dataset_dir`).
+
+**The permanent fix (2026-07-07, verified by execution)**: `--data_dir` and `--dataset_dir` were **unified** — both now derive the dataset root from the image paths and save collision-free `<folder>_depth_map.png` names into the mirrored **sibling** tree `<dataset>_depth_map/` (§5.2, §5.2b). Both were proven to produce byte-identical manifest entries for the same image, and both write manifests the real training dataset loaders consume (checked by loading a produced manifest through `DepthJsonDataset` → correct `jpg`/`depth`/`caption` tensors). Three independent guards now make the overwrite impossible:
+1. Maps are named after each image's **folder**, never the filename.
+2. A **collision guard** runs before any GPU work and aborts loudly (naming both images) if two would share a PNG. Negative-tested: it fires.
+3. Verifier **check 5** fails on any duplicate map path in the finished manifest.
+
+**Earlier regeneration**: both calc scripts were re-run with `--no_skip` on 2026-07-05 — 913/913 depth + 913/913 seg maps regenerated (with the fixed flat-fill SquarePad, so this also purged the striped-band artifact). Any checkpoint trained before 2026-07-05 was trained on collided conditioning — treat it as invalid for quality judgements.
+
+### 5.13 Per-Checkpoint Quantitative Metric + Per-Step File Logging (2026-07-05) [VERIFIED]
+
+- **`val/psnr_fixed` / `val/ssim_fixed`**: at every checkpoint-image event, PSNR + SSIM are computed between each FIXED scene's generation and its real validation image (`src/utils.py::compute_psnr_ssim`, pure numpy), averaged, and logged to TensorBoard and the run's `.log`. Fixed scenes + fixed seed make the trend comparable across checkpoints *and* across the depth-vs-seg runs at matched steps — this is the objective signal for the final comparison. (FID is meaningless at 10 samples per point; CLIP would need weights not present in `checkpoints/local_models/`. `torch-fidelity` remains available for a one-off final FID over a full val-set generation pass if wanted.)
+- **`log_every_steps`** (YAML, default 50): every N optimizer steps a `[train] step/loss/lr/grad_norm/epoch` line is written into the run's own `depth_training.log` (Hydra job log — already timestamped and file-based), so a run can be read back without opening TensorBoard.
+- **Removed dead YAML keys** (read by nothing in the training path, verified by grep): `use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond` — deleted from all four depth/seg training configs rather than left as silent no-ops. `ignore_check` stays (it is read by `add_lora_from_config`).
+
+### 5.14a resize_mode: FINAL DECISION — letterbox only; stretch REMOVED (2026-07-06)
+
+**The user evaluated stretch with real side-by-side encoder previews and rejected it.** Evidence used for the decision (kept for the record): `outputs/viz/resize_mode_preview.png` (letterbox vs stretch: original + depth map + seg map, real encoders, same scene) and `outputs/viz/letterbox_vs_stretch.png`. Deciding observations: stretch's aspect distortion (1280×800 → 512×512 compresses width 2.5× vs height 1.6×) visibly squeezed people/buildings AND shifted segmentation classes in the preview (part of the sky read as "building") — SegFormer was trained on undistorted photos. Letterbox keeps true geometry; its flat pad bars are clean (§5.1) and identical at training and inference.
+
+**Consequence — the stretch option was REMOVED from the code entirely** (not just left unselected), so training and inference can never be run in different modes by accident:
+- `src/data/transforms.py` `build_seg_square_preprocess(size)` — no `resize_mode` parameter anymore; letterbox is built in.
+- `seg_map_calculations.py` — `--resize_mode` CLI flag removed.
+- `configs/inference_seg.yaml` — `inference.resize_mode` key removed.
+- `seg_inference.py` — no longer reads a mode; calls the fixed builder.
+- Depth never had a switch (its three preprocess sites are letterbox inline).
+
+Also remember §5.14 above: whichever preprocessing produced the training maps is the preprocessing inference must use forever for that checkpoint — mode-mixing (e.g. train letterbox, infer stretch) runs without error but silently degrades quality, because the model learns the bar layout and the map geometry from training data. This is why the toggle was removed rather than documented.
+
+### 5.14 Parity Tolerance — Batch-Shape Kernel Jitter (2026-07-05) [MEASURED]
+
+Saved training PNGs and live single-image encoder output are *not bit-identical*: measured up to `0.0086` max abs diff (depth, ≈2.2/255) and ~1e-5 of pixels (seg argmax flips at region boundaries). Root cause isolated by execution: the same image through the same weights in the same process differs between batch-of-1 and batch-of-4 (up to `0.0036` depth) — GPU kernels are selected per batch shape. The calc scripts run batched; live inference runs single-image. This is inherent GPU numerics (and exists across different GPUs anyway), ~100× below the 5% conditioning dropout, and **not** a preprocessing bug — same-shape float-vs-float parity is exactly `0.0`. Acceptance criteria: same-shape diff `= 0.0`; PNG-vs-live `≤ 0.015` (depth); ID-mismatch fraction `≤ 1e-4` (seg).
+
 ---
 
 ## 6 · YAML Parameters Explained
@@ -525,7 +661,7 @@ python recommend_training_params.py --data_dir data/depth_training --epochs 10
 | Key | Default | Notes |
 |-----|---------|-------|
 | `size` | `???` | **Required.** Image size; experiment sets 512 |
-| `learning_rate` | `1e-4` | AdamW lr; experiment overrides to `2e-4` |
+| `learning_rate` | `1e-4` | AdamW learning rate; experiment keeps `1.0e-4` (identical to seg — required for the comparison) |
 | `lr_scheduler` | `constant` | Experiment overrides to `cosine` |
 | `lr_warmup_steps` | `0` | Experiment overrides to `500` |
 | `epochs` | `10` | Experiment overrides to `5` |
@@ -538,23 +674,17 @@ python recommend_training_params.py --data_dir data/depth_training --epochs 10
 | `gradient_accumulation_steps` | `1` | Experiment overrides to `4` |
 | `tag` | `''` | Experiment sets `'depth'`; used as hostname in tfevents |
 | `local_files_only` | `false` | Set `true` once models are downloaded |
-| `ignore_check` | `false` | Suppress data-integrity pre-check |
+| `ignore_check` | `false` | Suppress the checkpoint-key completeness assert in `add_lora_from_config` |
 | `prompt` | `null` | If set, overrides all per-sample captions |
+| `log_every_steps` | `50` | Write a `[train] step/loss/lr` line into the run's `.log` every N optimizer steps |
 
-**Dead keys** (present in config but NOT read by `depth_training.py`):
-
-| Key | Why it exists |
-|-----|---------------|
-| `use_empty_prompt_eval` | Used by original `train.py`; depth trainer uses `grid_include_empty_prompt` |
-| `n_samples` | Read by original `train.py`; not by depth/seg trainers |
-| `save_grid` | Same — original trainer flag |
-| `log_cond` | Same |
+**Dead keys — REMOVED (2026-07-05)**: `use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond` used to sit in the depth/seg training configs unread (they belong to the stock `train.py`/`sample.py` path). They were deleted from all four depth/seg training YAMLs — a key you can set with zero effect silently lies about what the run did. They still exist in the untouched stock configs (`configs/train.yaml`, `configs/sample*.yaml`), which is correct for stock scripts.
 
 ### `configs/experiment/train_depth.yaml` (use this for all runs)
 
 ```yaml
 size: 512
-learning_rate: 2.0e-4
+learning_rate: 1.0e-4
 lr_warmup_steps: 500
 lr_scheduler: cosine
 epochs: 5
@@ -570,8 +700,8 @@ tag: depth
 local_files_only: true
 ignore_check: true
 data:
-  json_file:     data/depth_training/train.jsonll
-  val_json_file: data/depth_training/val.jsonll
+  json_file:     data/depth_training/train.jsonl
+  val_json_file: data/depth_training/val.jsonl
 ```
 
 ### `configs/inference_depth.yaml`
@@ -602,8 +732,7 @@ checkpoints/local_models/
 ```
 
 Activate the conda environment before any Python command:
-```powershell
-. "D:\MyWorkplace\installedSW\miniforge3\shell\condabin\conda-hook.ps1"
+```bash
 conda activate loradapter
 ```
 
@@ -611,17 +740,17 @@ conda activate loradapter
 
 Dry run on 3 images first:
 ```powershell
-python depth_map_calculations.py --data_dir data/ --dry_run_n 3
+python depth_map_calculations.py --data_dir data/ --image_path target --dry_run_n 3
 ```
-Success: no errors; depth PNGs in `data/raw_depth/`.
+Success: no errors; depth PNGs in the sibling folder `<dataset>_depth_map/`.
 
 Full run:
 ```powershell
-python depth_map_calculations.py --data_dir data/
+python depth_map_calculations.py --data_dir data/ --image_path target
 ```
 Success:
-- `data/raw_depth/` populated (one PNG per image)
-- `data/depth_training/train.jsonll`, `val.jsonl`, `test.jsonl` written
+- `<dataset>_depth_map/` populated (one PNG per image, mirrored structure)
+- `data/depth_training/train.jsonl`, `val.jsonl`, `test.jsonl` written
 - Verification output shows `0 failures`
 - Dataset sizes: 639 train / 137 val / 137 test
 
@@ -730,13 +859,14 @@ python depth_map_calculations.py --data_dir data/ [flags]
 | `--dry_run_n N` | off | Process only the first N images per split. Run with `--dry_run_n 3` first, check output, then run without it. | Always use before first full run. |
 | `--size` | `512` | Square side for saved depth PNGs. Must match `size` in your training config. If you change this you must rerun Stage A. | Keep 512 unless you change training resolution. |
 | `--batch_size` | `4` | Images fed to the depth model at once. Higher = faster but uses more GPU memory. | Lower if you get OOM during Stage A. |
-| `--model` | `checkpoints/local_models/dpt-hybrid-midas` | Path to the local DPT model folder OR a HuggingFace repo ID. Default is the local offline copy. | Only change if you switch depth models (breaks parity with existing depth PNGs — delete `data/raw_depth/` and rerun). |
+| `--image_path` | `source` | JSONL key holding the image path. Your dataset uses `target`. | Always set `--image_path target` for this dataset. |
+| `--dataset_dir` | *(none)* | Optional: scan this folder for `raw_image.jpg` instead of trusting the JSONL paths to find images. Saves maps to the same sibling folder either way. | Add it if you want disk (not the JSONL) to decide which images exist. |
+| `--model` | `checkpoints/local_models/dpt-hybrid-midas` | Path to the local DPT model folder OR a HuggingFace repo ID. Default is the local offline copy. | Only change if you switch depth models (breaks parity with existing depth PNGs — delete `<dataset>_depth_map/` and rerun). |
 | `--local_files_only` | `True` | `True` = load model from local disk only (offline). `False` = allow HF download if model is not cached. | Set to `False` if you need to download the model for the first time. |
 | `--device` | `cuda` if available | `cuda` or `cpu`. | Set to `cpu` if no GPU available (very slow). |
 | `--no_skip` | off | Re-compute depth maps even if PNG already exists. By default existing PNGs are reused (fast). | Add this flag if you changed `--model` or `--size` and need to regenerate. |
-| `--raw_dir` | `<data_dir>/raw` | Root of raw image tree. Mirror structure is preserved: `raw/000417/img.jpg` → `raw_depth/000417/img.png`. | Only if your images are not under `<data_dir>/raw/`. |
-| `--depth_dir` | `<data_dir>/raw_depth` | Where depth PNGs are saved. | Only to redirect output location. |
-| `--output_dir` | `<data_dir>/depth_training` | Where the output `train.jsonl`, `val.jsonl`, `test.jsonl` are written. | Only to redirect manifest location. |
+| `--image_root` | *(none)* | Base prepended to **relative** image paths in the JSONL. Your JSONLs use absolute paths, so it is not needed. | Only if your JSONL stores relative image paths. |
+| `--output_dir` | `<data_dir>/depth_training` | Where the output `train.jsonl`, `val.jsonl`, `test.jsonl` are written. (The depth PNGs themselves always go to the sibling `<dataset>_depth_map/` folder, derived automatically.) | Only to redirect manifest location. |
 
 ---
 

@@ -135,7 +135,11 @@ def _seg_out_path(src_path: str, output_dir: Path, input_dir: Path | None) -> Pa
             return output_dir / rel.parent / (rel.stem + ".png")
         except ValueError:
             pass
-    return output_dir / (src.stem + ".png")
+    # Fallback: keep the image's OWN parent folder in the output path.
+    # Returning a bare "<stem>.png" here was the 2026-07 bug — every image is
+    # named raw_image.jpg, so all maps collapsed onto one file and overwrote
+    # each other. Keeping the parent folder makes each path unique.
+    return output_dir / src.parent.name / (src.stem + ".png")
 
 
 def precompute_segmentation_maps(
@@ -145,7 +149,6 @@ def precompute_segmentation_maps(
     batch_size: int = 4,
     model_name: str = DEFAULT_SEG_MODEL,
     device: str = "cuda",
-    resize_mode: str = "letterbox",
     skip_existing: bool = True,
     input_dir: Path = None,
     local_files_only: bool = True,
@@ -182,6 +185,23 @@ def precompute_segmentation_maps(
     def _resolve_out(p):
         return out_path_fn(Path(p)) if out_path_fn is not None else _seg_out_path(p, output_dir, input_dir)
 
+    # ---- Collision guard: no two images may save to the SAME PNG --------- #
+    # Before doing any GPU work, check where every image WILL be saved. If two
+    # images resolve to the same output file, the second would overwrite the
+    # first and training would pair images with the wrong map (the 2026-07 bug).
+    # Stop loudly and show one colliding pair instead of overwriting silently.
+    seen = {}
+    for p in image_paths:
+        key = os.path.normcase(str(_resolve_out(p)))
+        if key in seen:
+            raise SystemExit(
+                f"[FATAL] Two images would write the SAME seg map file:\n"
+                f"    {seen[key]}\n    {p}\n  both -> {key}\n"
+                f"  Each image needs its own map. This means the output naming "
+                f"lost the per-image folder — check the dataset layout."
+            )
+        seen[key] = p
+
     # ---- Load the SAME encoder used at live inference ----------------------- #
     # Using SegmentationEncoder (not SegformerForSemanticSegmentation directly)
     # guarantees the offline maps and the live encoder share _predict_ids() byte-
@@ -200,7 +220,7 @@ def precompute_segmentation_maps(
     # Using it here (offline calc) AND in seg_inference.py (live inference) is
     # what guarantees the seg map the network sees at inference matches the
     # map saved for training. Do not inline this or duplicate it.
-    preprocess = build_seg_square_preprocess(size=size, resize_mode=resize_mode)
+    preprocess = build_seg_square_preprocess(size=size)
 
     path_to_seg = {}
     processed = skipped = errors = 0
@@ -388,7 +408,6 @@ def build_segmentation_training_jsons(
     batch_size: int = 4,
     model_name: str = DEFAULT_SEG_MODEL,
     device: str = "cuda",
-    resize_mode: str = "letterbox",
     skip_existing: bool = True,
     subset_n: int = None,
     local_files_only: bool = True,
@@ -398,79 +417,108 @@ def build_segmentation_training_jsons(
     """
     Build data/seg_training/{train,val,test}.jsonl from data/{train,val,test}.jsonl.
 
-    The "segmentation" in the name satisfies the visual-identity rule.
+    This is the --data_dir path. It behaves IDENTICALLY to --dataset_dir scan
+    mode in where it saves maps (twin of depth's build_depth_training_jsons): it
+    does NOT hardcode an output folder. It looks at the image paths in your
+    JSONLs, finds the folder common to all of them (the dataset root, e.g.
+    .../custome_dataset), and saves each map into a SIBLING folder next to it
+    (.../custome_dataset_seg_map/), mirroring the internal structure. So every
+    image gets its OWN uniquely-named map and none can overwrite another.
 
-    Mirrors build_depth_training_jsons() exactly in CONTROL FLOW (so depth and
-    seg manifests stay structurally identical and comparable), differing only in
-    that it computes/saves segmentation IDs and writes a 'seg_path' field.
-
-    The critical no-mismatch rule (same as depth): output entries are built in a
-    SINGLE pass over zip(source_entries, abs_image_paths) — each output entry is
-    assembled from its OWN source entry, never by independently iterating the
-    path_to_seg dict (whose iteration order is not guaranteed to match entry order).
+    Steps:
+      0. Read every split's entries + resolve absolute image paths (in lockstep,
+         so entry<->image never drift). Pool all images to find the dataset root.
+      1. For each split, compute (or reuse cached) seg-ID PNGs, saved via
+         _sibling_map_path — named after the image's FOLDER (unique), never the
+         image filename (all 'raw_image.jpg' -> would collide).
+      2. Build each output entry atomically from its OWN source entry
+         (zip(entries, images)), with ABSOLUTE forward-slash paths:
+             raw_image_path, seg_path, prompt (prompt copied verbatim).
+      3. Write the manifest and verify it with the full 5-check verifier.
+         (Per-pixel class-ID validity is enforced at write time inside
+         precompute_segmentation_maps.)
 
     Args:
-      data_dir         : folder with train.jsonl / val.jsonl / test.jsonl (e.g. data/).
-                         Uses _find_split_jsonl() so non-standard names are supported.
-      raw_dir          : root of the raw image tree (data/raw/) — used to mirror the
-                         sub-folder structure into seg_dir (parity with depth).
-      seg_dir          : where seg-ID PNGs are saved (data/raw_seg/).
-      output_dir       : where the three-field JSONLs are written (data/seg_training/).
-      subset_n         : if set, only the first N entries per JSONL (dry run).
-      local_files_only : passed through to precompute_segmentation_maps -> encoder.
+      data_dir         : folder with train.jsonl / val.jsonl / test.jsonl.
+      output_dir       : where the three-field manifests are written (data/seg_training/).
+      image_path       : key in the source JSONL holding the image path (e.g. "target").
+      image_root       : optional root prepended to RELATIVE image paths.
+      subset_n         : if set, only the first N entries per split (dry run).
+      raw_dir, seg_dir : legacy args, no longer used for saving (the sibling
+                         folder is derived from the images). Kept so the CLI
+                         stays backward-compatible.
     """
-    cwd         = Path.cwd()
+    cwd = Path.cwd()
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_dir_abs = raw_dir if raw_dir.is_absolute() else cwd / raw_dir
+    _root = image_root if image_root is not None else cwd
 
-    # num_classes for verification: derive from the palette constant (19 for Cityscapes).
-    num_classes = len(SEG_CITYSCAPES_PALETTE)
-
+    # ---- Step 0: read all splits, resolve images, find ONE dataset root ---- #
+    split_entries = {}   # split -> list[entry]
+    split_images  = {}   # split -> list[abs Path], aligned 1:1 with entries
+    all_images    = []
     for split in ["train", "val", "test"]:
         src_path = _find_split_jsonl(data_dir, split)
         if src_path is None:
             print(f"\n[WARN] No JSONL for split '{split}' found in {data_dir} — skipping.")
             continue
-
         with open(src_path, "r", encoding="utf-8") as f:
             all_entries = [json.loads(line) for line in f if line.strip()]
         entries = all_entries[:subset_n] if subset_n else all_entries
-
-        print(f"\n{'='*56}")
-        print(f"  {src_path.name}: processing {len(entries)} entries"
-              + (f" (dry-run subset of {len(all_entries)})" if subset_n else ""))
-        print(f"{'='*56}")
-
-        # Step 1: absolute image paths, built in LOCKSTEP with `entries`.
-        # Priority: image_root / relative_path  >  cwd / relative_path
-        # If --image_root /mnt/data is given and JSONL says "images/foo.jpg",
-        # the actual path becomes /mnt/data/images/foo.jpg.
-        _root = image_root if image_root is not None else cwd
-        abs_image_paths = []
+        abs_paths = []
         for entry in entries:
-            p     = Path(_get_image_path(entry, image_path))
-            abs_p = p if p.is_absolute() else _root / p
-            abs_image_paths.append(abs_p)
+            p = Path(_get_image_path(entry, image_path))
+            abs_p = (p if p.is_absolute() else _root / p).resolve()
+            abs_paths.append(abs_p)
             if not abs_p.exists():
                 print(f"  [WARN] Image not found on disk: {abs_p}")
+        split_entries[split] = entries
+        split_images[split]  = abs_paths
+        all_images.extend(abs_paths)
 
-        # Step 2: compute / look up seg PNGs (mirrors data/raw/ tree into seg_dir).
+    if not all_images:
+        print("[ERROR] No images found in any split — nothing to do.")
+        return
+
+    # Dataset root = deepest folder shared by ALL images (no hardcoding).
+    # Sibling folder next to it holds the maps, mirroring the structure —
+    # exactly like --dataset_dir scan mode, so both commands agree.
+    dataset_root = Path(os.path.commonpath([str(p) for p in all_images]))
+    if dataset_root.is_file():          # only one image -> commonpath is the file itself
+        dataset_root = dataset_root.parent
+    sibling_root = dataset_root.parent / (dataset_root.name + "_seg_map")
+    sibling_root.mkdir(parents=True, exist_ok=True)
+    print(f"\nDataset root : {dataset_root}")
+    print(f"Seg maps     : {sibling_root}  (sibling folder, mirrored structure)")
+
+    out_fn = lambda p: _sibling_map_path(Path(p), dataset_root, sibling_root, "_seg_map")
+
+    # ---- Per split: compute maps, then write + verify the manifest -------- #
+    for split in ["train", "val", "test"]:
+        if split not in split_entries:
+            continue
+        entries         = split_entries[split]
+        abs_image_paths = split_images[split]
+
+        print(f"\n{'='*56}")
+        print(f"  {split}: processing {len(entries)} entries"
+              + (" (dry-run subset)" if subset_n else ""))
+        print(f"{'='*56}")
+
         path_to_seg = precompute_segmentation_maps(
             image_paths=[str(p) for p in abs_image_paths],
-            output_dir=seg_dir,
+            output_dir=sibling_root,
             size=size,
             batch_size=batch_size,
             model_name=model_name,
             device=device,
-            resize_mode=resize_mode,
             skip_existing=skip_existing,
-            input_dir=raw_dir_abs,
             local_files_only=local_files_only,
+            out_path_fn=out_fn,
         )
 
-        # Step 3: build output entries — ONE PASS, each atomic from its source.
-        # zip(entries, abs_image_paths) is the ONLY correct pattern: iterating
-        # path_to_seg separately would risk a silent index mismatch.
+        # Build entries in ONE pass, each from its OWN source (zip keeps them
+        # aligned). ABSOLUTE forward-slash paths: the dataset lives outside the
+        # repo, so relative-to-repo paths would break when the repo moves.
         out_entries = []
         n_skipped   = 0
         for entry, abs_img_p in zip(entries, abs_image_paths):
@@ -479,29 +527,19 @@ def build_segmentation_training_jsons(
                 print(f"  [WARN] No seg result for {abs_img_p} — entry skipped.")
                 n_skipped += 1
                 continue
-
-            raw_rel = Path(_get_image_path(entry, image_path)).as_posix()
-            try:
-                seg_rel = Path(seg_abs_str).relative_to(cwd).as_posix()
-            except ValueError:
-                seg_rel = Path(seg_abs_str).as_posix()
-
             out_entries.append({
-                "raw_image_path": raw_rel,
-                "seg_path":       seg_rel,
+                "raw_image_path": abs_img_p.as_posix(),
+                "seg_path":       Path(seg_abs_str).resolve().as_posix(),
                 "prompt":         entry["prompt"],
             })
 
-        # Step 4: write output JSONL (one object per line).
         out_path = output_dir / f"{split}.jsonl"
         with open(out_path, "w", encoding="utf-8") as f:
             for entry in out_entries:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        skip_note = f"  ({n_skipped} skipped due to seg errors)" if n_skipped else ""
+        skip_note = f"  ({n_skipped} skipped)" if n_skipped else ""
         print(f"\n  Written {len(out_entries)} entries -> {out_path}{skip_note}")
-
-        # Step 5: verify every entry (loud PASS/FAIL).
-        _verify_segmentation_training_jsonl(out_path, num_classes=num_classes)
+        _verify_scan_seg_training_jsonl(out_path, "seg_path", "_seg_map")
 
 
 # ============================================================================ #
@@ -532,20 +570,47 @@ def _sibling_map_path(
 
 def _verify_scan_seg_training_jsonl(jsonl_path: Path, map_key: str, suffix: str) -> tuple[int, int]:
     """
-    Verify a scan-mode seg output JSONL. For each entry checks:
-      1. Required keys present: raw_image_path, <map_key>, prompt.
-      2. The map file exists on disk.
-      3. The map lives in a SIBLING tree, NOT inside the image's own folder.
-      4. The map's leaf folder name matches the image's leaf folder name
-         (mirrored structure) and the map is named <folder_name><suffix>.png.
-    (Per-pixel class-ID validity is already enforced at write time inside
-    precompute_segmentation_maps, so it is not re-checked here.)
+    Verify a scan-mode seg output JSONL — the LAST line of defence before
+    training trusts this file. Training reads each line as:
+        "for THIS image, condition on THIS seg map, with THIS prompt"
+    so a wrong line silently poisons training (no crash, no warning — the
+    model just learns from mismatched pairs). Every check below therefore
+    fails LOUDLY with the entry number and the exact reason.
+    Mirrors depth's _verify_scan_training_jsonl exactly (seg twin).
+
+    Per-entry checks (each line of the JSONL):
+      1. KEYS      — raw_image_path, <map_key> (here "seg_path"), prompt all
+                     present (a missing key would crash the dataloader later,
+                     far from the real cause).
+      2. ON DISK   — the seg PNG actually exists.
+      3. SIBLING   — the map lives in the sibling tree, NOT inside the image's
+                     own source folder (source dataset is read-only by rule).
+      4. MIRRORED  — map's parent folder name equals the image's parent folder
+                     name (e.g. both "000417") and the map file is named
+                     <folder_name><suffix>.png — the guarantee that image
+                     000417 is paired with 000417's map and no other.
+
+    Whole-file check (across ALL lines together):
+      5. UNIQUE    — no two entries may point at the SAME map file.
+                     ADDED BECAUSE OF A REAL BUG (2026-07-02): a non-scan run
+                     named maps after the image FILENAME; every image here is
+                     'raw_image.jpg', so all 913 maps overwrote each other
+                     into ONE file and every row referenced that survivor.
+                     Checks 1-4 cannot catch that (each line looks fine alone)
+                     — only comparing lines against each other exposes it.
+                     Duplicate raw_image_path is flagged too (a source image
+                     listed twice would be double-weighted in training).
+
+    (Per-pixel class-ID validity (0..18) is already enforced at write time
+    inside precompute_segmentation_maps, so it is not re-checked here.)
+    Returns (n_passed, n_failed) and prints a one-line PASS/FAIL summary.
     """
     with open(jsonl_path, "r", encoding="utf-8") as f:
         entries = [json.loads(line) for line in f if line.strip()]
 
     passed = failed = 0
     for i, entry in enumerate(entries):
+        # ---- check 1: all three required keys present ---------------------- #
         missing = [k for k in ("raw_image_path", map_key, "prompt") if k not in entry]
         if missing:
             print(f"  [FAIL] entry {i}: missing keys {missing}")
@@ -555,23 +620,31 @@ def _verify_scan_seg_training_jsonl(jsonl_path: Path, map_key: str, suffix: str)
         raw_p = Path(entry["raw_image_path"])
         map_p = Path(entry[map_key])
 
+        # ---- check 2: the seg PNG really exists on disk -------------------- #
         if not map_p.exists():
             print(f"  [FAIL] entry {i}: map file not on disk: {map_p}")
             failed += 1
             continue
 
+        # ---- check 3: map is in the SIBLING tree, source folder untouched -- #
         if map_p.parent == raw_p.parent:
             print(f"  [FAIL] entry {i}: map was written INTO the source dataset "
                   f"folder (expected a sibling tree): {map_p.parent}")
             failed += 1
             continue
 
+        # ---- check 4a: mirrored structure — same leaf folder name ---------- #
+        # image .../custome_dataset/000417/raw_image.jpg
+        # map   .../custome_dataset_seg_map/000417/...   <- "000417" must match
         if map_p.parent.name != raw_p.parent.name:
             print(f"  [FAIL] entry {i}: mirrored leaf folder name mismatch — "
                   f"image={raw_p.parent.name!r}  map={map_p.parent.name!r}")
             failed += 1
             continue
 
+        # ---- check 4b: map filename is <folder_name><suffix>.png ----------- #
+        # Named after the FOLDER (unique per image), never after the image
+        # FILENAME (identical 'raw_image' for every image -> collisions).
         expected = raw_p.parent.name + suffix + ".png"
         if map_p.name != expected:
             print(f"  [FAIL] entry {i}: map name {map_p.name!r} != expected {expected!r}")
@@ -579,6 +652,29 @@ def _verify_scan_seg_training_jsonl(jsonl_path: Path, map_key: str, suffix: str)
             continue
 
         passed += 1
+
+    # ---- check 5: GLOBAL uniqueness — the anti-collision check ------------- #
+    # In a healthy manifest every image has its OWN map, so every map path
+    # appears exactly once. Any count > 1 is the stem-collision bug.
+    from collections import Counter
+    map_counts = Counter(os.path.normcase(str(Path(e[map_key])))
+                         for e in entries if map_key in e)
+    img_counts = Counter(os.path.normcase(str(Path(e["raw_image_path"])))
+                         for e in entries if "raw_image_path" in e)
+    dup_maps = {p: n for p, n in map_counts.items() if n > 1}
+    dup_imgs = {p: n for p, n in img_counts.items() if n > 1}
+    if dup_maps:
+        worst_path, worst_n = max(dup_maps.items(), key=lambda kv: kv[1])
+        print(f"  [FAIL] {len(dup_maps)} map file(s) referenced by MULTIPLE entries "
+              f"(worst: {worst_n} entries -> {worst_path}). Every image must have "
+              f"its OWN map — this is the stem-collision bug; re-run in scan mode "
+              f"(--dataset_dir) with --no_skip.")
+        failed += sum(dup_maps.values())          # every colliding entry is invalid
+        passed = max(0, passed - sum(dup_maps.values()))
+    if dup_imgs:
+        print(f"  [FAIL] {len(dup_imgs)} source image(s) listed more than once "
+              f"(would be double-weighted in training).")
+        failed += sum(n - 1 for n in dup_imgs.values())
 
     status = "PASS" if failed == 0 else "FAIL"
     print(f"  [{status}] {jsonl_path.name}: {passed}/{len(entries)} entries valid"
@@ -596,7 +692,6 @@ def build_seg_training_from_scan(
     batch_size: int = 4,
     model_name: str = DEFAULT_SEG_MODEL,
     device: str = "cuda",
-    resize_mode: str = "letterbox",
     skip_existing: bool = True,
     local_files_only: bool = True,
     subset_n: int = None,
@@ -647,19 +742,34 @@ def build_seg_training_from_scan(
         batch_size=batch_size,
         model_name=model_name,
         device=device,
-        resize_mode=resize_mode,
         skip_existing=skip_existing,
         local_files_only=local_files_only,
         out_path_fn=out_fn,
     )
 
     # ---- Step 3: index computed seg maps by NORMALISED absolute image path - #
+    # THE HEART OF THE IMAGE<->MAP MAPPING (mirrors depth exactly).
+    # path_to_seg came back from the compute step as {source image path ->
+    # its saved seg PNG}, one pair per image — the pairing is guaranteed by
+    # construction (each map was saved while processing exactly that image,
+    # into <folder>_seg_map.png). Re-keyed by NORMALISED ABSOLUTE path
+    # because one file can be spelled many ways ("D:/x.jpg", "d:\\x.jpg",
+    # relative, different case on Windows): Path.resolve() collapses them to
+    # one canonical absolute form, os.path.normcase() removes case/slash
+    # differences. Without this, a JSONL spelling the path differently from
+    # the scanner would silently match NOTHING.
     seg_by_img = {
         os.path.normcase(str(Path(img).resolve())): seg
         for img, seg in path_to_seg.items()
     }
 
     # ---- Step 4: rebuild each split manifest, matching by absolute path ---- #
+    # The ORIGINAL data/{train,val,test}.jsonl are the single source of truth
+    # for the two things a folder scan cannot know: each image's PROMPT and
+    # its SPLIT. We walk each original split file, look the image up in
+    # seg_by_img, and write a new line carrying image+map+prompt together.
+    # Split boundaries are preserved EXACTLY — never re-shuffled (that would
+    # leak train images into val and make val/loss a lie).
     for split in ("train", "val", "test"):
         src = _find_split_jsonl(data_dir, split)
         if src is None:
@@ -672,16 +782,27 @@ def build_seg_training_from_scan(
         out_entries = []
         n_skipped = 0
         for entry in entries:
+            # Key holding the image path in the ORIGINAL jsonl is configurable
+            # (--image_path, default "target" for this dataset).
             raw_str = _get_image_path(entry, image_path)
+            # Same normalisation as Step 3 — both sides of the lookup MUST be
+            # normalised identically or matching fails for spelling reasons.
             key = os.path.normcase(str(Path(raw_str).resolve()))
             seg = seg_by_img.get(key)
             if seg is None:
+                # Not in the scanned/computed set (full run: file missing on
+                # disk; dry run: outside the capped subset). Skip rather than
+                # guess — a skipped line shows up in the count below; a wrong
+                # pairing would be invisible and poison training.
                 n_skipped += 1
                 continue
+            # ABSOLUTE paths, as_posix (forward slashes work on Windows AND
+            # Linux); dataset lives outside the repo so relative paths would
+            # break the moment the repo moves.
             out_entries.append({
                 "raw_image_path": Path(raw_str).resolve().as_posix(),
                 "seg_path":       Path(seg).resolve().as_posix(),
-                "prompt":         entry["prompt"],
+                "prompt":         entry["prompt"],   # copied VERBATIM — never edited
             })
 
         out_path = output_dir / f"{split}.jsonl"
@@ -732,7 +853,6 @@ def run_seg_directory_mode(args):
         batch_size=args.batch_size,
         model_name=args.model,
         device=args.device,
-        resize_mode=args.resize_mode,
         skip_existing=not args.no_skip,
         input_dir=input_dir,
         local_files_only=args.local_files_only,
@@ -800,11 +920,6 @@ def main():
             "False = allow download into checkpoints/local_models/. "
             "On first use, run with --local_files_only False to download the b5 model."
         ),
-    )
-    parser.add_argument(
-        "--resize_mode", type=str, default="letterbox",
-        choices=["letterbox", "stretch"],
-        help="Squaring before the encoder (references.md §5). Default: letterbox.",
     )
     parser.add_argument(
         "--device", type=str, default=None,
@@ -887,7 +1002,7 @@ def main():
         args.batch_size = auto_batch_size(default=4, device=args.device)
 
     print(f"Device           : {args.device}")
-    print(f"Size             : {args.size}x{args.size}   resize_mode: {args.resize_mode}")
+    print(f"Size             : {args.size}x{args.size}   (letterbox squaring — fixed, see DEPTH.md §5.14a)")
     print(f"Batch            : {args.batch_size}")
     print(f"Model            : {args.model}")
     print(f"local_files_only : {args.local_files_only}")
@@ -915,7 +1030,6 @@ def main():
             batch_size=args.batch_size,
             model_name=args.model,
             device=args.device,
-            resize_mode=args.resize_mode,
             skip_existing=not args.no_skip,
             local_files_only=args.local_files_only,
             subset_n=args.dry_run_n,
@@ -936,7 +1050,7 @@ def main():
             data_dir=data_dir, raw_dir=raw_dir if args.raw_dir else (image_root or data_dir / "raw"),
             seg_dir=seg_dir, output_dir=out_dir,
             size=args.size, batch_size=args.batch_size, model_name=args.model,
-            device=args.device, resize_mode=args.resize_mode,
+            device=args.device,
             skip_existing=not args.no_skip, subset_n=args.dry_run_n,
             local_files_only=args.local_files_only,
             image_path=args.image_path,

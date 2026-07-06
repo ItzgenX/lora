@@ -11,13 +11,13 @@ val_batch_size: 1
 workers: 4
 val_workers: 2
 
-# resize_mode: letterbox  (SquarePad pads the shorter side with edge-replication
-#                          before Resize — keeps full frame content, no forced crop)
+# resize_mode: letterbox  (SquarePad pads the shorter side with a flat local-mean
+#                          fill before Resize — keeps full frame content, no forced crop)
 # PARITY-CRITICAL: this chain must stay identical to the inline `preprocess`
 # in depth_map_calculations.py and depth_inference.py. If you edit one, edit all
 # three — otherwise training RGB, saved depth, and live inference diverge.
 transform:
-  - _target_: src.data.transforms.SquarePad    # pad shorter side → square (edge-replicated)
+  - _target_: src.data.transforms.SquarePad    # pad shorter side → square (flat local-mean fill)
   - _target_: torchvision.transforms.Resize
     size:
       - ${size}
