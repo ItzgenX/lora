@@ -62,6 +62,7 @@ import os
 import random
 import signal
 import traceback
+from datetime import datetime
 from functools import reduce
 from pathlib import Path
 
@@ -76,7 +77,8 @@ from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
 
 from src.model import ModelBase
-from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt, compute_psnr_ssim
+from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt, compute_psnr_ssim, compute_miou
+from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap
 
 
 torch.set_float32_matmul_precision("high")
@@ -181,6 +183,8 @@ def _save_checkpoint_segmentation_images(
     out_dir.mkdir(parents=True, exist_ok=True)
     prompts, images = [], []
     psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
+    mious = []              # controllability metric, FIXED scenes only (see below)
+    _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
 
     for n, (idx, kind) in enumerate(zip(idxs, kinds)):
         item   = val_dataset[idx]
@@ -222,6 +226,20 @@ def _save_checkpoint_segmentation_images(
             p_, s_ = compute_psnr_ssim(orig_u8, pred_u8)
             psnrs.append(p_); ssims.append(s_)
 
+            # ── Controllability metric (src/utils.py compute_miou) ───────────
+            # mIoU of the SEG STRUCTURE the model was told to follow vs. what it
+            # actually produced. TARGET ids come from the conditioning colour map
+            # itself (palette-inverted — exact, no extra model call). PREDICTION
+            # ids come from re-running SegFormer on the generated image. High
+            # mIoU = the generation kept the requested class layout. FIXED scenes
+            # + fixed seed keep it comparable checkpoint-to-checkpoint.
+            target_ids = seg_ids_from_colormap(seg[0], _palette)   # [size,size] long
+            gen_t = (TF.to_tensor(pred.resize((cfg.size, cfg.size)).convert("RGB"))
+                     .unsqueeze(0).to(device) * 2.0 - 1.0)         # [1,3,H,W] in [-1,1]
+            pred_ids = model.encoders[0].label_ids(gen_t)[0]       # [size,size] long
+            mious.append(compute_miou(pred_ids, target_ids,
+                                      num_classes=int(_palette.shape[0])))
+
     # ONE prompts.txt for all scenes (tagged [fixed]/[new]), next to the images.
     (out_dir / "prompts.txt").write_text(
         "\n".join(f"[{n}] [{k}] {p}" for n, (k, p) in enumerate(zip(kinds, prompts))),
@@ -231,6 +249,8 @@ def _save_checkpoint_segmentation_images(
     if psnrs:
         metrics = {"val/psnr_fixed": float(np.mean(psnrs)),
                    "val/ssim_fixed": float(np.mean(ssims))}
+    if mious:
+        metrics["val/miou_fixed"] = float(np.mean(mious))
     return prompts, images, metrics
 
 
@@ -463,7 +483,15 @@ def main(cfg):
         disable=not accelerator.is_main_process,
     )
     progress_bar.set_description("Steps")
+    # ── Best-model + early-stop tracking (mirrors depth_training.py) ───────────
+    # best_loss decides which checkpoint is "best" (lowest held-out val/loss).
+    # best_epoch/best_step record WHEN that best happened, so best_model/info.txt
+    # and the log say exactly where it came from — and so early stopping can tell
+    # how many epochs have passed with no improvement.
     best_loss = float("inf")
+    best_epoch = None          # 1-based epoch the current best was found in
+    best_step = None           # global_step the current best was found at
+    best_epoch_frac = None     # fractional epoch (e.g. 3.42) of the current best
 
     # ── Checkpoint-monitoring images setup (references.md §8) ─────────────────
     # n_grid_images segmentation scenes per checkpoint, split 50/50:
@@ -532,8 +560,13 @@ def main(cfg):
                 )
 
             if is_best:
+                # info.txt = the "when + how good" record of the best model. The
+                # caller passes epoch/step/loss/timestamp lines; here we append the
+                # psnr/ssim just computed above (so all three scores live together,
+                # no need to open TensorBoard or eyeball the images).
+                metric_lines = [f"{k}: {v:.4f}" for k, v in metrics.items()]
                 (ckpt_dir / "info.txt").write_text(
-                    "\n".join(info_lines or []), encoding="utf-8"
+                    "\n".join((info_lines or []) + metric_lines), encoding="utf-8"
                 )
 
             for tracker in accelerator.trackers:
@@ -564,38 +597,54 @@ def main(cfg):
             for m in mappers:  m.train()
             for e in encoders: e.train()
 
-    def do_segmentation_validation(label):
+    def do_segmentation_validation(label, epoch_num, epoch_frac):
         """
         VALIDATION ONLY — the CHEAP half, run every val_steps:
           1. Compute val/loss on held-out seg data.
           2. Log to TensorBoard as val/loss.
-          3. If it's the best so far, save best_model/ (weights + images + info.txt).
+          3. If it's the best so far, save best_model/ (weights + images + info.txt)
+             and record WHEN it happened (epoch, step) for the log + early stopping.
 
         The 'segmentation' in the name marks this as seg-pipeline code. Mirrors
         depth's do_validation exactly with _segmentation_validation_loss and seg keys.
         Does NOT save a regular checkpoint — that is decoupled and controlled
         separately by ckpt_steps (see save_seg_ckpt_and_grid calls in the loop).
 
-          label : human tag for the log, e.g. "step150" or "epoch2".
+          label      : human tag for the log, e.g. "step150" or "epoch2".
+          epoch_num  : 1-based epoch this validation belongs to.
+          epoch_frac : fractional epoch (e.g. 3.42 = 42% into epoch 3).
         """
-        nonlocal best_loss
+        nonlocal best_loss, best_epoch, best_step, best_epoch_frac
         val_loss = _segmentation_validation_loss(
             model, val_dataloader, n_loras, cfg, cfg_mask,
             accelerator, int(cfg.get("val_batches", 8)),
         )
         accelerator.log({"val/loss": val_loss}, step=global_step)
         if accelerator.is_main_process:
-            logger.info(f"[seg val] {label}: val/loss = {val_loss:.6f}")
+            # Always show how the current val compares to the best so far, and how
+            # many epochs have passed since the best — the "is it still improving?"
+            # signal you read to decide (or let early-stop decide) when to stop.
+            since = "" if best_epoch is None else (
+                f"  | best: epoch{best_epoch} step{best_step} ({best_loss:.6f})"
+                f"  | {epoch_num - best_epoch} epoch(s) since improvement")
+            logger.info(f"[seg val] {label}: val/loss = {val_loss:.6f}{since}")
         if val_loss < best_loss:
             best_loss = val_loss
-            save_seg_ckpt_and_grid(
-                "best_model", is_best=True,
-                info_lines=[f"from:     {label}", f"val_loss: {val_loss:.6f}"],
-            )
+            best_epoch = epoch_num
+            best_step = global_step
+            best_epoch_frac = epoch_frac
+            info = [
+                f"from:        {label}",
+                f"epoch:       {epoch_num}",
+                f"epoch_frac:  {epoch_frac:.2f}",
+                f"global_step: {global_step}",
+                f"val/loss:    {val_loss:.6f}",
+                f"timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ]
+            save_seg_ckpt_and_grid("best_model", is_best=True, info_lines=info)
             if accelerator.is_main_process:
-                logger.info(
-                    f"New best segmentation model — {label}, val/loss={val_loss:.6f}"
-                )
+                logger.info(f"*** NEW BEST (seg) *** epoch {epoch_num} ({epoch_frac:.2f}), "
+                            f"step {global_step}, val/loss={val_loss:.6f}")
 
     # ── Training loop ──────────────────────────────────────────────────────────
     logger.info("[SEG] start segmentation training")
@@ -690,7 +739,7 @@ def main(cfg):
                 #              checkpoint-epoch{N}/step{global_step}/.
                 # These are INDEPENDENT — e.g. validate every 500 but save every 1000.
                 if global_step % cfg.val_steps == 0 or stop_training:
-                    do_segmentation_validation(f"step{global_step}")
+                    do_segmentation_validation(f"step{global_step}", epoch + 1, epoch_frac)
                 if global_step % cfg.ckpt_steps == 0 or stop_training:
                     save_seg_ckpt_and_grid(
                         f"checkpoint-epoch{epoch + 1}/step{global_step}"
@@ -700,13 +749,31 @@ def main(cfg):
                 break
 
         # ── END-OF-EPOCH: ALWAYS validate AND save this epoch's checkpoint ───
-        do_segmentation_validation(f"epoch{epoch + 1}")
+        do_segmentation_validation(f"epoch{epoch + 1}", epoch + 1, float(epoch + 1))
         save_seg_ckpt_and_grid(
             f"checkpoint-epoch{epoch + 1}/checkpoint-epoch{epoch + 1}"
         )
 
         if stop_training:
             break
+
+        # ── EARLY STOPPING (optional; early_stop_patience epochs, 0 = off) ─────
+        # If val/loss hasn't produced a new best for `early_stop_patience` full
+        # epochs, stop now — best_model/ is already saved, so there's nothing to
+        # gain from training longer. Perfect for a detached run you don't watch:
+        # it stops itself once it plateaus.
+        patience = int(cfg.get("early_stop_patience", 0))
+        if patience > 0 and best_epoch is not None:
+            epochs_since_best = (epoch + 1) - best_epoch
+            if accelerator.is_main_process:
+                logger.info(f"[early-stop] {epochs_since_best} epoch(s) since best "
+                            f"(epoch {best_epoch}, val/loss={best_loss:.6f}); patience={patience}")
+            if epochs_since_best >= patience:
+                if accelerator.is_main_process:
+                    logger.info(f"[early-stop] no improvement for {patience} epoch(s) — stopping. "
+                                f"Best model: epoch {best_epoch}, step {best_step}, "
+                                f"val/loss={best_loss:.6f} (see best_model/info.txt).")
+                break
 
     # ── Final snapshot on early-stop only ─────────────────────────────────────
     # On normal completion the end-of-last-epoch block above already ran

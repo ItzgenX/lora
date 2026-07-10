@@ -203,7 +203,7 @@ def main(cfg):
     if cfg.inference.get("json_file") and cfg.inference.json_file:
         json_path = Path(cfg.inference.json_file)
         if not json_path.is_absolute():
-            json_path = Path.cwd() / json_path
+            json_path = Path(_root) / json_path   # _root = original cwd (repo root), not Hydra's run dir
         with open(json_path, "r", encoding="utf-8") as f:
             data = [json.loads(line) for line in f if line.strip()]
         for item in data:

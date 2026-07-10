@@ -145,6 +145,45 @@ def seg_colorize_ids(
     return colour.permute(0, 3, 1, 2).contiguous()
 
 
+def seg_ids_from_colormap(
+    colour: torch.Tensor,       # [3, H, W] or [B, 3, H, W] float in [0,1]
+    palette: torch.Tensor,      # [K, 3] float in [0,1] — from seg_palette_tensor()
+) -> torch.Tensor:              # [H, W] or [B, H, W] long — class IDs
+    """
+    Inverse of seg_colorize_ids: map an RGB colour seg map back to class IDs.
+
+    The "seg_" prefix marks this as segmentation-pipeline code.
+
+    WHY IT EXISTS: the conditioning map fed to the model is stored as COLOUR
+    (colourised from IDs via seg_colorize_ids). To score mIoU we need the IDs
+    behind it as the TARGET. Because the map was colourised FROM this exact
+    palette, nearest-colour recovery returns the original IDs exactly — no
+    SegFormer call needed. Sharing the same palette here as seg_colorize_ids
+    keeps this a true inverse (the parity guarantee).
+
+    Each pixel is assigned the class whose palette colour is nearest (L2 in RGB);
+    for maps produced by seg_colorize_ids the nearest colour is an exact match.
+
+    Inputs:
+      colour  : Float tensor [3,H,W] or [B,3,H,W] in [0,1].
+      palette : Float tensor [K,3] in [0,1] (from seg_palette_tensor()).
+    Output:
+      Long tensor [H,W] or [B,H,W] of ids in [0, K-1] (batch dim preserved).
+    """
+    squeeze = colour.dim() == 3
+    if squeeze:
+        colour = colour.unsqueeze(0)                 # [1,3,H,W]
+    palette = palette.to(colour.device)              # [K,3]
+
+    B, _, H, W = colour.shape
+    pixels = colour.permute(0, 2, 3, 1).reshape(-1, 3)          # [B*H*W, 3]
+    # squared L2 distance to every palette colour, then pick the closest.
+    dists = ((pixels[:, None, :] - palette[None, :, :]) ** 2).sum(-1)   # [B*H*W, K]
+    ids = dists.argmin(dim=1).reshape(B, H, W)                  # [B,H,W] long
+
+    return ids[0] if squeeze else ids
+
+
 # ============================================================================ #
 #  LIVE ENCODER                                                                 #
 # ============================================================================ #

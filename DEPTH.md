@@ -536,7 +536,30 @@ ckpt_steps: 1000   # heavy: save weights + N monitoring images
 
 These are **independent**. You can validate every 50 steps and checkpoint every 500. Both can fire at the same step — the code handles this correctly by calling `do_validation` then `save_ckpt_and_grid` sequentially.
 
-`best_model/` is written by `do_validation` (when val/loss improves), not by `save_ckpt_and_grid`. `best_model/info.txt` records the step and val/loss it came from.
+`best_model/` is written by `do_validation` (when val/loss improves), not by `save_ckpt_and_grid`.
+
+**`best_model/info.txt` — when the best model was produced.** So you can tell at a glance *which epoch* gave you the best model (and decide whether to keep training), `info.txt` records the full "when + how good":
+
+```
+from:        epoch3            # the trigger label (stepN or epochN)
+epoch:       3                 # 1-based epoch the best was found in
+epoch_frac:  3.42              # fractional epoch (42% into epoch 3)
+global_step: 1500              # optimizer step it happened at
+val/loss:    0.041273          # the selecting metric (lower = better)
+timestamp:   2026-07-10 14:22:01
+val/psnr_fixed: 21.3400        # pixel-similarity on fixed val scenes (higher dB = better)
+val/ssim_fixed: 0.7421         # structural similarity 0..1 (higher = better)
+```
+
+The first six lines are written by `do_validation`; the two metric lines are appended by `save_ckpt_and_grid` from the grid it just generated, so all three scores live in one place — no TensorBoard needed to know how good the best is.
+
+Every regular validation also logs a plateau line so you can watch progress live:
+```
+[val] epoch4: val/loss = 0.041890  | best: epoch3 step1500 (0.041273)  | 1 epoch(s) since improvement
+```
+and a `*** NEW BEST ***` line whenever `best_model/` is replaced.
+
+**Early stopping (`early_stop_patience`, default `3`, `0` = off).** At each epoch end, if `val/loss` has produced no new best for `early_stop_patience` full epochs, training stops itself (best_model/ is already saved). Ideal for a detached run you don't watch — it quits once it plateaus instead of burning epochs. The final interrupted epoch's weights + grid are still captured on the way out.
 
 ### 5.6 Why test.jsonl Is Never Touched During Training
 

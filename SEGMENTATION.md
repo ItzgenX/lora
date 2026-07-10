@@ -477,6 +477,28 @@ Three updates shared with depth, executed and verified on the seg side too:
 3. **Batch-shape kernel jitter** (DEPTH.md §5.14): seg's measured form is 2–5 argmax flips per 262k pixels between saved PNGs and live single-image output (boundary ties). Acceptance: ID-mismatch fraction ≤ 1e-4; palette-colourisation vs `forward()` must stay exactly 0.0 (it does — shared `_predict_ids` + shared palette).
 4. **resize_mode: FINAL — letterbox only, stretch REMOVED** (2026-07-06, DEPTH.md §5.14a): the user evaluated stretch with real encoder previews (`outputs/viz/resize_mode_preview.png`) and rejected it (aspect distortion shifted seg classes — sky read as "building"). The former seg-side switch (`--resize_mode` flag, `inference.resize_mode` key, `build_seg_square_preprocess`'s `resize_mode` parameter) was deleted from the code so train and inference can never disagree by accident.
 
+### 5.7d Best-model tracking + early stopping — see DEPTH.md §5.5 (applies to seg identically)
+
+`seg_training.py` mirrors depth's `do_validation` exactly: `do_segmentation_validation` records **when** the best model was found (`best_epoch`/`best_step`/`best_epoch_frac`) and writes the same enriched `best_model/info.txt` (epoch, epoch_frac, global_step, val/loss, timestamp + appended `val/psnr_fixed`/`val/ssim_fixed`). Each validation logs the same `[seg val] … | best: epochX stepY | N epoch(s) since improvement` plateau line and a `*** NEW BEST (seg) ***` line when best_model/ is replaced.
+
+`configs/train_seg.yaml` has the same `early_stop_patience: 3` key (`0` = off): at each epoch end, if val/loss produces no new best for that many full epochs, seg training stops itself (best_model/ already saved). The interrupted epoch's final weights + grid are still captured on the way out.
+
+### 5.7e `val/miou_fixed` — segmentation controllability metric (per-model)
+
+**What it measures.** psnr/ssim compare a generation to the one real source image (they punish legitimate creative variation). mIoU instead measures *controllability*: **did the generated image keep the class layout it was told to follow?** For every scored image it compares two class-ID maps and averages per-class IoU (`IoU(c) = |pred==c ∧ target==c| / |pred==c ∨ target==c|`, mean over classes present in either map). One image → one 0–1 number; the **mean over images is the model's controllability score** — the single number you rank seg models by. Implemented as `compute_miou` in `src/utils.py` (pure torch, no new dependency).
+
+**The two maps compared (this is the key design):**
+- **TARGET** = the seg map that *conditioned* the model, recovered by inverting the conditioning colour map back to IDs via `seg_ids_from_colormap` in `src/encoders/seg_encoder.py` (nearest palette colour). Because the map was colourised *from* `SEG_CITYSCAPES_PALETTE`, this recovery is **exact** — verified roundtrip `seg_colorize_ids → seg_ids_from_colormap` returns the original IDs. Zero extra model calls.
+- **PREDICTION** = SegFormer re-run on the *generated* image (`model.encoders[0].label_ids`). One extra SegFormer forward per scored image.
+
+Absent classes (in neither map) are excluded from the mean — the standard mIoU convention — so they can't deflate the score.
+
+**Where it appears (rides the existing metric plumbing, no new wiring):**
+- **Training** — `_save_checkpoint_segmentation_images` scores the **fixed** scenes (fixed seed → comparable checkpoint-to-checkpoint) and adds `val/miou_fixed` to the returned `metrics` dict. It then flows automatically into TensorBoard, the `[seg metric]` log line, `best_model/info.txt`, and the checkpoint trend — same path as psnr/ssim.
+- **Inference** — `seg_inference.py` scores every entry, prints per-image mIoU, and writes `metrics.txt` (`mean mIoU (n=…)` + per-image lines) next to the results. That mean is the model's final controllability score.
+
+**Reading it:** higher = better structural adherence; watch `val/miou_fixed` *rise* over training and plateau (a second opinion to `val/loss`, and the signal for when to stop). Note it depends on SegFormer as the judge — score every generation with the *same* SegFormer that conditioned it, or the comparison isn't apples-to-apples.
+
 ### 5.8 SegFormer-b5 vs b0 — Why b0 is Wrong
 
 SegFormer-b0 is a small model designed for speed, not accuracy. On Cityscapes driving scenes:

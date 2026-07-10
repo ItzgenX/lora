@@ -54,6 +54,7 @@ import signal
 import os
 import traceback
 import random
+from datetime import datetime
 from functools import reduce
 from PIL import Image, ImageDraw
 
@@ -413,7 +414,15 @@ def main(cfg):
     )
     progress_bar.set_description("Steps")
 
+    # ── Best-model + early-stop tracking ──────────────────────────────────────
+    # best_loss decides which checkpoint is "best" (lowest held-out val/loss).
+    # best_epoch/best_step record WHEN that best happened, so best_model/info.txt
+    # and the log say exactly where it came from — and so early stopping can tell
+    # how many epochs have passed with no improvement.
     best_loss = float("inf")
+    best_epoch = None          # 1-based epoch the current best was found in
+    best_step = None           # global_step the current best was found at
+    best_epoch_frac = None     # fractional epoch (e.g. 3.42) of the current best
 
     # ── Checkpoint-monitoring images setup (references.md §8) ──────────────────
     # n_grid_images validation scenes per checkpoint, split 50/50:
@@ -476,8 +485,13 @@ def main(cfg):
                     model, dm.val_dataset, idxs, kinds, n_loras, cfg, cfg_mask,
                     accelerator.device, ckpt_dir, include_empty)
             if is_best:
+                # info.txt = the "when + how good" record of the best model. The
+                # caller passes epoch/step/loss/timestamp lines; here we append the
+                # psnr/ssim just computed above (so all three scores live together,
+                # no need to open TensorBoard or eyeball the images).
+                metric_lines = [f"{k}: {v:.4f}" for k, v in metrics.items()]
                 (ckpt_dir / "info.txt").write_text(
-                    "\n".join(info_lines or []), encoding="utf-8")
+                    "\n".join((info_lines or []) + metric_lines), encoding="utf-8")
             for tracker in accelerator.trackers:
                 if tracker.name == "tensorboard":
                     for n, img in enumerate(images):
@@ -503,29 +517,48 @@ def main(cfg):
             for m in mappers:  m.train()
             for e in encoders: e.train()
 
-    def do_validation(label):
+    def do_validation(label, epoch_num, epoch_frac):
         """
         VALIDATION ONLY — the CHEAP half, run every `val_steps`:
           1. Compute val/loss on held-out data (the standard diffusion metric).
           2. Log it to TensorBoard (the val/loss curve).
-          3. If it's the best so far, save best_model/ (weights + images + info.txt).
+          3. If it's the best so far, save best_model/ (weights + images + info.txt)
+             and record WHEN it happened (epoch, step) for the log + early stopping.
         It does NOT save a regular checkpoint — that is decoupled and controlled
         separately by `ckpt_steps` (see save_ckpt_and_grid calls in the loop).
-          label : a human tag for the log line / best_model's info.txt, e.g. "step150".
+          label      : a human tag, e.g. "step150" or "epoch3".
+          epoch_num  : 1-based epoch this validation belongs to.
+          epoch_frac : fractional epoch (e.g. 3.42 = 42% into epoch 3).
         """
-        nonlocal best_loss
+        nonlocal best_loss, best_epoch, best_step, best_epoch_frac
         val_loss = _validation_loss(model, val_dataloader, n_loras, cfg, cfg_mask,
                                     accelerator, int(cfg.get("val_batches", 8)))
         accelerator.log({"val/loss": val_loss}, step=global_step)
         if accelerator.is_main_process:
-            logger.info(f"[val] {label}: val/loss = {val_loss:.6f}")
+            # Always show how the current val compares to the best so far, and how
+            # many epochs have passed since the best — the "is it still improving?"
+            # signal you read to decide (or let early-stop decide) when to stop.
+            since = "" if best_epoch is None else (
+                f"  | best: epoch{best_epoch} step{best_step} ({best_loss:.6f})"
+                f"  | {epoch_num - best_epoch} epoch(s) since improvement")
+            logger.info(f"[val] {label}: val/loss = {val_loss:.6f}{since}")
         if val_loss < best_loss:
             best_loss = val_loss
-            save_ckpt_and_grid("best_model", is_best=True,
-                               info_lines=[f"from:     {label}",
-                                           f"val_loss: {val_loss:.6f}"])
+            best_epoch = epoch_num
+            best_step = global_step
+            best_epoch_frac = epoch_frac
+            info = [
+                f"from:        {label}",
+                f"epoch:       {epoch_num}",
+                f"epoch_frac:  {epoch_frac:.2f}",
+                f"global_step: {global_step}",
+                f"val/loss:    {val_loss:.6f}",
+                f"timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ]
+            save_ckpt_and_grid("best_model", is_best=True, info_lines=info)
             if accelerator.is_main_process:
-                logger.info(f"New best model — {label}, val/loss={val_loss:.6f}")
+                logger.info(f"*** NEW BEST *** epoch {epoch_num} ({epoch_frac:.2f}), "
+                            f"step {global_step}, val/loss={val_loss:.6f}")
 
     logger.info("[DEPTH] start training")
     for epoch in range(cfg.epochs):
@@ -619,7 +652,7 @@ def main(cfg):
                 #              checkpoint-epoch{N}/step{global_step}/.
                 # They are independent — e.g. validate every 50 but save every 100.
                 if global_step % cfg.val_steps == 0 or stop_training:
-                    do_validation(f"step{global_step}")
+                    do_validation(f"step{global_step}", epoch + 1, epoch_frac)
                 if global_step % cfg.ckpt_steps == 0 or stop_training:
                     save_ckpt_and_grid(f"checkpoint-epoch{epoch + 1}/step{global_step}")
 
@@ -629,11 +662,29 @@ def main(cfg):
         # ── END-OF-EPOCH: ALWAYS validate AND save this epoch's checkpoint ──────
         # (independent of val_steps/ckpt_steps so every epoch gets both a fresh
         # val/loss and its checkpoint-epoch{N}/checkpoint-epoch{N}/ end folder).
-        do_validation(f"epoch{epoch + 1}")
+        do_validation(f"epoch{epoch + 1}", epoch + 1, float(epoch + 1))
         save_ckpt_and_grid(f"checkpoint-epoch{epoch + 1}/checkpoint-epoch{epoch + 1}")
 
         if stop_training:
             break
+
+        # ── EARLY STOPPING (optional; early_stop_patience epochs, 0 = off) ─────
+        # If val/loss hasn't produced a new best for `early_stop_patience` full
+        # epochs, stop now — best_model/ is already saved, so there's nothing to
+        # gain from training longer. Perfect for a detached run you don't watch:
+        # it stops itself once it plateaus.
+        patience = int(cfg.get("early_stop_patience", 0))
+        if patience > 0 and best_epoch is not None:
+            epochs_since_best = (epoch + 1) - best_epoch
+            if accelerator.is_main_process:
+                logger.info(f"[early-stop] {epochs_since_best} epoch(s) since best "
+                            f"(epoch {best_epoch}, val/loss={best_loss:.6f}); patience={patience}")
+            if epochs_since_best >= patience:
+                if accelerator.is_main_process:
+                    logger.info(f"[early-stop] no improvement for {patience} epoch(s) — stopping. "
+                                f"Best model: epoch {best_epoch}, step {best_step}, "
+                                f"val/loss={best_loss:.6f} (see best_model/info.txt).")
+                break
 
     # ── Final snapshot on early-stop only ─────────────────────────────────────
     # On normal completion the end-of-last-epoch block above already ran line 556

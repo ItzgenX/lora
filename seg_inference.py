@@ -68,8 +68,9 @@ from tqdm import tqdm
 
 from hydra.utils import get_original_cwd
 from src.model import ModelBase
-from src.utils import add_lora_from_config, resolve_device
+from src.utils import add_lora_from_config, resolve_device, compute_miou
 from src.data.transforms import build_seg_square_preprocess
+from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap
 
 torch.set_float32_matmul_precision("high")
 
@@ -205,7 +206,7 @@ def main(cfg):
     if cfg.inference.get("json_file") and cfg.inference.json_file:
         json_path = Path(cfg.inference.json_file)
         if not json_path.is_absolute():
-            json_path = Path.cwd() / json_path
+            json_path = Path(_root) / json_path   # _root = original cwd (repo root), not Hydra's run dir
         with open(json_path, "r", encoding="utf-8") as f:
             data = [json.loads(line) for line in f if line.strip()]
         for item in data:
@@ -250,6 +251,14 @@ def main(cfg):
     preprocess  = build_seg_square_preprocess(size=size)
 
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
+
+    # ── Controllability metric (mIoU) accumulator ───────────────────────────
+    # One mIoU per generated image (structure asked for vs. structure produced);
+    # the mean over all entries is this model's controllability score, written to
+    # metrics.txt at the end. See src/utils.py compute_miou.
+    _palette   = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
+    miou_lines = []                                # "stem: 0.6123" per image
+    mious      = []                                # values, for the mean
 
     # ------------------------------------------------------------------ #
     # Inference loop                                                       #
@@ -307,6 +316,21 @@ def main(cfg):
                 guidance_scale=cfg.inference.get("guidance_scale", 7.5),
             )
 
+        # ---- Step 2c: mIoU (controllability) -----------------------------
+        # TARGET ids = the seg map used as conditioning (palette-inverted, exact,
+        # no extra model call). PREDICTION ids = SegFormer re-run on the generated
+        # image (first sample). High mIoU = the generation kept the requested
+        # class layout. Scored per image; mean over the run written to metrics.txt.
+        target_ids = seg_ids_from_colormap(seg_tensor[0], _palette)   # [size,size]
+        gen_t = (TF.to_tensor(preds[0].resize((size, size)).convert("RGB"))
+                 .unsqueeze(0).to(device) * 2.0 - 1.0)                # [1,3,H,W] [-1,1]
+        with torch.no_grad():
+            pred_ids = model.encoders[0].label_ids(gen_t)[0]          # [size,size]
+        miou = compute_miou(pred_ids, target_ids, num_classes=int(_palette.shape[0]))
+        mious.append(miou)
+        miou_lines.append(f"{stem}: {miou:.4f}")
+        print(f"  mIoU  : {miou:.4f}")
+
         # ---- Step 3: Save outputs ----------------------------------------
         orig_display = TF.to_pil_image(((img_tensor[0].cpu().float() + 1) / 2).clamp(0, 1))
 
@@ -341,6 +365,18 @@ def main(cfg):
                     output_dir / f"{stem}{suffix}_raw_seg_gen.jpg", quality=95
                 )
                 print(f"  -> {grid_path}")
+
+    # ── Per-model controllability summary ───────────────────────────────────
+    # The mean mIoU over every scored image IS this model's controllability
+    # score — the single number you rank models by. Written next to the results
+    # so a run's quality is readable without re-opening the images.
+    if mious:
+        mean_miou = float(np.mean(mious))
+        summary = (f"mean mIoU (n={len(mious)}): {mean_miou:.4f}\n\n"
+                   + "\n".join(miou_lines) + "\n")
+        (output_dir / "metrics.txt").write_text(summary, encoding="utf-8")
+        print(f"\nmean mIoU over {len(mious)} images: {mean_miou:.4f}")
+        print(f"  -> {output_dir / 'metrics.txt'}")
 
     print(f"\nDone. All results saved to: {output_dir}")
 

@@ -17,6 +17,11 @@ epochs: 10
 val_steps: 1000
 ckpt_steps: 1000
 
+# Early stopping: if val/loss produces no new best for this many full epochs,
+# training stops itself (best_model/ is already saved). 0 = never stop early.
+# Good for detached runs you don't watch — it quits once it plateaus.
+early_stop_patience: 3
+
 prompt: null
 
 seed: 42

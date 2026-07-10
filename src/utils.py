@@ -473,3 +473,44 @@ def compute_psnr_ssim(img_a, img_b):
     ssim_map = (((2 * mu_a * mu_b + C1) * (2 * cov + C2)) /
                 ((mu_a ** 2 + mu_b ** 2 + C1) * (var_a + var_b + C2)))
     return float(psnr), float(ssim_map.mean())
+
+
+def compute_miou(pred_ids, target_ids, num_classes=19):
+    """
+    Mean Intersection-over-Union between two class-ID maps of identical shape.
+
+    This is the SEGMENTATION controllability metric: it answers "how much do
+    these two label-maps overlap, averaged over classes?". In this project the
+    two maps are (target) the seg map that CONDITIONED the model and (prediction)
+    SegFormer re-run on the GENERATED image — so a high mIoU means the generation
+    kept the structure it was asked to follow.
+
+    pred_ids, target_ids: integer tensors/arrays of the SAME shape ([H,W] or
+      [B,H,W]) holding class ids in [0, num_classes-1].
+    Returns: mIoU as a float in [0, 1] (higher = better match).
+
+    Per class c:  IoU(c) = |pred==c AND target==c| / |pred==c OR target==c|.
+    The mean is taken ONLY over classes whose union is non-empty — a class that
+    appears in neither map is undefined for this image and is excluded (the
+    standard mIoU convention), rather than counted as a 0 that would deflate the
+    score. If NO class is present at all (both maps empty), returns 0.0.
+
+    Pure torch — no new dependencies.
+    """
+    import torch
+
+    pred = torch.as_tensor(pred_ids).reshape(-1).long()
+    target = torch.as_tensor(target_ids).reshape(-1).long()
+    assert pred.shape == target.shape, f"shape mismatch: {pred.shape} vs {target.shape}"
+
+    ious = []
+    for c in range(num_classes):
+        pred_c   = pred == c
+        target_c = target == c
+        union = (pred_c | target_c).sum().item()
+        if union == 0:
+            continue                      # class in neither map — undefined, skip
+        inter = (pred_c & target_c).sum().item()
+        ious.append(inter / union)
+
+    return float(sum(ious) / len(ious)) if ious else 0.0
