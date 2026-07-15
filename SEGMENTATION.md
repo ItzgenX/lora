@@ -5,9 +5,9 @@
 
 ---
 
-## 0 · Seg Concepts From Zero — read DEPTH.md §0 first (shared foundations), then this
+## 0 · Seg Concepts From Zero — read DEPTH.md 0 first (shared foundations), then this
 
-DEPTH.md §0 explains diffusion, the VAE, the UNet loss, CFG, LoRA, FiLM, letterbox, and the training numbers — all of it applies here unchanged. **DEPTH.md §0.0 is the plain-words glossary for every technical term used in BOTH docs** (tensor, logits, argmax, JSONL, Hydra, VRAM, buffer, id2label, SSOT, …) — if any word in this file feels new, it's defined there. This section covers only what is *different* about segmentation.
+DEPTH.md 0 explains diffusion, the VAE, the UNet loss, CFG, LoRA, FiLM, letterbox, and the training numbers — all of it applies here unchanged. **DEPTH.md 0.0 is the plain-words glossary for every technical term used in BOTH docs** (tensor, logits, argmax, JSONL, Hydra, VRAM, buffer, id2label, SSOT, …) — if any word in this file feels new, it's defined there. This section covers only what is *different* about segmentation.
 
 ### 0.1 What semantic segmentation is
 
@@ -35,7 +35,7 @@ SegFormer comes in sizes b0 (3.7M params) to b5 (82M). b5 is locked in because c
 
 ### 0.7 Segmentation is NOT in the paper
 
-CTRLorALTer's paper conditions on depth, HED edges, and human pose — never segmentation. This whole pipeline is our extension, built to mirror the depth pipeline exactly (same LoRA rank, mapper, injection points, configs) so the two can be compared fairly. That's also why "does it match the paper?" is answerable for depth but meaningless for seg — seg's correctness standard is the verification suite in §9 of the audit (encoder-slot contract, parity, class-order check, coherence on real images).
+CTRLorALTer's paper conditions on depth, HED edges, and human pose — never segmentation. This whole pipeline is our extension, built to mirror the depth pipeline exactly (same LoRA rank, mapper, injection points, configs) so the two can be compared fairly. That's also why "does it match the paper?" is answerable for depth but meaningless for seg — seg's correctness standard is the verification suite in 9 of the audit (encoder-slot contract, parity, class-order check, coherence on real images).
 
 ### 0.8 The domain-mismatch caveat (know this before judging outputs)
 
@@ -48,7 +48,7 @@ SegFormer-b5-Cityscapes knows *driving scenes*. On the local dev dataset (lifest
 3. What breaks if someone changes NEAREST to bilinear? *(0.4: fabricated in-between classes at every boundary — silent corruption.)*
 4. How is train/inference parity guaranteed for seg? *(0.5: label_ids() and forward() share _predict_ids() + one shared palette function; verified 0.0 diff.)*
 5. Why doesn't the heavy b5 encoder slow training? *(0.6: skip_encode=True — training loads pre-saved PNGs; the encoder runs only offline and at inference.)*
-6. Why can't MiDaS be reused as the seg encoder? *(§4.1: regression vs classification — it has no class information at all.)*
+6. Why can't MiDaS be reused as the seg encoder? *(4.1: regression vs classification — it has no class information at all.)*
 7. Why is "does seg match the paper?" the wrong question? *(0.7: seg isn't in the paper; it's our extension, verified by execution instead.)*
 8. Why did indoor photos give weird classes like "fence" on furniture? *(0.8: Cityscapes domain mismatch — expected, not a bug.)*
 
@@ -141,9 +141,9 @@ RAW IMAGE (arbitrary aspect ratio)
 
 Key behaviours:
 
-- **Locked model (b5 only)**: SegFormer-b5 was chosen over b0–b4 for best boundary precision on driving-scene classes (pedestrians, vehicles, traffic lights). The model is frozen (`requires_grad=False`). b0 gives worse boundary accuracy and must not be used — see the bug note in §7.
+- **Locked model (b5 only)**: SegFormer-b5 was chosen over b0–b4 for best boundary precision on driving-scene classes (pedestrians, vehicles, traffic lights). The model is frozen (`requires_grad=False`). b0 gives worse boundary accuracy and must not be used — see the bug note in 7.
 - **Manual ImageNet normalisation**: The encoder applies ImageNet mean/std normalisation manually in `_predict_ids()` rather than using `SegformerImageProcessor`. This is intentional: the Hugging Face image processor resizes internally to its own resolution, breaking compatibility with our fixed preprocessing chain.
-- **19 Cityscapes classes**: IDs 0–18. Out-of-range values are impossible by construction — the ID is an argmax over exactly 19 class scores, so every pixel always gets one of the 19 real classes (there is no "unknown" class; see §0.8 for what happens on out-of-domain images).
+- **19 Cityscapes classes**: IDs 0–18. Out-of-range values are impossible by construction — the ID is an argmax over exactly 19 class scores, so every pixel always gets one of the 19 real classes (there is no "unknown" class; see 0.8 for what happens on out-of-domain images).
 - **Output of `label_ids()`**: raw class IDs `[B, H, W]` int64 — used ONLY by the offline calc script.
 - **Output of `forward()`**: colour map `[B, 3, H, W]` float `[0, 1]` — used at live inference.
 - **Parity guarantee**: both `label_ids()` and `forward()` share the same `_predict_ids()` internals. Only the final step differs (IDs vs colour lookup). Running `label_ids()` then `seg_colorize_ids()` on the saved PNG produces bit-identical output to calling `forward()` live.
@@ -163,7 +163,7 @@ Concretely, if MiDaS were forced into the seg encoder slot:
 - Colourising that with `SEG_CITYSCAPES_PALETTE` would produce "near = shade A, far = shade B" gradients, not road/car/person/sky regions.
 - The LoRA mapper would learn a depth-shaped conditioning signal mislabelled as segmentation — zero semantic content, not noisy semantic content.
 
-This is why `SegmentationEncoder` (`src/encoders/seg_encoder.py`) had to be built as a brand-new class rather than just pointing the existing `midas` encoder slot at a different model file — see §4 above and the encoder-slot-contract comment at the top of that file for how it satisfies the same input/output shape contract while doing fundamentally different (classification, not regression) work internally.
+This is why `SegmentationEncoder` (`src/encoders/seg_encoder.py`) had to be built as a brand-new class rather than just pointing the existing `midas` encoder slot at a different model file — see 4 above and the encoder-slot-contract comment at the top of that file for how it satisfies the same input/output shape contract while doing fundamentally different (classification, not regression) work internally.
 
 ---
 
@@ -304,7 +304,7 @@ Both the offline calc script (via `SegJsonDataset`) and the live encoder (`Segme
 
 ### 5.3 Image Discovery and Path Control — how the pipeline finds your images
 
-Same mechanics as DEPTH.md §5.2 — read that for the complete explanation. This section states the seg-specific values (sibling folder `_seg_map`, raw-ID PNGs).
+Same mechanics as DEPTH.md 5.2 — read that for the complete explanation. This section states the seg-specific values (sibling folder `_seg_map`, raw-ID PNGs).
 
 #### The JSONL file types and their key names
 
@@ -331,13 +331,13 @@ Pass whatever key your JSONL uses. Default is `"source"`; your dataset uses `"ta
 
 #### Where the seg maps are saved — a SIBLING folder, derived automatically (2026-07-07)
 
-Exactly like depth (DEPTH.md §5.2). `--data_dir` looks at the image paths in your JSONLs, finds the folder common to all of them (the dataset root, e.g. `.../custome_dataset`), and saves each seg map into a **sibling folder** next to it — `.../custome_dataset_seg_map/` — mirroring the structure, named after the image's **folder**:
+Exactly like depth (DEPTH.md 5.2). `--data_dir` looks at the image paths in your JSONLs, finds the folder common to all of them (the dataset root, e.g. `.../custome_dataset`), and saves each seg map into a **sibling folder** next to it — `.../custome_dataset_seg_map/` — mirroring the structure, named after the image's **folder**:
 
 ```
 .../custome_dataset/000417/raw_image.jpg  →  .../custome_dataset_seg_map/000417/000417_seg_map.png
 ```
 
-This is IDENTICAL to `--dataset_dir` scan mode (§5.3b) — the two were unified on 2026-07-07 and proven to produce byte-identical manifest entries. The old design saved to `data/raw_seg/` named after the image filename, which (every image being `raw_image.jpg`) overwrote all maps into one file. Two guards now prevent that: folder-based naming, and a **collision guard** that aborts before any GPU work if two images would share a PNG. `--image_root` still exists but is only for resolving **relative** JSONL paths; your paths are absolute, so it is not needed.
+This is IDENTICAL to `--dataset_dir` scan mode (5.3b) — the two were unified on 2026-07-07 and proven to produce byte-identical manifest entries. The old design saved to `data/raw_seg/` named after the image filename, which (every image being `raw_image.jpg`) overwrote all maps into one file. Two guards now prevent that: folder-based naming, and a **collision guard** that aborts before any GPU work if two images would share a PNG. `--image_root` still exists but is only for resolving **relative** JSONL paths; your paths are absolute, so it is not needed.
 
 #### The full seg discovery → output flow (VERIFIED by execution)
 
@@ -355,7 +355,7 @@ data/train.jsonl                               ← --data_dir
   SegmentationEncoder.label_ids(image)   → class-ID map [H, W] integer
        ▼
   saved AS RAW IDs — 8-bit grayscale PNG, values 0..18 (colour is applied
-       │  later, at training-data LOAD time, by seg_colorize_ids — §0.3)
+       │  later, at training-data LOAD time, by seg_colorize_ids — 0.3)
        │  → .../custome_dataset_seg_map/000417/000417_seg_map.png
        ▼
   data/seg_training/train.jsonl  (output — VERIFIED mapping)
@@ -425,7 +425,7 @@ python seg_map_calculations.py --dataset_dir /path/custome_dataset --data_dir da
 
 ### 5.3c GPU resolution — never silently falls back to CPU [VERIFIED]
 
-Identical mechanism to DEPTH.md §5.2c/§5.2d (same `src/utils.py::resolve_device` / `auto_batch_size` functions, shared by both pipelines). `seg_map_calculations.py --device` now defaults to auto-detect-and-refuse (never silent CPU); `--batch_size` defaults to VRAM-based auto-scaling. See DEPTH.md §5.2c for the full verification table (4 tests: real GPU / no-GPU-auto / no-GPU-explicit-cpu / no-GPU-explicit-cuda, all PASS via a monkeypatched `torch.cuda.is_available`).
+Identical mechanism to DEPTH.md 5.2c/5.2d (same `src/utils.py::resolve_device` / `auto_batch_size` functions, shared by both pipelines). `seg_map_calculations.py --device` now defaults to auto-detect-and-refuse (never silent CPU); `--batch_size` defaults to VRAM-based auto-scaling. See DEPTH.md 5.2c for the full verification table (4 tests: real GPU / no-GPU-auto / no-GPU-explicit-cpu / no-GPU-explicit-cuda, all PASS via a monkeypatched `torch.cuda.is_available`).
 
 ### 5.4 NEAREST Interpolation for Class IDs
 
@@ -463,21 +463,21 @@ During training `batch["seg"]` contains the colour map loaded from the saved PNG
 
 ### 5.7 Checkpoint Grid, val_steps/ckpt_steps, test.json
 
-Identical to the depth pipeline — see DEPTH.md §5.4–5.6. The seg trainer (`seg_training.py`) is a direct mirror of `depth_training.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
+Identical to the depth pipeline — see DEPTH.md 5.4–5.6. The seg trainer (`seg_training.py`) is a direct mirror of `depth_training.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
 
-### 5.7b Training Timing, Checkpoint Resume, and `training_params.txt` — see DEPTH.md §5.8–5.10
+### 5.7b Training Timing, Checkpoint Resume, and `training_params.txt` — see DEPTH.md 5.8–5.10
 
 Same execution-over-assertion caveats, same self-measurement recipe (swap `depth_training.py` for `seg_training.py`), same verified checkpoint-resume limitation (weights reload correctly; LR schedule/global_step restart from 0), same `training_params.txt` snapshot written to `outputs/train/seg/runs/.../training_params.txt`. One seg-specific fact, measured not assumed: peak VRAM at `batch_size=4` was **identical to depth's measured value**, confirming `skip_encode=True` genuinely keeps the (much larger) SegFormer-b5 encoder out of the training forward pass; it isn't just architecturally true, it was checked with a real run.
 
-### 5.7c 2026-07-05 fixes — see DEPTH.md §5.12–5.14 (applies to seg identically)
+### 5.7c 2026-07-05 fixes — see DEPTH.md 5.12–5.14 (applies to seg identically)
 
 Three updates shared with depth, executed and verified on the seg side too:
-1. **Manifest collision fixed + maps regenerated** (DEPTH.md §5.12): the seg manifests had the same all-rows-point-to-one-PNG bug; 913/913 seg maps were regenerated with the fixed flat-fill SquarePad, manifests rebuilt (639/137/137, verifier PASS), regenerated PNG IDs confirmed within 0..18 on real files. Since 2026-07-07 both `--data_dir` and `--dataset_dir` save collision-free maps to the sibling `_seg_map` folder — either command is safe for this dataset.
-2. **`val/psnr_fixed` / `val/ssim_fixed` + `log_every_steps`** (DEPTH.md §5.13): identical implementation in `seg_training.py` (same `compute_psnr_ssim`, same fixed-scene protocol) — this is what makes the final depth-vs-seg comparison objective. Dead YAML keys (`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond`) removed from the seg configs too.
-3. **Batch-shape kernel jitter** (DEPTH.md §5.14): seg's measured form is 2–5 argmax flips per 262k pixels between saved PNGs and live single-image output (boundary ties). Acceptance: ID-mismatch fraction ≤ 1e-4; palette-colourisation vs `forward()` must stay exactly 0.0 (it does — shared `_predict_ids` + shared palette).
-4. **resize_mode: FINAL — letterbox only, stretch REMOVED** (2026-07-06, DEPTH.md §5.14a): the user evaluated stretch with real encoder previews (`outputs/viz/resize_mode_preview.png`) and rejected it (aspect distortion shifted seg classes — sky read as "building"). The former seg-side switch (`--resize_mode` flag, `inference.resize_mode` key, `build_seg_square_preprocess`'s `resize_mode` parameter) was deleted from the code so train and inference can never disagree by accident.
+1. **Manifest collision fixed + maps regenerated** (DEPTH.md 5.12): the seg manifests had the same all-rows-point-to-one-PNG bug; 913/913 seg maps were regenerated with the fixed flat-fill SquarePad, manifests rebuilt (639/137/137, verifier PASS), regenerated PNG IDs confirmed within 0..18 on real files. Since 2026-07-07 both `--data_dir` and `--dataset_dir` save collision-free maps to the sibling `_seg_map` folder — either command is safe for this dataset.
+2. **`val/psnr_fixed` / `val/ssim_fixed` + `log_every_steps`** (DEPTH.md 5.13): identical implementation in `seg_training.py` (same `compute_psnr_ssim`, same fixed-scene protocol) — this is what makes the final depth-vs-seg comparison objective. Dead YAML keys (`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond`) removed from the seg configs too.
+3. **Batch-shape kernel jitter** (DEPTH.md 5.14): seg's measured form is 2–5 argmax flips per 262k pixels between saved PNGs and live single-image output (boundary ties). Acceptance: ID-mismatch fraction ≤ 1e-4; palette-colourisation vs `forward()` must stay exactly 0.0 (it does — shared `_predict_ids` + shared palette).
+4. **resize_mode: FINAL — letterbox only, stretch REMOVED** (2026-07-06, DEPTH.md 5.14a): the user evaluated stretch with real encoder previews (`outputs/viz/resize_mode_preview.png`) and rejected it (aspect distortion shifted seg classes — sky read as "building"). The former seg-side switch (`--resize_mode` flag, `inference.resize_mode` key, `build_seg_square_preprocess`'s `resize_mode` parameter) was deleted from the code so train and inference can never disagree by accident.
 
-### 5.7d Best-model tracking + early stopping — see DEPTH.md §5.5 (applies to seg identically)
+### 5.7d Best-model tracking + early stopping — see DEPTH.md 5.5 (applies to seg identically)
 
 `seg_training.py` mirrors depth's `do_validation` exactly: `do_segmentation_validation` records **when** the best model was found (`best_epoch`/`best_step`/`best_epoch_frac`) and writes the same enriched `best_model/info.txt` (epoch, epoch_frac, global_step, val/loss, timestamp + appended `val/psnr_fixed`/`val/ssim_fixed`). Each validation logs the same `[seg val] … | best: epochX stepY | N epoch(s) since improvement` plateau line and a `*** NEW BEST (seg) ***` line when best_model/ is replaced.
 
@@ -498,6 +498,32 @@ Absent classes (in neither map) are excluded from the mean — the standard mIoU
 - **Inference** — `seg_inference.py` scores every entry, prints per-image mIoU, and writes `metrics.txt` (`mean mIoU (n=…)` + per-image lines) next to the results. That mean is the model's final controllability score.
 
 **Reading it:** higher = better structural adherence; watch `val/miou_fixed` *rise* over training and plateau (a second opinion to `val/loss`, and the signal for when to stop). Note it depends on SegFormer as the judge — score every generation with the *same* SegFormer that conditioned it, or the comparison isn't apples-to-apples.
+
+### 5.7f How much training does seg need?
+
+**Honest status first (do not skip this):** a full seg training run has **never been completed** (see 12 item 5). So there is **no execution-verified answer** to "how many epochs/steps does seg need" — any number below is a *configured budget*, not a proven requirement. The correct number can only come from watching a real run's curves, and the pipeline is now set up to tell you that number automatically (see below).
+
+**The configured budget (starting point, not a target).** `configs/experiment/train_seg.yaml` is sized for the real dataset (**59,766 train / 3,314 val / 3,327 test**):
+
+| Quantity | Value | Where it comes from |
+|---|---|---|
+| effective batch | **16** | `batch_size 4 × gradient_accumulation_steps 4` |
+| optimizer steps / epoch | **3,736** | `ceil(59,766 / 16)` |
+| `epochs` | **5** | config default |
+| total optimizer steps | **≈ 18,680** | `3,736 × 5` |
+| LR schedule | `cosine`, warmup 500 | decays `1e-4 → ~0` across the full 18,680 steps |
+
+5 epochs is chosen so the cosine schedule has room to decay to ~0 — it's an **upper budget you let run**, not a claim that 5 epochs is required. It may plateau earlier (then early-stop ends it) or still be improving at epoch 5 (then raise `epochs`).
+
+**How the pipeline actually answers "how much" for you — empirically, no guessing.** Three mechanisms (all now in place) turn "guess a number" into "let it run and read off the answer":
+
+1. **`val/loss`** (down) and **`val/miou_fixed`** (up, 5.7e) are logged every `val_steps`/checkpoint. When *both* stop improving, the model has learned what this data can teach it — that's "enough."
+2. **Best-model tracking** — `best_model/` + `best_model/info.txt` record the exact **epoch/step/timestamp** of the best val/loss (5.7d). After the run, `info.txt` *is* the answer to "how much training gave the best model."
+3. **Early stopping** — `early_stop_patience: 3` (config): if val/loss produces no new best for 3 full epochs, training **stops itself**. So a detached run finds its own stopping point; you don't have to predict it.
+
+**Practical recipe.** Launch with the 5-epoch budget (`python seg_training.py experiment=train_seg`), let early-stop + best-model do the work, then read `best_model/info.txt` for the epoch that won. If early-stop never fires and both curves are still climbing at epoch 5, the data wants more — bump `epochs` and rerun. If it plateaus at (say) epoch 2, the honest answer for *this dataset* is "~2 epochs," and you now have it **from a real run**, not from a number written in a config.
+
+**Timing (how long in wall-clock)** is hardware-dependent and only measured on a reference 12 GB GPU, never the real Linux/A2000 target — run the self-measurement command in 5.7b once on the real machine to get seconds/step, then multiply by 18,680 for the worst-case (no early-stop) wall-clock.
 
 ### 5.8 SegFormer-b5 vs b0 — Why b0 is Wrong
 
@@ -550,7 +576,7 @@ local_files_only: ${local_files_only}
 
 ### Dead keys — REMOVED (2026-07-05, same as depth pipeline)
 
-`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond` were deleted from `configs/train_seg.yaml` + `configs/experiment/train_seg.yaml` (they were read by nothing in the seg training path). `log_every_steps: 50` added instead (see DEPTH.md §5.13).
+`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond` were deleted from `configs/train_seg.yaml` + `configs/experiment/train_seg.yaml` (they were read by nothing in the seg training path). `log_every_steps: 50` added instead (see DEPTH.md 5.13).
 
 ### Broken configs (deleted)
 
@@ -651,7 +677,7 @@ Success: 4-panel JPG grids written to `outputs/inference/seg/results/`.
 
 2. **`train_seg_12gb.yaml` and `train_seg_cluster.yaml` — DELETED** (2026-06-30, verified gone from `configs/experiment/`): they referenced b0 and had wrong JSON paths. The one and only seg experiment config is `configs/experiment/train_seg.yaml`.
 
-3. **`max_train_steps` does not stop training**: Same limitation as the depth pipeline — see DEPTH.md §8, item 1.
+3. **`max_train_steps` does not stop training**: Same limitation as the depth pipeline — see DEPTH.md 8, item 1.
 
 4. **19-class Cityscapes only**: The palette and class count are hardcoded to Cityscapes. Adapting to a different segmentation taxonomy requires changing `SEG_CITYSCAPES_PALETTE` in `seg_encoder.py` (the SSOT) and rerunning Stage C.
 
@@ -659,7 +685,7 @@ Success: 4-panel JPG grids written to `outputs/inference/seg/results/`.
 
 6. **NEAREST-resize is slow for large batches**: `SegJsonDataset` applies NEAREST resize per sample in the dataloader. For large datasets this can be a bottleneck. Pre-resizing the seg PNGs to 512x512 during Stage C (currently not done) would eliminate this.
 
-7. **No test-time evaluation script**: Same limitation as the depth pipeline — see DEPTH.md §8, item 7.
+7. **No test-time evaluation script**: Same limitation as the depth pipeline — see DEPTH.md 8, item 7.
 
 ---
 
@@ -680,7 +706,7 @@ Success: 4-panel JPG grids written to `outputs/inference/seg/results/`.
 | S6 | Val loss + checkpoint grid | PENDING FIRST RUN | Blocked on S4 (training). Code mirrors train_depth.py's verified grid logic. |
 | S7 | TensorBoard tags | PENDING FIRST RUN | Blocked on S4. Expected tags: `train/loss`, `train/lr`, `val/loss`, `val/sample_00`…`val/sample_09`. |
 | S8 | Inference | PENDING FIRST RUN | `seg_inference.py` untested — no checkpoint available yet. Blocked on S4. |
-| S9 | Known issues documented | DOCUMENTED | See §8 above. NEAREST-resize slow on large batches, no test-eval script. Stale configs (formerly S1) are now deleted, not just documented. |
+| S9 | Known issues documented | DOCUMENTED | See 8 above. NEAREST-resize slow on large batches, no test-eval script. Stale configs (formerly S1) are now deleted, not just documented. |
 
 ### What is now unblocked
 
@@ -701,13 +727,13 @@ Watch for these in the first 50 steps to confirm training is working:
 
 ## 10 · Full Parameter Control
 
-Everything you can tune, where it lives, and what changing it does. Mirrors DEPTH.md §9 with seg-specific values. Read §9 first for concepts, then use this section for seg-specific differences.
+Everything you can tune, where it lives, and what changing it does. Mirrors DEPTH.md 9 with seg-specific values. Read 9 first for concepts, then use this section for seg-specific differences.
 
 ---
 
 ### 10.1 How Hydra overrides work
 
-See DEPTH.md §9.1 — identical for seg. The key difference: the experiment config file is `configs/experiment/train_seg.yaml`. Resolved config is written to `outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/.hydra/config.yaml` after each run.
+See DEPTH.md 9.1 — identical for seg. The key difference: the experiment config file is `configs/experiment/train_seg.yaml`. Resolved config is written to `outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/.hydra/config.yaml` after each run.
 
 ```powershell
 # Override any key without editing a file:
@@ -730,10 +756,10 @@ python seg_map_calculations.py --data_dir data/ [flags]
 | `--dry_run_n N` | off | Process only the first N images per split. Always run `--dry_run_n 2` first to check model loading and output format. | Use before every full run on a new machine. |
 | `--size` | `512` | Square side for saved seg-ID PNGs. Must match `size` in training config. Changing this requires rerunning Stage C. | Keep 512 unless you change training resolution. |
 | `--batch_size` | `4` | Images fed to SegFormer at once. | Lower if you get OOM. SegFormer-b5 is heavier than DPT so you may need `--batch_size 2`. |
-| `--model` | `checkpoints/local_models/segformer-b5-cityscapes` | Local path to SegFormer-b5. **Locked — do not change to b0 or any other variant.** See §4.1 for why b5 is non-negotiable. | Only if you moved the model files. |
+| `--model` | `checkpoints/local_models/segformer-b5-cityscapes` | Local path to SegFormer-b5. **Locked — do not change to b0 or any other variant.** See 4.1 for why b5 is non-negotiable. | Only if you moved the model files. |
 | `--local_files_only` | `True` | Offline-only loading from the local model path. | Keep `True` now that b5 is in `checkpoints/local_models/`. |
 | `--device` | `cuda` if available | `cuda` or `cpu`. | `cpu` is very slow for SegFormer-b5 (~10x slower). |
-| *(removed)* `--resize_mode` | — | This flag no longer exists (2026-07-06): letterbox squaring (flat local-mean fill, DEPTH.md §5.1) is built into `build_seg_square_preprocess()` after the stretch option was evaluated and rejected (DEPTH.md §5.14a). There is deliberately no knob to get preprocessing out of sync. | — |
+| *(removed)* `--resize_mode` | — | This flag no longer exists (2026-07-06): letterbox squaring (flat local-mean fill, DEPTH.md 5.1) is built into `build_seg_square_preprocess()` after the stretch option was evaluated and rejected (DEPTH.md 5.14a). There is deliberately no knob to get preprocessing out of sync. | — |
 | `--no_skip` | off | Recompute seg PNGs even if they already exist. | Add if you changed `--model` or `--size` and need to regenerate. |
 | `--image_path` | `source` | JSONL key holding the image path. Your dataset uses `target`. | Always set `--image_path target`. |
 | `--dataset_dir` | *(none)* | Optional: scan this folder for `raw_image.jpg` instead of trusting JSONL paths. Saves to the same sibling folder either way. | Add if you want disk (not the JSONL) to decide which images exist. |
@@ -744,11 +770,11 @@ python seg_map_calculations.py --data_dir data/ [flags]
 
 ### 10.3 Stage D Training — `configs/experiment/train_seg.yaml`
 
-Identical structure to depth (DEPTH.md §9.3). Differences are noted below; everything else is the same.
+Identical structure to depth (DEPTH.md 9.3). Differences are noted below; everything else is the same.
 
 #### Resolution and hardware — identical to depth
 
-Same keys (`size`, `bf16`, `gradient_checkpointing`, `gradient_accumulation_steps`, `data.batch_size`, `data.workers`) with the same defaults. See DEPTH.md §9.3.
+Same keys (`size`, `bf16`, `gradient_checkpointing`, `gradient_accumulation_steps`, `data.batch_size`, `data.workers`) with the same defaults. See DEPTH.md 9.3.
 
 #### Learning rate and schedule — identical to depth
 
@@ -756,7 +782,7 @@ Same keys and defaults. The learning rate is kept identical to depth so val/loss
 
 #### When to save / validate — identical to depth
 
-Same keys (`val_steps=500`, `ckpt_steps=1000`, `val_batches=64`). See DEPTH.md §9.3.
+Same keys (`val_steps=500`, `ckpt_steps=1000`, `val_batches=64`). See DEPTH.md 9.3.
 
 #### Checkpoint monitoring grid — one difference from depth
 
@@ -883,7 +909,7 @@ Two things keep it from being a real problem in practice:
 The lie is perfectly consistent. The band gets the same deterministic label at training and at inference (same flat fill → same argmax), so the model just learns "band zone = render the band filler" as a stable rule. It never contaminates the real content region, and generated pad zones can be cropped off afterward using last_padding_fracs (stored exactly for this).
 It's confined to a known, fixed region — top/bottom ~19% whose position is computable from the pad fractions, never overlapping actual scene content.
 If it ever needs fixing, two options exist (neither implemented, both documented)
-Mask the pad rows out of the training loss (the long-standing nice-to-have in references.md §5): the model is simply never graded on the band, so it never learns anything there. Cleanest fix, moderate effort.
+Mask the pad rows out of the training loss (the long-standing nice-to-have in references.md 5): the model is simply never graded on the band, so it never learns anything there. Cleanest fix, moderate effort.
 Invent a 20th "padding" color: since the band's position is known exactly from last_padding_fracs, we could stamp a dedicated 20th palette color over the band in both the saved maps and live encoder output (post-argmax). The mapper network would then see "padding" as its own honest category. Works, but adds a synthetic class and more moving parts — only worth it if band conditioning measurably hurts results.
 So, to state it as the one-liner you can repeat: depth's output space is continuous, so filler looks like filler; segmentation's output space is a closed list of 19 real-world objects, so filler is forced to impersonate one of them — we contain that with consistency and a known band position, rather than being able to eliminate it the way depth naturally does.
 ```

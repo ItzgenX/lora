@@ -4,6 +4,9 @@ checkpoints/
 *.pyc
 ignore
 .vscode/
+.claude/
+/docs/
+
 
 
 *__pycache__/
