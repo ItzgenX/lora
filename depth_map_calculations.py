@@ -8,28 +8,20 @@ WHY WE NEED THIS:
   Since training images don't change, we compute depths ONCE and save them as PNGs.
   Training then loads PNGs directly — no DPT overhead per step.
 
-TWO INPUT MODES:
-  1. DIRECTORY MODE: scan --input_dir, save depths to --output_dir
-     Then auto-updates any *.json files found beside the image folder.
-
-  2. JSON MODE: read --json_file (each entry has "raw_image_path" + "prompt"),
-     compute depths, ADD "depth_path" field to each entry, save updated JSON.
-
-JSON MANIFEST FORMAT:
-  [
-    {"raw_image_path": "data/images/cat.jpg",  "prompt": "a cute cat on a chair"},
-    {"raw_image_path": "data/images/dog.jpg",  "prompt": "a brown dog on grass"}
-  ]
-  After running: "depth_path" key is added to each entry automatically.
+THREE INPUT MODES (mirrors seg_map_calculations.py exactly):
+  1. --dataset_dir (scan mode): scans a dataset folder for raw_image.jpg,
+     saves depth maps to a SIBLING folder (mirrored structure), rebuilds
+     depth_training/{train,val,test}.jsonl from data/{train,val,test}.jsonl.
+  2. --data_dir: reads data/{train,val,test}.jsonl directly (images already
+     have paths in the JSONL — no scanning), same sibling-mirrored output.
+  3. --input_dir: scan a plain image folder, save depth PNGs preserving the
+     relative folder structure. PNGs only — no JSON is read or written.
 
 TYPICAL WORKFLOW (--data_dir mode — recommended):
   # Step 1: compute depths for all images, builds depth_training/train+val+test.jsonl
   python depth_map_calculations.py --data_dir data/
   # Step 2: train
   python depth_training.py experiment=train_depth
-
-ALTERNATIVE (JSON mode — when you already have a single JSON file):
-  python depth_map_calculations.py --json_file data/train.jsonl --output_dir data/depths
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Dry run: 15 images, verify pipeline before committing to full dataset ---
@@ -802,146 +794,17 @@ def build_depth_training_from_scan(
         _verify_scan_training_jsonl(out_path, "depth_path", "_depth_map")
 
 
-def run_json_mode(args):
-    """
-    JSON MODE:
-      Read --json_file (list of {raw_image_path, prompt} entries).
-      Compute depth for each image.
-      Add / update "depth_path" field in each entry.
-      Save updated JSON back to the same file.
-    """
-    json_path = Path(args.json_file).resolve()
-    if not json_path.exists():
-        print(f"[ERROR] JSON file not found: {json_path}")
-        return
-
-    with open(json_path, "r", encoding="utf-8") as f:
-        entries = [json.loads(line) for line in f if line.strip()]
-
-    print(f"Loaded {len(entries)} entries from: {json_path}")
-
-    # Resolve each image path relative to cwd or json file's directory
-    image_paths = []
-    for entry in entries:
-        p = Path(entry["raw_image_path"])
-        if not p.is_absolute():
-            # Try relative to cwd first (project root), then relative to JSON location
-            abs_p = Path.cwd() / p
-            if abs_p.exists():
-                p = abs_p
-            else:
-                p = json_path.parent / p
-        image_paths.append(p)
-        if not p.exists():
-            print(f"[WARN] Image not found: {p}")
-
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else json_path.parent / "depth"
-
-    path_to_depth = precompute_depths_from_paths(
-        image_paths=[str(p) for p in image_paths],
-        output_dir=output_dir,
-        size=args.size,
-        batch_size=args.batch_size,
-        model_name=args.model,
-        device=args.device,
-        skip_existing=not args.no_skip,
-        local_files_only=args.local_files_only,
-    )
-
-    # Update each entry with its depth path
-    updated = 0
-    for entry, img_path in zip(entries, image_paths):
-        depth_p = path_to_depth.get(str(img_path))
-        if depth_p is not None:
-            try:
-                rel = str(Path(depth_p).relative_to(Path.cwd()))
-            except ValueError:
-                rel = str(depth_p)
-            entry["depth_path"] = rel.replace("\\", "/")
-            updated += 1
-        elif "depth_path" not in entry:
-            print(f"[WARN] No depth for: {img_path}")
-
-    # Write updated JSONL (one object per line)
-    with open(json_path, "w", encoding="utf-8") as f:
-        for entry in entries:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-    print(f"Updated {updated}/{len(entries)} entries with depth paths.")
-    print(f"Saved updated JSONL -> {json_path}")
-    print("\nNext step:")
-    print(f"  python depth_training.py experiment=train_depth data.json_file={json_path}")
-
-
-def update_json_files(json_dir: Path, path_to_depth_rel: dict, input_dir: Path = None) -> None:
-    """
-    Scan json_dir for *.json files (train.json, val.json, test.json, ...).
-    For each entry, fill the "depth_path" field by matching the source image path.
-
-    Args:
-        json_dir          : directory to scan for JSON files (e.g. data/)
-        path_to_depth_rel : {relative_src_path: relative_depth_path}
-                            Keys are relative to input_dir
-                            (e.g. "A/scene_001/original_sample_img.jpg")
-        input_dir         : absolute path to the image root used during precompute.
-                            Required for correct matching with nested folder layouts.
-    """
-    json_files = sorted(json_dir.glob("*.jsonl"))
-    if not json_files:
-        print(f"  No JSONL files found in: {json_dir}")
-        return
-
-    for json_path in json_files:
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                entries = [json.loads(line) for line in f if line.strip()]
-        except Exception as e:
-            print(f"  [WARN] Could not read {json_path.name}: {e}")
-            continue
-
-        updated = 0
-        for entry in entries:
-            if "raw_image_path" not in entry:
-                continue
-
-            raw_path = Path(entry["raw_image_path"])
-
-            # Derive the lookup key: path relative to input_dir.
-            # JSON entries store paths relative to the project root
-            # (e.g. "data/images/A/scene_001/original_sample_img.jpg").
-            # input_dir is e.g. /abs/path/to/data/images, so the key is
-            # "A/scene_001/original_sample_img.jpg".
-            if input_dir is not None:
-                abs_raw = (Path.cwd() / raw_path) if not raw_path.is_absolute() else raw_path
-                try:
-                    rel_key = str(abs_raw.relative_to(input_dir)).replace("\\", "/")
-                except ValueError:
-                    rel_key = raw_path.name
-            else:
-                rel_key = raw_path.stem   # legacy flat-layout fallback
-
-            depth_rel = path_to_depth_rel.get(rel_key)
-            if depth_rel:
-                entry["depth_path"] = depth_rel
-                updated += 1
-            elif "depth_path" not in entry:
-                print(f"  [WARN] No depth for: {raw_path}")
-
-        if updated > 0:
-            with open(json_path, "w", encoding="utf-8") as f:
-                for entry in entries:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            print(f"  Updated {updated}/{len(entries)} entries in {json_path.name}")
-        else:
-            print(f"  No matching images found in {json_path.name} (skipped)")
-
-
 def run_directory_mode(args):
     """
-    DIRECTORY MODE:
-      Scan --input_dir for images.
-      Compute depths, save to --output_dir.
-      Auto-update any *.json files in the data directory with depth paths.
+    DIRECTORY MODE: scan --input_dir recursively for images, compute depth maps,
+    save PNGs preserving the relative folder structure. Use when you just want
+    the depth maps without (re)building the training JSONLs.
+
+    Mirrors seg_map_calculations.py's run_seg_directory_mode exactly: PNGs only,
+    no JSON is read or auto-updated (the legacy JSON-auto-update path — which
+    hardcoded the "raw_image_path" key and silently no-opped on manifests using
+    a different key — was removed; use --data_dir or --dataset_dir instead to
+    build training JSONLs).
     """
     input_dir = Path(args.input_dir).resolve()
     if not input_dir.exists():
@@ -951,7 +814,7 @@ def run_directory_mode(args):
     output_dir = (
         Path(args.output_dir).resolve()
         if args.output_dir
-        else input_dir.parent / "depths"   # default: data/depths/
+        else input_dir.parent / "raw_depth"   # matches seg's raw_seg naming convention
     )
 
     # Recursive scan — supports nested folder layouts like
@@ -968,7 +831,7 @@ def run_directory_mode(args):
 
     print(f"Found {len(image_paths)} images under: {input_dir}")
 
-    path_to_depth = precompute_depths_from_paths(
+    precompute_depths_from_paths(
         image_paths=[str(p) for p in image_paths],
         output_dir=output_dir,
         size=args.size,
@@ -980,29 +843,7 @@ def run_directory_mode(args):
         local_files_only=args.local_files_only,
     )
 
-    # Build relative-source-path → relative-depth-path dict for JSON update.
-    # Keys are relative to input_dir (e.g. "A/scene_001/original_sample_img.jpg")
-    # so multiple images with the same filename but different parent folders are
-    # disambiguated correctly.
-    path_to_depth_rel = {}
-    for img_p, depth_p in path_to_depth.items():
-        try:
-            rel_src = str(Path(img_p).relative_to(input_dir)).replace("\\", "/")
-        except ValueError:
-            rel_src = Path(img_p).name
-        try:
-            rel_depth = str(Path(depth_p).relative_to(Path.cwd())).replace("\\", "/")
-        except ValueError:
-            rel_depth = str(depth_p).replace("\\", "/")
-        path_to_depth_rel[rel_src] = rel_depth
-
-    # Auto-update JSON files in the data directory with depth paths
-    json_dir = Path(args.json_dir).resolve() if args.json_dir else input_dir.parent
-    print(f"\nUpdating JSON files in: {json_dir}")
-    update_json_files(json_dir, path_to_depth_rel, input_dir)
-
-    print("\nNext step — train:")
-    print("  python depth_training.py experiment=train_depth_12gb")
+    print("\nNext step — build training JSONLs with --data_dir, then depth_training.py")
 
 
 def main():
@@ -1015,7 +856,8 @@ def main():
     # ---- Primary arguments ----------------------------------------------- #
     parser.add_argument(
         "--input_dir", type=str, default=None,
-        help="Directory containing images (.jpg/.jpeg/.png). Required unless --json_file is used.",
+        help="Directory containing images (.jpg/.jpeg/.png). Directory mode — mutually "
+             "exclusive with --data_dir/--dataset_dir.",
     )
     parser.add_argument(
         "--output_dir", type=str, default=None,
@@ -1045,18 +887,6 @@ def main():
         "--dry_run_n", type=int, default=None,
         help="(depth-training JSON mode) Process only the first N entries per JSON "
              "file, then verify. Use to sanity-check before running the full dataset.",
-    )
-
-    # ---- Optional: JSON mode (only needed if you already have a JSON file) #
-    parser.add_argument(
-        "--json_file", type=str, default=None,
-        help="(Optional) Path to an existing JSON manifest. If given, reads image "
-             "paths from the JSON and updates depth_path fields in it.",
-    )
-    parser.add_argument(
-        "--json_dir", type=str, default=None,
-        help="(Optional) Folder to scan for *.jsonl files to update after computing depths. "
-             "Defaults to the parent of --input_dir (e.g. data/).",
     )
 
     # ---- Processing options ---------------------------------------------- #
@@ -1122,13 +952,12 @@ def main():
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     # Validate: need at least one input mode
-    if not args.dataset_dir and not args.data_dir and not args.input_dir and not args.json_file:
+    if not args.dataset_dir and not args.data_dir and not args.input_dir:
         parser.error(
             "Provide one of:\n"
             "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps to a sibling folder)\n"
             "  --data_dir data/              (builds depth_training/*.jsonl from JSONL paths)\n"
-            "  --input_dir data/raw          (directory mode)\n"
-            "  --json_file data/train.jsonl  (single-JSONL mode)"
+            "  --input_dir data/raw          (directory mode — PNGs only, no JSON)"
         )
 
     if args.data_dir and args.input_dir:
@@ -1215,11 +1044,8 @@ def main():
             image_root=image_root,
         )
 
-    elif args.json_file and not args.input_dir:
-        # JSON-only mode: image paths come from a single JSON file
-        run_json_mode(args)
     else:
-        # Directory mode: scan input_dir for images (primary usage)
+        # Directory mode: scan input_dir for images (PNGs only, no JSON)
         run_directory_mode(args)
 
 
