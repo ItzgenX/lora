@@ -1,0 +1,128 @@
+# @package _global_
+#
+# configs/experiment/train_grounded_sam.yaml
+# ------------------------------------------
+# Grounded-SAM training experiment. Reuses the ENTIRE segmentation pipeline
+# (seg_training.py, SegJsonDataModule, the struct LoRA + mapper) and swaps only:
+#   • the encoder slot     -> GroundedSamEncoder (training-only slot filler)
+#   • the data module      -> local_grounded_sam (your class palette + manifests)
+# Everything else (LoRA rank/mode, LR, schedule, grid knobs) is identical to the
+# SegFormer config so results stay comparable.
+#
+# Differences from train_seg.yaml are flagged inline with "DIFF:".
+
+defaults:
+  - /lora@lora.struct: struct
+  - override /lora/encoder@lora.struct.encoder: grounded_sam   # DIFF: GroundedSamEncoder (was segformer)
+  - override /model: sd15
+  - override /data: local_grounded_sam                          # DIFF: Grounded-SAM data module (was local_seg)
+  - _self_
+
+# =============================================================================
+# MODEL LOADING — LOCAL vs INTERNET  (one switch: local_files_only)
+# =============================================================================
+# Only the BASE diffusion model is loaded now — there is NO seg encoder model to
+# load (GroundedSamEncoder is a slot filler; training uses pre-saved maps). So
+# unlike train_seg.yaml there are no seg_model_name/seg_model_path keys here.
+local_files_only: true
+
+base_model_name:  runwayml/stable-diffusion-v1-5
+base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
+
+# =============================================================================
+# HARDWARE — plain, fixed values. Nothing auto-scales at runtime.
+# =============================================================================
+# For a suggested starting point on your GPU + dataset (prints only, never edits):
+#   python recommend_training_params.py --data_dir data/grounded_sam
+#   Multi-GPU: accelerate launch --num_processes=N seg_training.py experiment=train_grounded_sam
+gradient_checkpointing: true
+gradient_accumulation_steps: 4        # 4 batch x 4 accum = 16 effective batch
+size: 512                              # square canvas; must match SD1.5 native resolution
+
+# =============================================================================
+# 1. GENERAL TRAINING PARAMETERS
+# =============================================================================
+# Adjust epochs/val_steps/ckpt_steps to YOUR dataset size (60K train here).
+#   effective batch = batch_size(4) x grad_accum(4) = 16
+#   steps/epoch     = ceil(train_images / 16)
+learning_rate: 1.0e-4
+lr_warmup_steps: 500
+lr_scheduler: cosine
+epochs: 5
+
+# DECOUPLED triggers: validate cheaply often, save weights+images less often.
+val_steps:  500
+ckpt_steps: 1000
+
+# =============================================================================
+# 2. DATA  (DIFF: Grounded-SAM manifests + class palette)
+# =============================================================================
+# The class palette + JSONL key names are set in configs/data/local_grounded_sam.yaml
+# (classes_file / image_key / seg_key / prompt_key). Override any of them here if
+# needed, e.g.:  data.seg_key=mask   data.classes_file=configs/my_classes.json
+data:
+  batch_size:     4
+  val_batch_size: 4
+  workers:        4
+  val_workers:    2
+  # DIFF: Grounded-SAM manifests. Build/point these at your (raw_image, seg_map,
+  # prompt) JSONLs. val_json_file must be the real val split — NEVER test.
+  json_file:     data/grounded_sam/train.jsonl
+  val_json_file: data/grounded_sam/val.jsonl
+
+# =============================================================================
+# 3. GLOBAL FALLBACK PROMPT
+# =============================================================================
+prompt: null    # null -> each image uses its own prompt field from the JSONL
+
+# =============================================================================
+# 4. OPERATIONAL SETTINGS
+# =============================================================================
+seed: 42
+val_batches: 64
+log_every_steps: 50
+
+# Checkpoint-monitoring images: N labeled val scenes per checkpoint
+# (ORIGINAL | SEG MAP | PREDICTED), 50/50 fixed/fresh. Source = validation set.
+# NOTE: the mIoU controllability metric is automatically SKIPPED for Grounded-SAM
+# (it needs a live segmenter, which is Tier 2). PSNR/SSIM + grids still run.
+n_grid_images: 10
+grid_include_empty_prompt: false
+
+# =============================================================================
+# 5. PRECISION
+# =============================================================================
+bf16: true
+ignore_check: true
+tag: grounded_sam                 # DIFF: outputs/train/grounded_sam/...
+
+# =============================================================================
+# 6. MODEL OVERRIDES
+# =============================================================================
+model:
+  _target_: src.model.SD15
+  pipeline_type: diffusers.StableDiffusionPipeline
+  model_name: ${base_model_name}   # seg_training.py overrides to base_model_path when local
+  local_files_only: ${local_files_only}
+  guidance_scale: 7.5
+
+# =============================================================================
+# 7. LORA ARCHITECTURE  (identical to the SegFormer config)
+# =============================================================================
+lora:
+  struct:
+    optimize: true
+    cfg: false
+    ckpt_path: null
+    encoder:                       # DIFF: GroundedSamEncoder slot filler (no `model` key)
+      _target_: src.encoders.grounded_sam_encoder.GroundedSamEncoder
+      size: ${size}
+    config:
+      adaption_mode: only_res_conv
+      rank: 128
+      c_dim: 128
+      lora_scale: 1
+
+# LAUNCH:
+#   Single GPU : python seg_training.py experiment=train_grounded_sam
+#   Multi-GPU  : accelerate launch --num_processes=N seg_training.py experiment=train_grounded_sam

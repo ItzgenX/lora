@@ -184,7 +184,16 @@ def _save_checkpoint_segmentation_images(
     prompts, images = [], []
     psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
     mious = []              # controllability metric, FIXED scenes only (see below)
-    _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
+    # Use the EXACT palette the dataset colourised with (Cityscapes SSOT for the
+    # SegFormer pipeline; the Grounded-SAM class palette when a classes_file is
+    # configured). Taking it from the dataset guarantees it matches the maps.
+    _palette = val_dataset.seg_palette.to(device)   # ID<->colour lookup
+    # The mIoU controllability metric segments the GENERATED image live, so it
+    # needs a working live segmenter. The Grounded-SAM Tier-1 encoder is a
+    # training-only slot filler (live_available=False) -> skip mIoU for it.
+    # SegmentationEncoder has no such attr -> defaults True -> mIoU runs as before.
+    _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
+    _live_seg = getattr(_enc0, "live_available", True)
 
     for n, (idx, kind) in enumerate(zip(idxs, kinds)):
         item   = val_dataset[idx]
@@ -230,15 +239,18 @@ def _save_checkpoint_segmentation_images(
             # mIoU of the SEG STRUCTURE the model was told to follow vs. what it
             # actually produced. TARGET ids come from the conditioning colour map
             # itself (palette-inverted — exact, no extra model call). PREDICTION
-            # ids come from re-running SegFormer on the generated image. High
-            # mIoU = the generation kept the requested class layout. FIXED scenes
-            # + fixed seed keep it comparable checkpoint-to-checkpoint.
-            target_ids = seg_ids_from_colormap(seg[0], _palette)   # [size,size] long
-            gen_t = (TF.to_tensor(pred.resize((cfg.size, cfg.size)).convert("RGB"))
-                     .unsqueeze(0).to(device) * 2.0 - 1.0)         # [1,3,H,W] in [-1,1]
-            pred_ids = model.encoders[0].label_ids(gen_t)[0]       # [size,size] long
-            mious.append(compute_miou(pred_ids, target_ids,
-                                      num_classes=int(_palette.shape[0])))
+            # ids come from re-running the live segmenter on the generated image.
+            # High mIoU = the generation kept the requested class layout. FIXED
+            # scenes + fixed seed keep it comparable checkpoint-to-checkpoint.
+            # Requires a live segmenter (SegFormer): skipped when the encoder is
+            # the Grounded-SAM Tier-1 slot filler (live_available=False).
+            if _live_seg:
+                target_ids = seg_ids_from_colormap(seg[0], _palette)   # [size,size] long
+                gen_t = (TF.to_tensor(pred.resize((cfg.size, cfg.size)).convert("RGB"))
+                         .unsqueeze(0).to(device) * 2.0 - 1.0)         # [1,3,H,W] in [-1,1]
+                pred_ids = model.encoders[0].label_ids(gen_t)[0]       # [size,size] long
+                mious.append(compute_miou(pred_ids, target_ids,
+                                          num_classes=int(_palette.shape[0])))
 
     # ONE prompts.txt for all scenes (tagged [fixed]/[new]), next to the images.
     (out_dir / "prompts.txt").write_text(
@@ -332,16 +344,22 @@ def main(cfg):
     # Hydra has already chdir'd into the run directory by now.
     # When offline we also export HF_HUB_OFFLINE so NOTHING can touch the network.
     _root = get_original_cwd()
+    # The Grounded-SAM Tier-1 encoder has no HF `model` to load (it's a
+    # training-only slot filler), so only rewrite encoder.model when the encoder
+    # config actually has that key (SegFormer does; GroundedSamEncoder does not).
+    _enc_has_model = "model" in cfg.lora.struct.encoder
     if cfg.local_files_only:
         os.environ["HF_HUB_OFFLINE"]      = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         cfg.model.model_name              = os.path.join(_root, cfg.base_model_path)
-        cfg.lora.struct.encoder.model     = os.path.join(_root, cfg.seg_model_path)
+        if _enc_has_model:
+            cfg.lora.struct.encoder.model = os.path.join(_root, cfg.seg_model_path)
     else:
         cfg.model.model_name              = cfg.base_model_name
-        cfg.lora.struct.encoder.model     = cfg.seg_model_name
+        if _enc_has_model:
+            cfg.lora.struct.encoder.model = cfg.seg_model_name
     print(f"[model] base             = {cfg.model.model_name}")
-    print(f"[model] seg encoder      = {cfg.lora.struct.encoder.model}")
+    print(f"[model] seg encoder      = {cfg.lora.struct.encoder.model if _enc_has_model else cfg.lora.struct.encoder._target_}")
     print(f"[model] local_files_only = {cfg.local_files_only}")
 
     # Suppress expected-but-noisy warnings.

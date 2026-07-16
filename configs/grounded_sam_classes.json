@@ -1,0 +1,10 @@
+{
+  "__README__": "TEMPLATE — replace the entries below with your ACTUAL Grounded-SAM classes. Rules: (1) keys are class-ID strings, contiguous 0..N-1, no gaps; (2) the ID order MUST match the pixel values in your saved seg maps (pixel value i == class i); (3) value is either a plain name string, or {\"name\": \"...\", \"color\": [R,G,B]} if you want a specific colour (otherwise a distinct colour is auto-assigned). Run `python scan_seg_map_classes.py --json_file data/grounded_sam/train.jsonl` to confirm how many classes (N) your maps actually contain, then list exactly that many here. DELETE this __README__ key before use.",
+  "0": "road",
+  "1": "sidewalk",
+  "2": "building",
+  "3": "vegetation",
+  "4": "sky",
+  "5": "person",
+  "6": "car"
+}

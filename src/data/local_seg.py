@@ -67,6 +67,9 @@ class SegJsonDataset(Dataset):
         project_root: Path = None,
         palette: list = None,      # class-id -> RGB; defaults to Cityscapes SSOT
         image_root: Path = None,
+        image_key: str = "raw_image_path",   # JSONL key for the source RGB image
+        seg_key: str = "seg_path",           # JSONL key for the class-ID seg map
+        prompt_key: str = "prompt",          # JSONL key for the text caption
     ):
         self.json_file    = Path(json_file)
         self.json_dir     = self.json_file.parent
@@ -74,6 +77,12 @@ class SegJsonDataset(Dataset):
         self.image_root   = Path(image_root) if image_root else None
         self.size         = size
         self.image_transform = image_transform
+        # Configurable manifest keys: default to the SegFormer pipeline's names,
+        # override (e.g. for a Grounded-SAM manifest that used "image"/"mask")
+        # via the data config so no JSONL renaming is needed.
+        self.image_key    = image_key
+        self.seg_key      = seg_key
+        self.prompt_key   = prompt_key
 
         # Build the palette tensor ONCE here from the shared constant so every
         # sample colourises identically, and identically to the live encoder.
@@ -90,18 +99,18 @@ class SegJsonDataset(Dataset):
         # dataloader workers surface a confusing deep stack trace mid-training.
         missing_img = missing_seg = 0
         for item in self.items:
-            if not self._seg_resolve(item["raw_image_path"]).exists():
-                print(f"[SegJsonDataset] WARN image not found: {item['raw_image_path']}")
+            if not self._seg_resolve(item[self.image_key]).exists():
+                print(f"[SegJsonDataset] WARN image not found: {item[self.image_key]}")
                 missing_img += 1
-            if not item.get("seg_path", ""):
+            if not item.get(self.seg_key, ""):
                 missing_seg += 1
-            elif not self._seg_resolve(item["seg_path"]).exists():
-                print(f"[SegJsonDataset] WARN seg not found: {item['seg_path']}")
+            elif not self._seg_resolve(item[self.seg_key]).exists():
+                print(f"[SegJsonDataset] WARN seg not found: {item[self.seg_key]}")
                 missing_seg += 1
         if missing_seg:
             print(
                 f"[SegJsonDataset] {missing_seg}/{len(self.items)} entries missing "
-                f"seg_path. Run: python seg_map_calculations.py --data_dir data/"
+                f"'{self.seg_key}'."
             )
 
     def _seg_resolve(self, p: str) -> Path:
@@ -150,21 +159,20 @@ class SegJsonDataset(Dataset):
 
     def __getitem__(self, idx: int):
         item    = self.items[idx]
-        caption = item.get("prompt", "")
+        caption = item.get(self.prompt_key, "")
 
         # ---- RGB image -> [-1, 1] -------------------------------------------
-        image = Image.open(self._seg_resolve(item["raw_image_path"])).convert("RGB")
+        image = Image.open(self._seg_resolve(item[self.image_key])).convert("RGB")
         if self.image_transform:
             image = self.image_transform(image)
 
         # ---- Segmentation colour map -> [0,1], 3-channel -------------------
         # Fail loudly rather than propagating a KeyError deep in a worker.
-        if "seg_path" not in item:
+        if self.seg_key not in item:
             raise KeyError(
-                f"Entry {idx} in {self.json_file.name} has no 'seg_path'. "
-                f"Run seg_map_calculations.py --data_dir data/ to build JSONs."
+                f"Entry {idx} in {self.json_file.name} has no '{self.seg_key}' key."
             )
-        seg = self._load_seg_colormap(self._seg_resolve(item["seg_path"]))
+        seg = self._load_seg_colormap(self._seg_resolve(item[self.seg_key]))
 
         return {"jpg": image, "seg": seg, "caption": caption}
 
@@ -191,6 +199,10 @@ class SegJsonDataModule:
         val_workers: int = 2,
         palette: list = None,
         image_root: str = None,
+        classes_file: str = None,      # Grounded-SAM class-definition JSON (id->name/colour)
+        image_key: str = "raw_image_path",
+        seg_key: str = "seg_path",
+        prompt_key: str = "prompt",
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
@@ -202,17 +214,34 @@ class SegJsonDataModule:
         self.workers        = workers
         self.val_workers    = val_workers
 
+        # PALETTE SOURCE — exactly one wins, in this order:
+        #   1. classes_file (Grounded-SAM): load the user's class set -> palette.
+        #   2. palette arg (explicit list).
+        #   3. neither -> SegJsonDataset falls back to the Cityscapes SSOT.
+        # Loading from classes_file here (once) guarantees train and val use the
+        # IDENTICAL palette, and lets seg_training.py resolve the same one.
+        if classes_file is not None:
+            from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
+            _cf = Path(project_root, classes_file)
+            self.class_names, palette = load_grounded_sam_palette(_cf)
+            print(f"[SegJsonDataModule] loaded {len(palette)} classes from {classes_file}")
+        else:
+            self.class_names = None
+        self.palette = palette
+
+        _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key)
+
         self.train_dataset = SegJsonDataset(
             json_file=Path(project_root, json_file),
             image_transform=image_tfm, size=size,
-            project_root=_img_root, palette=palette,
+            project_root=_img_root, palette=palette, **_keys,
         )
 
         if val_json_file:
             self.val_dataset = SegJsonDataset(
                 json_file=Path(project_root, val_json_file),
                 image_transform=image_tfm, size=size,
-                project_root=_img_root, palette=palette,
+                project_root=_img_root, palette=palette, **_keys,
             )
         else:
             # No val set provided -> fall back to train set.
