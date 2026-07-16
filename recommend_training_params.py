@@ -3,7 +3,7 @@ recommend_training_params.py
 -----------------------------
 Standalone advisor: detects your GPU and reads your real dataset manifests,
 then PRINTS a recommended set of training hyperparameters for
-configs/experiment/train_seg.yaml.
+configs/experiment/train_grounded_sam.yaml.
 
 This script NEVER writes or modifies any file. You review the recommendation
 and paste the values into the YAML yourself.
@@ -17,7 +17,7 @@ recommendation instead of hidden runtime behaviour.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   python recommend_training_params.py
-  python recommend_training_params.py --data_dir data/seg_training --epochs 10
+  python recommend_training_params.py --data_dir data/grounded_sam --epochs 10
   python recommend_training_params.py --device cuda:1
 
 NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
@@ -113,8 +113,8 @@ def main():
     print(f"DATASET  ({data_dir})")
     print("=" * 70)
     if train_n is None:
-        print(f"  No train.jsonl found in {data_dir} -- run seg_map_calculations.py")
-        print(f"  first, then re-run this script.")
+        print(f"  No train.jsonl found in {data_dir} -- put your Grounded-SAM")
+        print(f"  (raw_image, seg_map, prompt) manifests there, then re-run.")
     else:
         print(f"  train: {train_n} images")
         print(f"  val  : {val_n if val_n is not None else '?'} images")
@@ -192,7 +192,7 @@ def main():
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()
     print("=" * 70)
-    print("PASTE INTO configs/experiment/train_seg.yaml")
+    print("PASTE INTO configs/experiment/train_grounded_sam.yaml")
     print("=" * 70)
     print(f"gradient_checkpointing: true")
     print(f"gradient_accumulation_steps: {accum}")

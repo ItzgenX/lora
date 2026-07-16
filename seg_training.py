@@ -1,25 +1,26 @@
 """
 seg_training.py
 ---------------
-STAGE D — train the segmentation-conditioned LoRAdapter on PRE-SAVED Cityscapes
-colour maps. This is the segmentation twin of depth_training.py.
+Train the segmentation-conditioned LoRAdapter on PRE-SAVED segmentation colour
+maps. On this branch the maps come from Grounded-SAM (see GROUNDED_SAM.md); the
+class palette + manifests are selected by the experiment config.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
-  # --- Smoke test (after --dry_run_n 15 calc run; 15 images, 3 short epochs) ---
-  python seg_training.py experiment=train_seg epochs=3 data.batch_size=1 gradient_accumulation_steps=1 val_steps=5 ckpt_steps=10
+  # --- Smoke test (a few images, 3 short epochs) ---
+  python seg_training.py experiment=train_grounded_sam epochs=3 data.batch_size=1 gradient_accumulation_steps=1 val_steps=5 ckpt_steps=10
 
   # --- Full training run ---
-  python seg_training.py experiment=train_seg
+  python seg_training.py experiment=train_grounded_sam
 
   # --- Full training — 4-GPU cluster ---
-  accelerate launch --num_processes=4 seg_training.py experiment=train_seg
+  accelerate launch --num_processes=4 seg_training.py experiment=train_grounded_sam
 
   # --- Resume from checkpoint ---
-  python seg_training.py experiment=train_seg "lora.struct.ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
+  python seg_training.py experiment=train_grounded_sam "lora.struct.ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
 
 GPU / HARDWARE:
   data.batch_size, gradient_accumulation_steps, and gradient_checkpointing in
-  configs/experiment/train_seg.yaml are plain, fixed values -- nothing here
+  configs/experiment/train_grounded_sam.yaml are plain, fixed values -- nothing here
   rescales them at runtime. What's written in the YAML is exactly what runs;
   run `python recommend_training_params.py` once to get a suggested starting
   point for your specific GPU + dataset (it only prints a recommendation, it

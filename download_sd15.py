@@ -10,21 +10,15 @@ local_files_only: true in all configs.
 
 Models downloaded:
   1. stable-diffusion-v1-5      -- base diffusion model (backbone, always frozen)
-  2. dpt-hybrid-midas            -- depth encoder for Stage A + inference
+  2. dpt-hybrid-midas            -- stock upstream depth encoder (src/annotators/midas.py)
   3. taesd                       -- Tiny AutoEncoder (fast VAE preview, optional)
-  4. segformer-b5-cityscapes     -- segmentation encoder for Stage C + inference
-                                    (b5 = highest accuracy on driving-scene classes)
 
-IMPORTANT — SegformerImageProcessor:
-  We save the SegformerImageProcessor alongside the model even though the repo
-  does NOT use it at runtime (SegmentationEncoder does manual preprocessing).
-  Reason: keeping it in the local folder ensures from_pretrained() never fails
-  with a "preprocessor_config.json not found" error on any code path, including
-  third-party tools that inspect the folder. It costs nothing to have it there.
+  (Grounded-SAM segmentation trains on PRE-SAVED maps generated externally, so
+   no live segmentation model is downloaded here — see GROUNDED_SAM.md.)
 
-  Same note applies to DPTImageProcessor for the MiDaS model — saved but not
-  used at runtime (DepthEstimator also does manual preprocessing; the processor
-  call is commented out in src/annotators/midas.py).
+NOTE — DPTImageProcessor for the MiDaS model is saved but not used at runtime
+  (DepthEstimator does manual preprocessing; the processor call is commented out
+  in src/annotators/midas.py). Saving it keeps the folder complete.
 
 Usage:
   python download_sd15.py
@@ -39,8 +33,6 @@ from diffusers import StableDiffusionPipeline, AutoencoderTiny
 from transformers import (
     DPTForDepthEstimation,
     DPTImageProcessor,
-    SegformerImageProcessor,
-    SegformerForSemanticSegmentation,
 )
 
 # --- Hugging Face authentication -------------------------------------------- #
@@ -106,41 +98,8 @@ tiny_vae.save_pretrained(vae_path)
 print(f"  Saved -> {vae_path}")
 
 
-# ── 4. SegFormer-b5-Cityscapes (seg encoder for Stage C + seg_inference.py) ─ #
-#
-# LOCKED MODEL: nvidia/segformer-b5-finetuned-cityscapes-1024-1024
-#   b5 = MiT-B5 backbone (82M params), highest boundary accuracy on Cityscapes.
-#   b0 (3.7M) is on disk but NOT used — it misclassifies thin structures
-#   (pedestrians, poles, traffic lights) that matter for structural conditioning.
-#   References.md §9 documents this choice.
-#
-# SAVED TO: checkpoints/local_models/segformer-b5-cityscapes/
-#   *** CRITICAL: must be "segformer-b5-cityscapes", NOT "segformer-b0-cityscapes" ***
-#   The config at configs/experiment/train_seg.yaml and
-#   configs/lora/encoder/segformer.yaml both point to this exact folder name.
-#
-# NOTE on SegformerImageProcessor:
-#   SegmentationEncoder (src/encoders/seg_encoder.py) does NOT use
-#   SegformerImageProcessor at runtime. It manually applies:
-#     (x+1)/2  ->  F.interpolate(512x512)  ->  ImageNet normalize
-#   This is numerically equivalent to the processor to 2.4e-7 but runs at our
-#   fixed 512x512 size instead of the processor's 1024x1024.
-#   We still save the processor here so the folder is complete.
-banner("4/4  SegFormer-b5-Cityscapes (seg encoder)")
-segformer_model = SegformerForSemanticSegmentation.from_pretrained(
-    "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
-    token=HF_TOKEN or None,
-)
-segformer_processor = SegformerImageProcessor.from_pretrained(
-    "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
-    token=HF_TOKEN or None,
-)
-# *** CORRECT FOLDER NAME = segformer-b5-cityscapes (not b0) ***
-segformer_path = os.path.join(LOCAL_MODEL_DIR, "segformer-b5-cityscapes")
-segformer_model.save_pretrained(segformer_path)
-segformer_processor.save_pretrained(segformer_path)
-print(f"  Saved -> {segformer_path}")
-print(f"  (SegformerImageProcessor saved for completeness — not used at runtime)")
+# (SegFormer download removed — Grounded-SAM segmentation trains on pre-saved
+#  maps generated externally; no live segmentation model is needed here.)
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -153,7 +112,6 @@ for name in [
     "stable-diffusion-v1-5",
     "dpt-hybrid-midas",
     "taesd",
-    "segformer-b5-cityscapes",
 ]:
     path = os.path.join(LOCAL_MODEL_DIR, name)
     status = "OK" if os.path.isdir(path) else "MISSING"

@@ -1,37 +1,31 @@
 """
 src/data/local_seg.py
 ---------------------
-STAGE D dataset: load (RGB image, pre-computed segmentation map, prompt) triplets
-for training the segmentation-conditioned LoRAdapter.
+Dataset: load (RGB image, pre-computed segmentation map, prompt) triplets for
+training the segmentation-conditioned LoRAdapter. The maps are generated OFFLINE
+(on this branch, by Grounded-SAM — see GROUNDED_SAM.md) and read here directly.
 
-This is the segmentation twin of the Depth*JsonDataset classes in src/data/local.py.
-It mirrors their STRUCTURE (JSON manifest, _seg_resolve, early missing-file check,
-{"jpg","seg","caption"} return dict) but differs where the segmentation SIGNAL
-genuinely demands it — two seg-specific points, both critical:
+Two segmentation-specific points, both critical:
 
-  1. The saved map is a RAW CLASS-ID PNG (8-bit, values 0..18), NOT a continuous
-     depth map. We COLOURISE it at load time with the pinned Cityscapes palette
-     (SEG_CITYSCAPES_PALETTE from src/encoders/seg_encoder.py, the SSOT), producing
-     a 3-channel RGB map in [0,1]. This matches the live SegmentationEncoder.forward()
-     output exactly (both call the same seg_colorize_ids + palette), so training and
-     inference conditioning are pixel-identical.
+  1. The saved map is a RAW CLASS-ID PNG (8-bit, values 0..N-1), NOT a colour
+     image. We COLOURISE it at load time with the configured palette (the
+     Grounded-SAM class palette when a classes_file is set, otherwise the
+     Cityscapes SEG_CITYSCAPES_PALETTE fallback from src/encoders/seg_encoder.py),
+     producing a 3-channel RGB map in [0,1] via the shared seg_colorize_ids.
 
-  2. Resizing a class-ID map MUST use NEAREST interpolation. Depth uses bilinear
-     (correct — averaging continuous depth values is fine), but averaging categorical
-     class ids is meaningless: the mean of "road"=0 and "car"=13 is 6.5, which is
-     "traffic light" — a fabricated class that doesn't exist in the image. NEAREST
-     preserves exact labels. In practice the PNG is already at the right size (saved
-     by seg_map_calculations.py at cfg.size), so this resize is usually a
-     no-op alignment step — but we still force NEAREST so it is correct for any size
-     and never silently corrupts labels.
+  2. Resizing a class-ID map MUST use NEAREST interpolation. Averaging categorical
+     class ids is meaningless: the mean of "road"=0 and "car"=6 is 3, a DIFFERENT
+     class that isn't in the image. NEAREST preserves exact labels. In practice the
+     PNG is already at the right size, so this resize is usually a no-op alignment
+     step — but we still force NEAREST so it never silently corrupts labels.
 
 Returned by __getitem__:
   {
     "jpg"    : RGB tensor   [3, H, W] in [-1, 1]   (standard training format)
-    "seg"    : colour map   [3, H, W] in [0, 1]    (Cityscapes-palette RGB)
+    "seg"    : colour map   [3, H, W] in [0, 1]    (palette RGB)
     "caption": prompt string
   }
-The "seg" key parallels depth's "depth" key so seg_training.py reads batch["seg"].
+seg_training.py reads batch["seg"].
 """
 
 import json
@@ -51,12 +45,12 @@ class SegJsonDataset(Dataset):
     """
     Load image + pre-computed segmentation-ID map pairs from a JSON manifest.
 
-    JSONL format — one JSON object per line (written by seg_map_calculations.py):
+    JSONL format — one JSON object per line (key names are configurable via
+    image_key / seg_key / prompt_key; defaults shown):
         {"raw_image_path": "...jpg", "seg_path": "...png", "prompt": "..."}
         {"raw_image_path": "...jpg", "seg_path": "...png", "prompt": "..."}
 
     Paths resolve: absolute as-is, else relative to project_root, else to json_dir.
-    This mirrors the depth dataset's path resolution exactly.
     """
 
     def __init__(
