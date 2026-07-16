@@ -71,7 +71,7 @@ sd_pipe.save_pretrained(sd_path)
 print(f"  Saved -> {sd_path}")
 
 
-# ── 2. MiDaS / DPT-Hybrid (depth encoder for Stage A + depth_inference.py) ─ #
+# ── 2. MiDaS / DPT-Hybrid (stock upstream depth encoder, src/annotators/midas.py) ─ #
 #
 # NOTE on DPTImageProcessor:
 #   DepthEstimator (src/annotators/midas.py) does NOT use DPTImageProcessor at

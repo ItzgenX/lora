@@ -3,30 +3,28 @@ recommend_training_params.py
 -----------------------------
 Standalone advisor: detects your GPU and reads your real dataset manifests,
 then PRINTS a recommended set of training hyperparameters for
-configs/experiment/train_depth.yaml / train_seg.yaml.
+configs/experiment/train_seg.yaml.
 
 This script NEVER writes or modifies any file. You review the recommendation
 and paste the values into the YAML yourself.
 
-WHY THIS EXISTS: depth_training.py / seg_training.py used to auto-scale
-batch_size / gradient_accumulation_steps to the detected GPU at runtime. That
-was removed deliberately -- for a project whose whole point is a defensible,
-reproducible comparison between depth and seg conditioning, a fixed, explicit
-YAML you can read and quote is worth more than a value that silently depends
-on which GPU happened to run it. This script gives you the same calculation,
-but as a one-time, reviewed-by-you recommendation instead of hidden runtime
-behaviour.
+WHY THIS EXISTS: seg_training.py used to auto-scale batch_size /
+gradient_accumulation_steps to the detected GPU at runtime. That was removed
+deliberately -- a fixed, explicit YAML you can read and quote is worth more
+than a value that silently depends on which GPU happened to run it. This
+script gives you the same calculation, but as a one-time, reviewed-by-you
+recommendation instead of hidden runtime behaviour.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   python recommend_training_params.py
-  python recommend_training_params.py --data_dir data/depth_training --epochs 10
+  python recommend_training_params.py --data_dir data/seg_training --epochs 10
   python recommend_training_params.py --device cuda:1
 
 NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
 ~12GB GPU is MEASURED (real training runs, this project, 2026-07-02). For any
 other GPU size, the recommendation is a REASONED linear extrapolation of that
 measurement, NOT independently verified on such hardware -- always sanity
-check with a short real dry run (see depth_training.py's docstring) before
+check with a short real dry run (see seg_training.py's docstring) before
 committing to a long training run.
 """
 
@@ -115,8 +113,8 @@ def main():
     print(f"DATASET  ({data_dir})")
     print("=" * 70)
     if train_n is None:
-        print(f"  No train.jsonl found in {data_dir} -- run depth_map_calculations.py")
-        print(f"  (or seg_map_calculations.py) first, then re-run this script.")
+        print(f"  No train.jsonl found in {data_dir} -- run seg_map_calculations.py")
+        print(f"  first, then re-run this script.")
     else:
         print(f"  train: {train_n} images")
         print(f"  val  : {val_n if val_n is not None else '?'} images")
@@ -194,8 +192,7 @@ def main():
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()
     print("=" * 70)
-    print("PASTE INTO configs/experiment/train_depth.yaml AND train_seg.yaml")
-    print("(identical for both -- only conditioning-specific keys differ)")
+    print("PASTE INTO configs/experiment/train_seg.yaml")
     print("=" * 70)
     print(f"gradient_checkpointing: true")
     print(f"gradient_accumulation_steps: {accum}")

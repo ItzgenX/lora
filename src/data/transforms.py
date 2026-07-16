@@ -4,10 +4,10 @@ from PIL import Image, ImageFile, ImageStat
 # of raising "image file is truncated". Pillow is intentionally strict here;
 # most other viewers/decoders (Windows Photo Viewer, browsers, libjpeg-turbo
 # used elsewhere) silently accept these same files. This flag is process-
-# global; it lives here because src/data/transforms.py is imported by all four
-# pipeline entrypoints (depth_map_calculations.py, seg_map_calculations.py,
-# depth_inference.py, seg_inference.py), so setting it once here covers every
-# place an image gets loaded — a single source of truth.
+# global; it lives here because src/data/transforms.py is imported by the
+# segmentation pipeline entrypoints (seg_map_calculations.py, seg_inference.py),
+# so setting it once here covers every place an image gets loaded — a single
+# source of truth.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 

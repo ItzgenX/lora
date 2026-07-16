@@ -247,7 +247,7 @@ def main(cfg):
     size        = cfg.size
     # Letterbox squaring is FIXED project-wide (user decision 2026-07-06 —
     # the former resize_mode toggle was removed so training and inference can
-    # never disagree; see DEPTH.md §5.14a and references.md §9).
+    # never disagree; see references.md §9).
     preprocess  = build_seg_square_preprocess(size=size)
 
     generator = torch.Generator(device=device).manual_seed(cfg.seed)

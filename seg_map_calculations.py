@@ -1002,7 +1002,7 @@ def main():
         args.batch_size = auto_batch_size(default=4, device=args.device)
 
     print(f"Device           : {args.device}")
-    print(f"Size             : {args.size}x{args.size}   (letterbox squaring — fixed, see DEPTH.md §5.14a)")
+    print(f"Size             : {args.size}x{args.size}   (letterbox squaring — fixed, see references.md §9)")
     print(f"Batch            : {args.batch_size}")
     print(f"Model            : {args.model}")
     print(f"local_files_only : {args.local_files_only}")

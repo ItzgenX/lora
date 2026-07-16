@@ -173,7 +173,7 @@ class SegJsonDataModule:
     """
     Data module reading a JSON manifest for train + optional validation.
 
-    Twin of DepthJsonDataModule. Exposes train_dataloader()/val_dataloader() and
+    Exposes train_dataloader()/val_dataloader() and
     .train_dataset / .val_dataset (seg_training.py indexes val_dataset directly for
     the fixed-scene monitoring images). val_json_file MUST point at the real
     validation set — NEVER test.json (references.md §8).

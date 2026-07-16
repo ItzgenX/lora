@@ -16,9 +16,8 @@ MODE = Literal[
 
 
 # ============================================================================ #
-#  GPU RESOLUTION — single source of truth for all 6 pipeline entrypoints      #
-#  (depth_map_calculations.py, seg_map_calculations.py, depth_training.py,      #
-#  seg_training.py, depth_inference.py, seg_inference.py)                      #
+#  GPU RESOLUTION — single source of truth for the segmentation pipeline       #
+#  entrypoints (seg_map_calculations.py, seg_training.py, seg_inference.py)    #
 #                                                                                #
 #  WHY THIS EXISTS: the calc/inference scripts used to pick a device with      #
 #  `"cuda" if torch.cuda.is_available() else "cpu"` and silently run on CPU     #
@@ -409,23 +408,20 @@ def roll_list(l, n):
 
 
 # ============================================================================ #
-#  PER-CHECKPOINT QUANTITATIVE METRIC — shared by depth_training.py and         #
-#  seg_training.py                                                              #
+#  PER-CHECKPOINT QUANTITATIVE METRIC — used by seg_training.py                #
 #                                                                               #
-#  WHY THIS EXISTS: the project's end goal is an OBJECTIVE depth-vs-seg          #
-#  comparison. Eyeballing checkpoint grids alone can't decide "which             #
-#  conditioning is better"; a number logged per checkpoint can. PSNR + SSIM     #
-#  between each FIXED validation scene's generation and its real image are     #
-#  used because:                                                                #
+#  WHY THIS EXISTS: eyeballing checkpoint grids alone can't tell you whether    #
+#  a checkpoint is actually improving; a number logged per checkpoint can.     #
+#  PSNR + SSIM between each FIXED validation scene's generation and its real   #
+#  image are used because:                                                     #
 #    • the FIXED scenes + the fixed generation seed make the value comparable   #
-#      across checkpoints of one run AND across the depth run vs the seg run    #
-#      (identical protocol, same val set, same seed);                           #
+#      across checkpoints of one run (identical protocol, same val set, seed); #
 #    • FID needs thousands of samples per point to be meaningful — useless at   #
 #      10 images per checkpoint;                                                #
 #    • CLIP similarity would need CLIP weights, which are not among the local   #
 #      offline models (local_files_only must stay true end-to-end).             #
 #  These are structural-fidelity proxies, not absolute quality scores: watch    #
-#  the TREND across checkpoints, and compare depth vs seg at MATCHED steps.     #
+#  the TREND across checkpoints.                                                #
 # ============================================================================ #
 
 def compute_psnr_ssim(img_a, img_b):
