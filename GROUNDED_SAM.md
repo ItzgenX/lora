@@ -163,8 +163,13 @@ This is everything needed to train the LoRAdapter model on the
     only config and loads **no** heavy models. `live_available = False`.
 
 - **[configs/grounded_sam_classes.json](configs/grounded_sam_classes.json)** —
-  the class-definition file **you fill in**: `{"0": "road", "1": "car", …}`, in
-  the exact ID order your saved maps use.
+  the class-definition file. **LOCKED FINAL (2026-07-16, user decision):** CARLA's
+  official 29-class semantic-segmentation taxonomy (IDs 0–28: `Unlabeled` +
+  the 19 Cityscapes classes shifted +1 + 9 CARLA extras — Static, Dynamic,
+  Other, Water, RoadLine, Ground, Bridge, RailTrack, GuardRail), with CARLA's
+  official RGB colours, taken verbatim from the
+  [CARLA sensor reference](https://carla.readthedocs.io/en/latest/ref_sensors/#semantic-segmentation-camera)
+  (CARLA 0.9.14+). Not to be changed.
 
 - **[configs/experiment/train_grounded_sam.yaml](configs/experiment/train_grounded_sam.yaml)**,
   **[configs/data/local_grounded_sam.yaml](configs/data/local_grounded_sam.yaml)**,
@@ -186,24 +191,23 @@ prompts, none of which are set up yet. Deliberately deferred.
 
 ## 6 · Before you train — a checklist grounded in what we found
 
-1. **Confirm your class count and IDs.** Run
-   `python scan_seg_map_classes.py --json_file data/grounded_sam/train.jsonl`.
-   It reports the true global class set across ALL maps (a rare class may only
-   appear in a few images). Use that count to fill the class file.
+1. **Class list is locked** (§5.1) — CARLA's 29-class taxonomy, IDs 0–28. No
+   further action needed on the class file itself.
 
 2. **Confirm the map format.** Run
    `python check_seg_map_format.py --seg_map <one_real_map>`. You already did
-   this once — it showed mode `L`, uint8, clean IDs 0–17. Good. But your files
-   were `.jpeg` (lossy). If the scan in step 1 shows stray out-of-range values or
-   many per-file noise outliers, **re-export as PNG** (lossless) before training.
+   this once — it showed mode `L`, uint8, clean IDs 0–17. If the scan in step 3
+   shows stray out-of-range values or many per-file noise outliers, **re-export
+   as PNG** (lossless) before training.
 
-3. **Decide the background/unlabelled policy.** Find out whether your maps leave
-   undetected pixels as a sentinel value; if so, make it an explicit class in the
-   class file so the palette covers it.
+3. **Recommended (not required): sanity-check the pixel range against the locked
+   list.** Run
+   `python scan_seg_map_classes.py --json_file data/grounded_sam/train.jsonl`.
+   The class file assumes pixel values are CARLA's own tag IDs (0–28); this scan
+   just tells you the true range actually present in your files, for your own
+   awareness — it doesn't change the (locked) class file.
 
-4. **Fill [configs/grounded_sam_classes.json](configs/grounded_sam_classes.json)**
-   with your real classes (delete the `__README__` key), then:
-   `python seg_training.py experiment=train_grounded_sam`
+4. `python seg_training.py experiment=train_grounded_sam`
 
 5. **Do a short smoke run first.** Training here is code- and config-verified but
    has **not been executed** on real data on the target machine. Run a few steps,
@@ -223,7 +227,7 @@ engine we depend on, and others are SegFormer-only.
 | File | Why it's here |
 |---|---|
 | [src/encoders/grounded_sam_encoder.py](src/encoders/grounded_sam_encoder.py) | Palette loader, distinct-colour generator, and the training-only `GroundedSamEncoder` slot module. |
-| [configs/grounded_sam_classes.json](configs/grounded_sam_classes.json) | Your class list (id → name). **You fill this in.** |
+| [configs/grounded_sam_classes.json](configs/grounded_sam_classes.json) | **LOCKED FINAL**: CARLA's official 29-class taxonomy + colours. |
 | [configs/experiment/train_grounded_sam.yaml](configs/experiment/train_grounded_sam.yaml) | The training experiment: wires encoder + data + your manifests. |
 | [configs/data/local_grounded_sam.yaml](configs/data/local_grounded_sam.yaml) | Data config: class file + manifest key names. |
 | [configs/lora/encoder/grounded_sam.yaml](configs/lora/encoder/grounded_sam.yaml) | Encoder slot config (no HF model to load). |
@@ -247,17 +251,21 @@ engine we depend on, and others are SegFormer-only.
 | [analyze_car_coverage.py](analyze_car_coverage.py) | Car-class coverage histogram (found the CARLA-truck data gap). |
 | [check_seg_coverage.py](check_seg_coverage.py) | Per-image, per-class coverage vs the training distribution. |
 
-### 7.4 SegFormer-only (candidates for removal on this branch)
+### 7.4 SegFormer-only (kept — both pipelines coexist on this branch)
 These are used ONLY by the SegFormer approach and are **not** imported by any
-Grounded-SAM code:
-| File | What it did (SegFormer) |
+Grounded-SAM code, but were restored (2026-07-16, user decision) so both
+approaches are available side by side. Run SegFormer with
+`experiment=train_seg`, Grounded-SAM with `experiment=train_grounded_sam` —
+both go through the same shared `seg_training.py` / `local_seg.py` /
+`seg_encoder.py` engine, verified to compose and coexist without conflict:
+| File | What it does (SegFormer) |
 |---|---|
 | configs/lora/encoder/segformer.yaml | SegFormer encoder config. |
 | configs/experiment/train_seg.yaml | SegFormer training experiment. |
 | configs/inference_seg.yaml | Live SegFormer inference config. |
-| configs/data/local_seg.yaml | SegFormer data config (Grounded-SAM uses local_grounded_sam.yaml). |
-| seg_map_calculations.py | Computed SegFormer maps offline (Grounded-SAM maps are made externally). |
-| seg_inference.py | Live SegFormer inference (Tier 2 not built yet). |
+| configs/data/local_seg.yaml | SegFormer data config (Grounded-SAM uses local_grounded_sam.yaml instead). |
+| seg_map_calculations.py | Computes SegFormer maps offline (Grounded-SAM maps are made externally). |
+| seg_inference.py | Live SegFormer inference. |
 | seg_finetune.py / seg_make_draft_masks.py | Earlier SegFormer-on-CARLA finetuning exploration. |
 | SEGMENTATION.md / SEG_TRAINING_GUIDE.md | SegFormer pipeline docs. |
 
