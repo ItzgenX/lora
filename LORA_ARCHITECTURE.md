@@ -2,11 +2,11 @@
 
 **Scope**: this doc answers exactly one question, in full depth: **where does
 LoRA actually sit inside the model, and how does the segmentation/depth
-conditioning signal reach it?** It applies identically to the SegFormer and
-Grounded-SAM pipelines (see [SEGMENTATION.md](SEGMENTATION.md) and
-[GROUNDED_SAM.md](GROUNDED_SAM.md)) — both go through the exact same
-`src/lora.py` / `src/model.py` code, only the encoder that produces the
-conditioning map differs.
+conditioning signal reach it?** It applies identically to any segmentation
+source that plugs into this pipeline's encoder-slot contract — Grounded-SAM
+here (see [GROUNDED_SAM.md](GROUNDED_SAM.md)), or SegFormer on its own branch
+of this repo — both go through the exact same `src/lora.py` / `src/model.py`
+code, only the encoder that produces the conditioning map differs.
 
 Every claim below is a direct citation to this repo's own code, re-read and
 verified line-by-line while writing this doc (not copy-pasted from a
@@ -255,7 +255,8 @@ just called with `skip_encode=True` and the real training loss instead of a
 ```
  segmentation colour map `c`  (either a live encoder's output, or a
      [B,3,H,W] in [0,1]        pre-saved map passed straight through when
-        |                      skip_encode=True — see SEGMENTATION.md §10.4b)
+        |                      skip_encode=True — see seg_inference.py's
+        |                      module docstring for the full mechanism)
         v
  ┌──────────────────────┐
  │ cond = c if skip_encode  else encoder(c)         [model.py:798]
@@ -328,19 +329,17 @@ independently; the segmentation/depth pipelines use only the first:
 | **Cross-attention style LoRA** | `style.yaml` (`SimpleLoraLinear`, `adaption_mode: only_cross`) | attention `to_k`/`to_v` inside `attn2` (cross-attention to text) | Same FiLM-residual math as §1, but on a `nn.Linear`, modulated by a *single pooled vector* (CLIP image embedding via `SimpleMapper`), not a spatial map |
 | **ControlNet** (optional, `use_controlnet=True`) | separately, when enabled (`src/model.py:88-103`) | UNet's down-block and mid-block **residual connections**, via a full second `ControlNetModel` (`lllyasviel/sd-controlnet-depth`) | Diffusers' own stock ControlNet mechanism — an entirely separate pretrained network, not a LoRA at all; produces residuals that diffusers adds into the UNet's skip connections. Orthogonal to (can be combined with) the LoRA mechanism |
 
-The segmentation and Grounded-SAM pipelines documented in `SEGMENTATION.md`
-and `GROUNDED_SAM.md` use **only** the first row. `use_controlnet` and
-`style.yaml` are separate, currently-unused-by-seg/grounded_sam capabilities
-that exist in this shared codebase — mentioned here only so their code isn't
+The Grounded-SAM pipeline documented in `GROUNDED_SAM.md` (and SegFormer, on
+its own branch) uses **only** the first row. `use_controlnet` and
+`style.yaml` are separate, currently-unused-by-segmentation capabilities that
+exist in this shared codebase — mentioned here only so their code isn't
 mistaken for part of the segmentation conditioning path.
 
 ---
 
 ## 8 · Why this design produces "fits the shape but doesn't know how it looks"
 
-This is the direct architectural consequence of everything above, and the
-root cause already diagnosed and documented in
-[SEGMENTATION.md §10.4a](SEGMENTATION.md#104a-fixing-fits-the-shape-but-doesnt-know-how-it-looks-added-2026-07-17):
+This is the direct architectural consequence of everything above:
 
 `self.beta` and `self.gamma` (`src/lora.py:174-175`) are **1×1 convolutions**
 — a 1×1 conv's receptive field is exactly one pixel. So inside any flat,
@@ -357,11 +356,11 @@ diffusion model is normally deciding fine texture/appearance, not layout —
 the model is given no room to fall back on its own trained prior for what
 the object should look like inside a flat region.
 
-The two inference-time mitigations built for this (both documented in
-`SEGMENTATION.md §10.4a` and available via `sample_easy`'s
-`conditioning_kernel_size` / `lora_scale_start`/`lora_scale_end`/
-`lora_scale_decay_start_frac` parameters, `src/model.py:346-410` +
-`:805-807` + `:817-843`) work directly on the mechanism traced in this doc:
+The two inference-time mitigations built for this (available via
+`sample_easy`'s `conditioning_kernel_size` / `lora_scale_start`/
+`lora_scale_end`/`lora_scale_decay_start_frac` parameters,
+`src/model.py:346-410` + `:805-807` + `:817-843`) work directly on the
+mechanism traced in this doc:
 - **`lora_scale` decay** (`make_lora_scale_callback`) mutates
   `.lora_scale` on every layer in `self.lora_layers[name]` (§4's registry)
   between denoising steps — full strength while layout is being decided,

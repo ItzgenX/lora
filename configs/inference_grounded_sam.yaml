@@ -1,0 +1,144 @@
+# configs/inference_grounded_sam.yaml
+# ------------------------------------
+# Base config for seg_inference.py — the Grounded-SAM twin of inference_seg.yaml
+# (SegFormer's equivalent, maintained on the segformer branch of this repo).
+#
+# Loads a trained Grounded-SAM-conditioned LoRAdapter checkpoint and generates
+# images conditioned on a PROVIDED (pre-computed) Grounded-SAM segmentation map.
+#
+# HOW IT WORKS:
+#   - Inference ALWAYS uses a provided map (inference.seg_maps / json_file's
+#     seg_path) -- it NEVER computes one live. This isn't a restriction added
+#     on top of a working live path: GroundedSamEncoder has no live path at
+#     all (Tier 1 only, see src/encoders/grounded_sam_encoder.py), so "always
+#     use a provided map" is the only contract that ever worked here. See
+#     seg_inference.py's module docstring for the full mechanism (skip_encode).
+#   - Because the encoder never runs, cfg.lora.struct.encoder has NO `model`
+#     key to rewrite (unlike SegFormer) -- seg_inference.py detects this via
+#     the same _enc_has_model guard seg_training.py already uses and skips
+#     the rewrite + the live-segmenter mIoU metric automatically.
+#
+# USAGE — from a JSON manifest (recommended):
+#   python seg_inference.py --config-name inference_grounded_sam \
+#       ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       inference.json_file=data/grounded_sam/test.jsonl \
+#       inference.output_dir=outputs/inference/grounded_sam/results
+#
+# USAGE — direct seg map + optional raw image for the display panel:
+#   python seg_inference.py --config-name inference_grounded_sam \
+#       ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" \
+#       "inference.prompts=['a car driving down a rainy street']"
+#
+# OUTPUT (per input image):
+#   outputs/inference/grounded_sam/results/
+#       <stem>_grid.jpg        ← 4-panel: ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN
+#       <stem>_original.jpg
+#       <stem>_seg.jpg         ← Grounded-SAM colour conditioning map
+#       <stem>_predicted.jpg
+#       <stem>_raw_seg_gen.jpg ← same seg, empty prompt (pure seg adherence)
+
+defaults:
+  - model: sd15
+  - lora@lora.struct: struct
+  - override /lora/encoder@lora.struct.encoder: grounded_sam   # slot filler, no live model
+  - _self_
+
+# ---- Checkpoint -----------------------------------------------------------
+# Path to the checkpoint directory produced by seg_training.py experiment=train_grounded_sam.
+# Structure expected:  <ckpt_path>/struct/lora-checkpoint.pt
+#                      <ckpt_path>/struct/mapper-checkpoint.pt
+ckpt_path: ???     # e.g. outputs/train/grounded_sam/runs/2026-01-01/00-00-00/best_model
+
+# ---- Global resolution (must match training) ------------------------------
+size: 512          # square canvas; must match what training/calc used
+seed: 42
+
+# ---- Device -----------------------------------------------------------
+# null (default) = auto-detect a GPU and REFUSE to run if none is visible
+# (see src/utils.py resolve_device() — this script must never silently fall
+# back to CPU). Set explicitly to override, e.g.:
+#   python seg_inference.py --config-name inference_grounded_sam device=cuda:1 ...
+#   python seg_inference.py --config-name inference_grounded_sam device=cpu ...
+device: null
+
+# =============================================================================
+# MODEL LOADING — LOCAL vs INTERNET  (one switch: local_files_only)
+# =============================================================================
+# Only the BASE diffusion model is loaded — there is no Grounded-SAM encoder
+# model to load (GroundedSamEncoder is a slot filler, see above), so unlike
+# inference_seg.yaml there are no seg_model_name/seg_model_path keys here.
+#   local_files_only: true   -> use LOCAL folder (base_model_path), offline.
+#   local_files_only: false  -> use HUB id (base_model_name); download if missing.
+local_files_only: true
+
+base_model_name:  runwayml/stable-diffusion-v1-5
+base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
+
+# ---- Base diffusion model -------------------------------------------------
+model:
+  model_name: ${base_model_name}   # default; seg_inference.py overrides to base_model_path when local_files_only=true
+
+# ---- LoRA (inference mode — weights not updated) --------------------------
+lora:
+  struct:
+    optimize: false   # frozen at inference
+    encoder:
+      # Grounded-SAM slot filler (no `model` key) — see configs/lora/encoder/grounded_sam.yaml.
+      _target_: src.encoders.grounded_sam_encoder.GroundedSamEncoder
+      size: ${size}
+
+# ---- Inference parameters -------------------------------------------------
+# Inference ALWAYS uses a PROVIDED segmentation map -- it never computes one
+# live from a raw photo. seg_maps/seg_path is REQUIRED; images/raw_image_path
+# is OPTIONAL and used ONLY to display the ORIGINAL panel (no model ever runs
+# on it). See seg_inference.py module docstring for the full reasoning.
+inference:
+  # Input — choose ONE:
+  seg_maps:  []         # list of PRE-COMPUTED Grounded-SAM seg map paths (REQUIRED for
+                         # this mode), e.g. ["data/grounded_sam_raw/000001/000001_seg_map.png"]
+  images:    []         # OPTIONAL, display-only, matched by index to seg_maps
+  json_file: null       # OR path to JSON manifest: seg_path (required) +
+                         # raw_image_path (optional, display only) + prompt per entry
+
+  prompts:   []         # prompts for 'seg_maps' list mode; leave empty to use JSON prompts
+
+  # Output:
+  output_dir: outputs/inference/grounded_sam/results   # relative to repo root (resolved in seg_inference.py)
+  save_generated_only: false   # true → save only predicted image, mirroring folder structure
+
+  # Preprocessing: letterbox squaring is FIXED project-wide; there is
+  # deliberately no knob here, so inference can never disagree with training.
+
+  # Generation:
+  n_samples:           1    # number of generated images per input image
+  num_inference_steps: 50   # diffusion denoising steps
+  guidance_scale:      7.5  # CFG scale
+
+  # Generation-quality knobs (see model.py sample_easy docstring, and
+  # LORA_ARCHITECTURE.md §8, for the full reasoning). Defaults below are all
+  # NO-OPS — identical output to before these existed. Tune these to fight the
+  # "fits the shape but doesn't know how it looks" artifact (flat seg-map
+  # regions carry no appearance information):
+  #   conditioning_kernel_size: odd int (e.g. 3, 5) box-blurs the seg COLOUR MAP
+  #     before the mapper, softening hard silhouette edges. Does NOT add
+  #     information to a region's flat interior — pairs with lora_scale decay
+  #     below for that. 0 = off (default).
+  conditioning_kernel_size: 0
+  #   lora_scale_start/end: decay the structure-LoRA's conditioning strength
+  #     over the denoising trajectory — full grip (scale_start) for the early
+  #     LAYOUT-deciding steps, fading to scale_end for the late DETAIL-deciding
+  #     steps, so the model can lean on its own trained prior for appearance
+  #     instead of a flat conditioning signal. Equal start/end = off (default).
+  #     Try e.g. lora_scale_start=1.0, lora_scale_end=0.4 as a first experiment.
+  lora_scale_start: 1.0
+  lora_scale_end: 1.0
+  #   lora_scale_decay_start_frac: fraction of steps (0..1) held at full
+  #     lora_scale_start before decay begins (0.3 = first 30% of steps).
+  lora_scale_decay_start_frac: 0.3
+
+hydra:
+  run:
+    dir: outputs/inference/grounded_sam/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true

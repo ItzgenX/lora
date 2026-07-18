@@ -4,14 +4,12 @@ seg_inference.py
 Run inference with a trained segmentation-conditioned LoRAdapter.
 
 CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED segmentation
-map — it never computes one live from a raw photo. Previously this script ran
-SegFormer live on an input photo to produce the conditioning map (mirroring the
-paper's original depth pipeline). That's gone: now you must supply `seg_path`
-(a pre-computed class-ID PNG, same format seg_map_calculations.py saves and
-training already reads), exactly like training does via skip_encode=True. This
-also means the script now works identically for ANY segmentation source
-(SegFormer or Grounded-SAM) since neither is asked to run live anymore — see
-GROUNDED_SAM.md.
+map — it never computes one live from a raw photo. You must supply `seg_path`
+(a pre-computed class-ID PNG), exactly like training does via skip_encode=True.
+This isn't a restriction added on top of a working live path: GroundedSamEncoder
+(src/encoders/grounded_sam_encoder.py) has no live path at all (Tier 1 only —
+see the module docstring there), so "always use a provided map" is the only
+contract that ever worked for this pipeline.
 
 This script:
   1. Loads the SD 1.5 base model + trained LoRA/mapper from a checkpoint.
@@ -22,19 +20,19 @@ This script:
   3. Saves a 4-panel grid (ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN) per image
      so you can visually evaluate quality and pick the best checkpoint.
   4. mIoU (controllability metric) is scored ONLY if the loaded encoder can
-     itself segment the GENERATED image (`encoder.live_available` — see
-     src/encoders/grounded_sam_encoder.py's Tier-1 GroundedSamEncoder, which
-     cannot and is skipped automatically). This is scoring the OUTPUT after
-     generation, a separate thing from "computing the conditioning map live."
+     itself segment the GENERATED image (`encoder.live_available`). Grounded-SAM's
+     Tier-1 encoder cannot, so this is skipped automatically — not a crash.
+     This is scoring the OUTPUT after generation, a separate thing from
+     "computing the conditioning map live."
 
 INPUT OPTIONS — SAME SCHEMA training's manifests already use:
   a) JSON manifest file (recommended) — each entry needs "seg_path" (required),
      "raw_image_path" (optional, display only), "prompt" (optional):
-       inference.json_file=data/seg_training/test.jsonl
+       inference.json_file=data/grounded_sam/test.jsonl
   b) Direct lists:
-       "inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]"
-       "inference.images=[data/raw/000417/raw_image.jpg]"   # optional, display only
-       "inference.prompts=['urban driving scene, clear weather']"
+       "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]"
+       "inference.images=[data/raw/000001/raw_image.jpg]"   # optional, display only
+       "inference.prompts=['a car driving down a rainy street']"
 
 OUTPUT MODES:
   Default (save_generated_only=false) — saves 4 files per image:
@@ -46,26 +44,26 @@ OUTPUT MODES:
   Batch eval (save_generated_only=true, json_file required):
     Saves ONLY the generated image, mirroring folder structure from the JSON.
 
-USAGE:
+USAGE (this branch's default config is inference_grounded_sam.yaml):
   # Standard inference from a manifest (seg_path required, raw_image_path optional):
   python seg_inference.py \\
-      ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      inference.json_file=data/seg_training/test.jsonl \\
-      inference.output_dir=outputs/inference/seg/results
+      ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+      inference.json_file=data/grounded_sam/test.jsonl \\
+      inference.output_dir=outputs/inference/grounded_sam/results
 
   # Direct seg map + optional raw image for the display panel:
   python seg_inference.py \\
-      ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" \\
-      "inference.images=[data/raw/000888/raw_image.jpg]" \\
-      "inference.prompts=['two windows on a brick building with vines']"
+      ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+      "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" \\
+      "inference.images=[data/raw/000001/raw_image.jpg]" \\
+      "inference.prompts=['a car driving down a rainy street']"
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Single map dry run (replace YYYY-MM-DD/HH-MM-SS with actual run folder) ---
-  python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" "inference.prompts=['two windows on a brick building with vines']"
+  python seg_inference.py ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" "inference.prompts=['a car driving down a rainy street']"
 
   # --- Batch test-set inference ---
-  python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model inference.json_file=data/seg_training/test.jsonl
+  python seg_inference.py ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model inference.json_file=data/grounded_sam/test.jsonl
 """
 
 import hydra
@@ -175,7 +173,7 @@ def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device) -> t
 #  MAIN                                                                   #
 # ===================================================================== #
 
-@hydra.main(config_path="configs", config_name="inference_seg")
+@hydra.main(config_path="configs", config_name="inference_grounded_sam")
 def main(cfg):
     # Resolve device LOUDLY: prints full GPU diagnostics and raises a clear
     # error (instead of silently running on CPU) unless device=cpu was
@@ -198,16 +196,23 @@ def main(cfg):
     # Same logic as training, so inference uses the SAME model (parity rule).
     # Local paths are made absolute from the repo root; when offline we also
     # export HF_HUB_OFFLINE so nothing can touch the network.
+    # The Grounded-SAM encoder has no HF `model` to load (it's a training/
+    # inference-only slot filler — see configs/lora/encoder/grounded_sam.yaml),
+    # so only rewrite encoder.model when the encoder config actually has that
+    # key. Mirrors the same guard in seg_training.py.
+    _enc_has_model = "model" in cfg.lora.struct.encoder
     if cfg.local_files_only:
         os.environ["HF_HUB_OFFLINE"]      = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        cfg.model.model_name          = os.path.join(_root, cfg.base_model_path)
-        cfg.lora.struct.encoder.model = os.path.join(_root, cfg.seg_model_path)
+        cfg.model.model_name = os.path.join(_root, cfg.base_model_path)
+        if _enc_has_model:
+            cfg.lora.struct.encoder.model = os.path.join(_root, cfg.seg_model_path)
     else:
-        cfg.model.model_name          = cfg.base_model_name
-        cfg.lora.struct.encoder.model = cfg.seg_model_name
+        cfg.model.model_name = cfg.base_model_name
+        if _enc_has_model:
+            cfg.lora.struct.encoder.model = cfg.seg_model_name
     print(f"[model] base = {cfg.model.model_name}")
-    print(f"[model] seg  = {cfg.lora.struct.encoder.model}")
+    print(f"[model] seg encoder = {cfg.lora.struct.encoder.model if _enc_has_model else cfg.lora.struct.encoder._target_}")
     print(f"[model] local_files_only = {cfg.local_files_only}")
 
     # ------------------------------------------------------------------ #

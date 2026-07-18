@@ -16,11 +16,17 @@ scene correctly).
 
 This script turns that HYPOTHESIS into DATA: it walks your seg training
 manifest (the same train.json Stage D reads) and, for every sample, computes
-what fraction of the seg map's pixels are class 13 ("car" — see
-SEG_CITYSCAPES_PALETTE in src/encoders/seg_encoder.py). It then buckets that
-fraction into a histogram so you can see, at a glance, whether "large/close
-vehicle" frames (e.g. car-pixel fraction > 15%) are rare or absent in your
-real training set — which is exactly the CARLA-truck situation.
+what fraction of the seg map's pixels are the "car" class. It then buckets
+that fraction into a histogram so you can see, at a glance, whether
+"large/close vehicle" frames (e.g. car-pixel fraction > 15%) are rare or
+absent in your real training set — which is exactly the CARLA-truck situation.
+
+CAR CLASS ID DIFFERS BY TAXONOMY — pass --car_class_id, don't trust the
+default: SegFormer/Cityscapes has "car" at id 13 (SEG_CITYSCAPES_PALETTE in
+src/encoders/seg_encoder.py). Grounded-SAM's CARLA taxonomy
+(configs/grounded_sam_classes.json) has "Car" at id 14 (CARLA ids 1-19 are
+Cityscapes shifted +1, since id 0 = Unlabeled sits at the front). Using the
+wrong id silently measures a DIFFERENT class with no error.
 
 If large-car-fraction frames turn out to be rare: the fix is adding/upsampling
 such examples in training, NOT finetuning SegFormer (the encoder's output was
@@ -33,7 +39,10 @@ before concluding anything either way.
 
 USAGE (run on whichever machine holds the real seg_training manifest+PNGs —
 this repo's local 913-image folder is a TEST set, not the real training data):
-    python analyze_car_coverage.py --json_file data/seg_training/train.json
+    # SegFormer/Cityscapes taxonomy (car id 13):
+    python analyze_car_coverage.py --json_file data/seg_training/train.json --car_class_id 13
+    # Grounded-SAM/CARLA taxonomy (Car id 14):
+    python analyze_car_coverage.py --json_file data/grounded_sam/train.json --car_class_id 14
 """
 
 import argparse
@@ -42,8 +51,6 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-
-CAR_CLASS_ID = 13  # see SEG_CITYSCAPES_PALETTE, src/encoders/seg_encoder.py line ~82
 
 
 def _resolve(p: str, image_root: str | None) -> Path:
@@ -57,7 +64,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json_file", required=True, help="seg_training manifest, e.g. data/seg_training/train.json")
     ap.add_argument("--image_root", default=None, help="prefix for relative seg_path entries, if any")
+    ap.add_argument(
+        "--car_class_id", type=int, required=True,
+        help="REQUIRED, no default -- the 'car' class id differs by taxonomy: "
+             "13 for SegFormer/Cityscapes, 14 for Grounded-SAM/CARLA. Passing "
+             "the wrong id silently measures a different class, so there is no "
+             "safe default to fall back on.",
+    )
     args = ap.parse_args()
+    CAR_CLASS_ID = args.car_class_id
 
     manifest_path = Path(args.json_file)
     entries = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -70,8 +85,7 @@ def main() -> None:
         if not seg_path.exists():
             missing += 1
             continue
-        # seg PNGs are 8-bit single-channel class-ID maps (0..18), written by
-        # seg_map_calculations.py's label_ids() path — see SEGMENTATION.md.
+        # seg PNGs are 8-bit single-channel class-ID maps (raw pixel value == class id).
         ids = np.array(Image.open(seg_path).convert("L"))
         car_fraction = float((ids == CAR_CLASS_ID).mean())
         fractions.append(car_fraction)

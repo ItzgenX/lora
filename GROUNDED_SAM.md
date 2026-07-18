@@ -190,7 +190,7 @@ This is everything needed to train the LoRAdapter model on the
 ### 5.1a Generation-quality fix for "fits the shape but doesn't know how it looks"
 This exact symptom was root-caused (flat segmentation regions carry no
 appearance information through a 1×1-conv FiLM conditioning path — see full
-writeup in [SEGMENTATION.md §10.4a](SEGMENTATION.md#104a-fixing-fits-the-shape-but-doesnt-know-how-it-looks-added-2026-07-17))
+writeup in [LORA_ARCHITECTURE.md §8](LORA_ARCHITECTURE.md#8--why-this-design-produces-fits-the-shape-but-doesnt-know-how-it-looks))
 and fixed with two inference-time knobs (`lora_scale_start/end` decay +
 `conditioning_kernel_size` edge-softening) added to `sample_easy` in
 `src/model.py`. Both are **architecture-level**, not SegFormer-specific, so they
@@ -200,8 +200,9 @@ nothing extra to build here when that day comes.
 ### 5.1b Inference now works TODAY for a Grounded-SAM-produced map [ADDED 2026-07-17]
 Separate change, same day: `seg_inference.py` was rewritten (user decision) so
 inference **always uses a provided segmentation map and never computes one
-live** — see [SEGMENTATION.md §10.4b](SEGMENTATION.md#104b-inference-now-always-uses-a-provided-map-never-computes-one-live-added-2026-07-17)
-for the full mechanism. This directly unlocks something that wasn't possible
+live** — see `seg_inference.py`'s own module docstring for the full mechanism
+(this is also the config `configs/inference_grounded_sam.yaml` on this branch
+uses by default). This directly unlocks something that wasn't possible
 before: **you can generate from a Grounded-SAM map right now**, via
 `inference.seg_maps=[...]`, once you have a trained `train_grounded_sam`
 checkpoint — no Tier 2 required for that. What Tier 2 (below) still gates is
@@ -249,10 +250,9 @@ prompts, none of which are set up yet. Deliberately deferred.
    Run it on the machine that will actually train (it only reads local files).
    Paste the printed values into `configs/experiment/train_grounded_sam.yaml`.
    **Grounded-SAM's dataset (CARLA renders) and SegFormer's dataset (real-world
-   photos) are different image sets with different counts** — this is a
-   separate run from the one in
-   [SEG_TRAINING_GUIDE.md §10](SEG_TRAINING_GUIDE.md#10-the-full-segmentation-training-checklist),
-   not something to reuse across pipelines.
+   photos) are different image sets with different counts** — SegFormer has
+   its own copy of this checklist on the `segformer` branch of this repo; the
+   two are separate runs, don't reuse one pipeline's numbers for the other.
 
    `--epochs 15` here is an upper-bound ceiling, not a prediction: early
    stopping is already active for this pipeline too —
@@ -288,6 +288,7 @@ engine we depend on, and others are SegFormer-only.
 | [configs/experiment/train_grounded_sam.yaml](configs/experiment/train_grounded_sam.yaml) | The training experiment: wires encoder + data + your manifests. |
 | [configs/data/local_grounded_sam.yaml](configs/data/local_grounded_sam.yaml) | Data config: class file + manifest key names. |
 | [configs/lora/encoder/grounded_sam.yaml](configs/lora/encoder/grounded_sam.yaml) | Encoder slot config (no HF model to load). |
+| [configs/inference_grounded_sam.yaml](configs/inference_grounded_sam.yaml) | Base inference config — `seg_inference.py`'s default on this branch. |
 | [GROUNDED_SAM.md](GROUNDED_SAM.md) | This guide. |
 
 ### 7.2 Shared segmentation engine — REUSED by Grounded-SAM (must keep)
@@ -310,27 +311,33 @@ engine we depend on, and others are SegFormer-only.
 | [analyze_car_coverage.py](analyze_car_coverage.py) | Car-class coverage histogram (found the CARLA-truck data gap). |
 | [check_seg_coverage.py](check_seg_coverage.py) | Per-image, per-class coverage vs the training distribution. |
 
-### 7.4 SegFormer-only (kept — both pipelines coexist on this branch)
-These are used ONLY by the SegFormer approach and are **not** imported by any
-Grounded-SAM code, but were restored (2026-07-16, user decision) so both
-approaches are available side by side. Run SegFormer with
-`experiment=train_seg`, Grounded-SAM with `experiment=train_grounded_sam` —
-both go through the same shared `seg_training.py` / `local_seg.py` /
-`seg_encoder.py` engine, verified to compose and coexist without conflict:
-| File | What it does (SegFormer) |
+### 7.4 SegFormer-only (removed from this branch — see the `segformer` branch)
+Earlier, both approaches lived side by side on one branch. That changed
+(2026-07-19, user decision): **this repo now has two separate branches**,
+`segformer` and `grounded_sam`, each keeping only its own pipeline's files on
+top of the shared engine (§7.2). The following were removed from this branch
+because they're SegFormer-only and not imported by any Grounded-SAM code —
+they still exist on the `segformer` branch:
+| File (on the `segformer` branch) | What it does (SegFormer) |
 |---|---|
 | configs/lora/encoder/segformer.yaml | SegFormer encoder config. |
 | configs/experiment/train_seg.yaml | SegFormer training experiment. |
-| configs/inference_seg.yaml | Live SegFormer inference config. |
-| configs/data/local_seg.yaml | SegFormer data config (Grounded-SAM uses local_grounded_sam.yaml instead). |
+| configs/data/local_seg.yaml | SegFormer data config (this branch uses local_grounded_sam.yaml instead). |
 | seg_map_calculations.py | Computes SegFormer maps offline (Grounded-SAM maps are made externally). |
-| seg_inference.py | Live SegFormer inference. |
 | seg_finetune.py / seg_make_draft_masks.py | Earlier SegFormer-on-CARLA finetuning exploration. |
 | SEGMENTATION.md / SEG_TRAINING_GUIDE.md | SegFormer pipeline docs. |
 
-Note: `seg_encoder.py` is NOT in this list — it stays, because the Grounded-SAM
-path imports its palette functions. Only its `SegmentationEncoder` *class* is
-SegFormer-specific (it can optionally be stripped, but the file must remain).
+`seg_inference.py` and `configs/inference_grounded_sam.yaml` are **not** in
+that list — `seg_inference.py` is shared engine (§7.2) and stays on both
+branches; only its default *config* differs per branch
+(`inference_grounded_sam.yaml` here, `inference_seg.yaml` there), since
+inference never runs the encoder live on either branch anymore.
+
+Note: `seg_encoder.py` also stays here (§7.2) — the Grounded-SAM path imports
+its palette functions. Its `SegmentationEncoder` class is SegFormer-specific
+and unused on this branch (dead code, harmless, not instantiated by any
+config here) — left in place rather than stripped, since no config on this
+branch references it and removing it has no functional benefit.
 
 ---
 
