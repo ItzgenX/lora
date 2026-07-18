@@ -116,8 +116,8 @@ def main():
     print(f"DATASET  ({data_dir})")
     print("=" * 70)
     if train_n is None:
-        print(f"  No train.jsonl found in {data_dir} -- put your Grounded-SAM")
-        print(f"  (raw_image, seg_map, prompt) manifests there, then re-run.")
+        print(f"  No train.jsonl found in {data_dir} -- put your SegFormer")
+        print(f"  (raw_image_path, seg_path, prompt) manifests there, then re-run.")
     else:
         print(f"  train: {train_n} images")
         print(f"  val  : {val_n if val_n is not None else '?'} images")
