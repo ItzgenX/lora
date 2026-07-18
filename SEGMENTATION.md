@@ -5,9 +5,18 @@
 
 ---
 
-## 0 · Seg Concepts From Zero — read DEPTH.md 0 first (shared foundations), then this
+## 0 · Seg Concepts From Zero
 
-DEPTH.md 0 explains diffusion, the VAE, the UNet loss, CFG, LoRA, FiLM, letterbox, and the training numbers — all of it applies here unchanged. **DEPTH.md 0.0 is the plain-words glossary for every technical term used in BOTH docs** (tensor, logits, argmax, JSONL, Hydra, VRAM, buffer, id2label, SSOT, …) — if any word in this file feels new, it's defined there. This section covers only what is *different* about segmentation.
+For exactly where and how LoRA sits inside the model — which UNet layers get
+wrapped, how the FiLM conditioning math works, how the segmentation map's
+signal actually reaches the frozen UNet — see the dedicated deep-dive doc:
+**[LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md)**. (Historical note: this
+section used to point at a `DEPTH.md §0`; that file was removed when the
+depth pipeline was deleted from this branch. `LORA_ARCHITECTURE.md` is its
+replacement for the LoRA/FiLM/architecture material — it applies identically
+to segmentation and Grounded-SAM, since both share the same underlying
+`src/lora.py`/`src/model.py` code.) This section covers only what is
+*different* about segmentation.
 
 ### 0.1 What semantic segmentation is
 
@@ -823,16 +832,115 @@ python seg_inference.py \
 | Key | Default | What it does | When to change |
 |-----|---------|--------------|----------------|
 | `ckpt_path` | *(required)* | Path to a checkpoint folder. Usually `best_model/` or a specific `checkpoint-epoch1/step1000/`. | Always set. |
-| `inference.json_file` | `null` | JSONL to run inference on. | Use `test.jsonl` for final evaluation. Never `val.jsonl` or `train.jsonl`. |
-| `inference.images` | `[]` | Direct list of image paths. | Quick single-image tests. |
-| `inference.prompts` | `[]` | Prompts matching `inference.images`. | Required when using `inference.images`. |
+| `inference.json_file` | `null` | JSONL to run inference on. Entries need `seg_path` (required) + `raw_image_path` (optional, display only) + `prompt`. | Use `test.jsonl` for final evaluation. Never `val.jsonl` or `train.jsonl`. |
+| `inference.seg_maps` | `[]` | Direct list of PRE-COMPUTED seg map paths. **REQUIRED** — inference never computes a map live. See §10.4b. | Quick single-map tests. |
+| `inference.images` | `[]` | OPTIONAL, display-only raw photos, matched by index to `seg_maps`. No model ever runs on these. | Only if you want the ORIGINAL panel populated. |
+| `inference.prompts` | `[]` | Prompts matching `inference.seg_maps`. | Required when using `inference.seg_maps`. |
 | `inference.output_dir` | `outputs/inference/seg/results` | Where generated images are saved. Resolved from repo root. | Change per experiment. |
 | `inference.save_generated_only` | `false` | `true` = save only the predicted image (no 4-panel grid). | Set `true` for clean batch evaluation. |
 | *(removed)* `inference.resize_mode` | — | Key deleted 2026-07-06: letterbox is built into the shared preprocessing factory, so inference physically cannot use a different squaring than Stage C. | — |
 | `inference.n_samples` | `1` | Images generated per input. | `2`–`4` for diversity. |
 | `inference.num_inference_steps` | `50` | Diffusion denoising steps. | `20` preview, `50` quality, `80`+ max. |
 | `inference.guidance_scale` | `7.5` | CFG scale. Higher = more prompt-driven. | `3`–`5` creative, `7.5` standard, `12`+ tight. |
+| `inference.conditioning_kernel_size` | `0` | Box-blurs the seg colour map before the mapper, softening hard silhouette EDGES. `0` = off (no-op). | Odd int (`3`, `5`) if generated objects have unnaturally crisp/cut-out-looking boundaries. See §10.4a. |
+| `inference.lora_scale_start` | `1.0` | Structure-conditioning strength for the early (layout) denoising steps. | Leave at `1.0` — full grip while layout is decided. |
+| `inference.lora_scale_end` | `1.0` | Structure-conditioning strength for the late (detail) denoising steps. Equal to `lora_scale_start` = decay disabled. | Lower (e.g. `0.4`) to fix "fits the shape but doesn't know how it looks." See §10.4a. |
+| `inference.lora_scale_decay_start_frac` | `0.3` | Fraction of steps held at `lora_scale_start` before decaying toward `lora_scale_end`. | Raise toward `1.0` for a later, more conservative handoff. |
 | `local_files_only` | `true` | Offline mode. | Keep `true`. |
+
+### 10.4a Fixing "fits the shape but doesn't know how it looks" [ADDED 2026-07-17]
+
+**Root cause (traced in `src/lora.py` `NewStructLoRAConv.forward`):** the structure
+conditioning is a per-pixel FiLM shift/scale applied through a **1×1 convolution**
+(`self.beta`, `self.gamma`) — receptive field of exactly one pixel. A segmentation
+map is a FLAT, constant colour inside any object (every "car" pixel is identical).
+So the model receives the *exact same* instruction at every interior pixel: "car
+here" — zero information about the object's actual appearance. This holds with
+full force through EVERY denoising step, including the late steps where a
+diffusion model normally decides fine detail/texture, starving the model of room
+to use its own trained prior for what the object should look like. Confirmed via
+a real generation comparison: a small/distant car rendered fine (its whole shape
+fits inside the mapper's receptive field, richer context); a large/close-up truck
+warped into a generic blob (deep interior pixels see nothing but flat colour in
+every direction).
+
+**Two independent inference-time knobs, no retraining required** (both in
+`sample_easy`, `src/model.py`; wired through `seg_inference.py` above):
+
+1. **`lora_scale_start`/`lora_scale_end`/`lora_scale_decay_start_frac`** — holds
+   full conditioning strength for the early layout-deciding steps, then linearly
+   decays it for the late detail-deciding steps (mirrors ControlNet's
+   `control_guidance_start/end`). Implemented via a diffusers-native
+   `callback_on_step_end` that mutates every struct-LoRA layer's `.lora_scale`
+   live between steps (`ModelBase.make_lora_scale_callback`). The original scale
+   is restored via `try/finally` after generation — required because these are
+   the SAME module instances training and the monitoring-grid code (`sample_custom`)
+   use; an unrestored decayed value would silently leak into the next call.
+   **This is the primary lever** — it directly frees the late steps to paint
+   realistic appearance instead of obeying a flat signal.
+
+2. **`conditioning_kernel_size`** — box-blurs the seg colour map (`cond`, right
+   after the encoder produces it — NOT the raw input photo) before the mapper.
+   Verified by execution: with `kernel_size=0` output is byte-identical to no
+   blur; with `kernel_size=5` a boundary pixel softens to an intermediate value
+   while a DEEP interior pixel is mathematically unchanged (still exactly its
+   original flat value). **This only fixes crisp/cut-out-looking edges — it
+   cannot add information to a region's interior.** Pair it with the
+   `lora_scale` decay above; it is not a substitute.
+
+Both default to no-op values (`0`, and `lora_scale_start == lora_scale_end`), so
+existing generations are byte-for-byte unchanged unless explicitly configured.
+Architecture-level (lives in shared `model.py`), so it applies identically to
+Grounded-SAM once its live encoder (Tier 2, see GROUNDED_SAM.md) exists.
+
+### 10.4b Inference now ALWAYS uses a PROVIDED map — never computes one live [ADDED 2026-07-17]
+
+**Change (user decision):** `seg_inference.py` no longer runs any segmentation
+model live. Previously it ran SegFormer on the input photo TWICE — once via
+`model.encoders[0](img_tensor)` to build the "SEG MAP" display panel, and again
+inside `sample_easy` (which called `encoder(c)` unconditionally) to build the
+actual conditioning signal. Both are gone. Now every entry supplies a
+pre-computed `seg_path` (the exact same class-ID PNG format
+`seg_map_calculations.py` saves and training already reads), which is loaded and
+colourised directly — `raw_image_path`/`images` becomes OPTIONAL, used only to
+populate the ORIGINAL display panel, never touched by any model.
+
+**Mechanism:**
+- `sample_easy` gained a `skip_encode: bool = False` parameter, mirroring the
+  pattern `sample_custom` already had (`cond = c if skip_encode else
+  encoder(c)`). `seg_inference.py` now calls `model.sample(..., cs=[seg_tensor],
+  skip_encode=True)` for both the prompted and empty-prompt (RAW SEG GEN)
+  generations.
+- A new helper `_load_seg_map()` in `seg_inference.py` loads the raw class-ID PNG
+  and colourises it, mirroring `src/data/local_seg.py`'s
+  `_load_seg_colormap` EXACTLY (same NEAREST resize, same `seg_colorize_ids`
+  call, same palette) — this is what guarantees a map loaded at inference
+  produces the identical conditioning signal training saw for that file.
+- The mIoU controllability metric (scores the GENERATED image's class layout
+  against the requested map — a different use of the encoder than "computing
+  the input map," since it runs AFTER generation) is now guarded by
+  `encoder.live_available`, mirroring the guard already added to
+  `seg_training.py`. It's skipped cleanly — not a crash — for encoders with no
+  live path, e.g. Grounded-SAM's Tier-1 `GroundedSamEncoder`.
+
+**Why this matters beyond SegFormer:** this makes inference identical for
+SegFormer and Grounded-SAM. Grounded-SAM's Tier-1 encoder was never able to run
+live at all — "always use a provided map" isn't a restriction added on top of a
+working live path, it's the contract Grounded-SAM already required, now applied
+uniformly. See GROUNDED_SAM.md §5.2 for what this newly unlocks.
+
+**New/changed config keys:** `inference.seg_maps` (list mode, replaces the old
+`inference.images` as the primary required input), `inference.images` (now
+optional/display-only), manifest entries need `seg_path` (required) instead of
+only `raw_image_path`. See the table above.
+
+**Verified by execution (unit-level, not a live GPU run):** built a synthetic
+class-ID PNG, ran `_load_seg_map` standalone — correct output shape/range
+(`[1,3,size,size]` in `[0,1]`), and confirmed NEAREST resize introduces no
+fabricated class ids (recovered ids are a strict subset of the original ids).
+Full end-to-end generation was NOT run (no local SD weights/GPU in this
+environment) — treat this as code-verified, pending a real smoke run on the
+training machine.
 
 ---
 

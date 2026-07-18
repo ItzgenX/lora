@@ -149,6 +149,13 @@ this in mind — it drives most of the trade-offs below.
 The design **reuses the entire segmentation pipeline** and swaps only the parts
 that must differ (the class palette and the encoder slot). Nothing is duplicated.
 
+For exactly where and how the LoRA blocks sit inside the frozen SD1.5 UNet —
+which layers get wrapped, the FiLM math, how a conditioning map fans out
+across the UNet's resolutions — see
+**[LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md)**. That mechanism (`src/lora.py`,
+`src/model.py`) is identical for Grounded-SAM and SegFormer; only the encoder
+that *produces* the colour map (§5.1 below vs. live SegFormer) differs.
+
 ### 5.1 What was built — "Tier 1": train on pre-saved maps
 This is everything needed to train the LoRAdapter model on the
 `(raw_image, seg_map, prompt)` pairs you already generated with Grounded-SAM.
@@ -180,11 +187,36 @@ This is everything needed to train the LoRAdapter model on the
   `classes_file` (build palette from your classes) and manifest-key flags
   `image_key` / `seg_key` / `prompt_key` (so your JSONL can use any key names).
 
+### 5.1a Generation-quality fix for "fits the shape but doesn't know how it looks"
+This exact symptom was root-caused (flat segmentation regions carry no
+appearance information through a 1×1-conv FiLM conditioning path — see full
+writeup in [SEGMENTATION.md §10.4a](SEGMENTATION.md#104a-fixing-fits-the-shape-but-doesnt-know-how-it-looks-added-2026-07-17))
+and fixed with two inference-time knobs (`lora_scale_start/end` decay +
+`conditioning_kernel_size` edge-softening) added to `sample_easy` in
+`src/model.py`. Both are **architecture-level**, not SegFormer-specific, so they
+apply identically to Grounded-SAM once its live encoder (Tier 2, below) exists —
+nothing extra to build here when that day comes.
+
+### 5.1b Inference now works TODAY for a Grounded-SAM-produced map [ADDED 2026-07-17]
+Separate change, same day: `seg_inference.py` was rewritten (user decision) so
+inference **always uses a provided segmentation map and never computes one
+live** — see [SEGMENTATION.md §10.4b](SEGMENTATION.md#104b-inference-now-always-uses-a-provided-map-never-computes-one-live-added-2026-07-17)
+for the full mechanism. This directly unlocks something that wasn't possible
+before: **you can generate from a Grounded-SAM map right now**, via
+`inference.seg_maps=[...]`, once you have a trained `train_grounded_sam`
+checkpoint — no Tier 2 required for that. What Tier 2 (below) still gates is
+narrower than it looked before this change: only (a) producing a map for a
+BRAND-NEW image that has no pre-computed map yet, and (b) the mIoU metric
+(scoring a generation against a live re-segmentation) — both correctly
+auto-skip/require Tier 2 rather than crashing (`encoder.live_available=False`
+is checked before either runs).
+
 ### 5.2 What was NOT built — "Tier 2": live map generation
 A live `GroundedSamEncoder` that actually runs GroundingDINO + SAM to make a map
-for a brand-new image. Needed for **inference on new frames** and for the **mIoU
-metric** (which segments the generated image to score layout adherence — auto-
-skipped for now). This requires the packages, checkpoints, and your class-name
+for a brand-new image. Needed for **inference on new frames without a
+pre-computed map** and for the **mIoU metric** (which segments the generated
+image to score layout adherence — auto-skipped for now). This requires the
+packages, checkpoints, and your class-name
 prompts, none of which are set up yet. Deliberately deferred.
 
 ---
@@ -207,9 +239,34 @@ prompts, none of which are set up yet. Deliberately deferred.
    just tells you the true range actually present in your files, for your own
    awareness — it doesn't change the (locked) class file.
 
-4. `python seg_training.py experiment=train_grounded_sam`
+4. **Size the hyperparameters to your real dataset.** `recommend_training_params.py`
+   (repo root, `--data_dir` required, no default) counts your real manifest line
+   counts and detects the local GPU, then prints `batch_size` /
+   `gradient_accumulation_steps` / `val_steps` / `ckpt_steps` for THIS pipeline:
+   ```
+   python recommend_training_params.py --data_dir data/grounded_sam --epochs 15
+   ```
+   Run it on the machine that will actually train (it only reads local files).
+   Paste the printed values into `configs/experiment/train_grounded_sam.yaml`.
+   **Grounded-SAM's dataset (CARLA renders) and SegFormer's dataset (real-world
+   photos) are different image sets with different counts** — this is a
+   separate run from the one in
+   [SEG_TRAINING_GUIDE.md §10](SEG_TRAINING_GUIDE.md#10-the-full-segmentation-training-checklist),
+   not something to reuse across pipelines.
 
-5. **Do a short smoke run first.** Training here is code- and config-verified but
+   `--epochs 15` here is an upper-bound ceiling, not a prediction: early
+   stopping is already active for this pipeline too —
+   `early_stop_patience: 3` lives in the shared base `configs/train_seg.yaml`
+   (both `experiment=train_seg` and `experiment=train_grounded_sam` run
+   through the same `seg_training.py`, which is hard-wired to that base
+   config), so training stops itself once val/loss stops improving for 3
+   epochs — `best_model/` is already saved at that point. Neither pipeline
+   has an empirical convergence curve yet at real scale, so treat `epochs`
+   as "how long am I willing to let it run," not a number to get exactly right.
+
+5. `python seg_training.py experiment=train_grounded_sam`
+
+6. **Do a short smoke run first.** Training here is code- and config-verified but
    has **not been executed** on real data on the target machine. Run a few steps,
    watch val/loss and the first checkpoint's monitoring images, before committing
    to a full run.
@@ -242,6 +299,8 @@ engine we depend on, and others are SegFormer-only.
 | [configs/train_seg.yaml](configs/train_seg.yaml) | Base config `seg_training.py` loads (`config_name`). Experiment layers on top. |
 | [src/data/transforms.py](src/data/transforms.py) | `SquarePad` letterbox preprocessing, shared by all image loading. |
 | [src/utils.py](src/utils.py) | LoRA build, checkpoint save, GPU diagnostics, metrics — the training backbone. |
+| [src/lora.py](src/lora.py) / [src/model.py](src/model.py) | The LoRA classes and UNet-wrapping logic itself — identical code path for both pipelines. See [LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md) for the full trace. |
+| [recommend_training_params.py](recommend_training_params.py) | GPU + dataset-sized hyperparameter advisor — run once per pipeline (`--data_dir` required, no shared default). |
 
 ### 7.3 Diagnostics built for this investigation (keep — model-agnostic)
 | File | Purpose |

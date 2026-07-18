@@ -3,54 +3,66 @@ seg_inference.py
 ----------------
 Run inference with a trained segmentation-conditioned LoRAdapter.
 
+CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED segmentation
+map — it never computes one live from a raw photo. Previously this script ran
+SegFormer live on an input photo to produce the conditioning map (mirroring the
+paper's original depth pipeline). That's gone: now you must supply `seg_path`
+(a pre-computed class-ID PNG, same format seg_map_calculations.py saves and
+training already reads), exactly like training does via skip_encode=True. This
+also means the script now works identically for ANY segmentation source
+(SegFormer or Grounded-SAM) since neither is asked to run live anymore — see
+GROUNDED_SAM.md.
+
 This script:
   1. Loads the SD 1.5 base model + trained LoRA/mapper from a checkpoint.
-  2. For each input image, runs the SegmentationEncoder (SegFormer-b5-Cityscapes)
-     to get a colourised seg map, then generates a new image conditioned on that map.
+  2. For each entry, LOADS the pre-computed seg map (`seg_path`) and colourises
+     it with the configured palette — no live segmentation model runs for this.
+     `raw_image_path` is now OPTIONAL and used ONLY for the "ORIGINAL" display
+     panel (no computation happens on it).
   3. Saves a 4-panel grid (ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN) per image
      so you can visually evaluate quality and pick the best checkpoint.
+  4. mIoU (controllability metric) is scored ONLY if the loaded encoder can
+     itself segment the GENERATED image (`encoder.live_available` — see
+     src/encoders/grounded_sam_encoder.py's Tier-1 GroundedSamEncoder, which
+     cannot and is skipped automatically). This is scoring the OUTPUT after
+     generation, a separate thing from "computing the conditioning map live."
 
-This is the segmentation twin of depth_inference.py. It mirrors that script's
-structure exactly, with three seg-specific differences:
-  1. `_seg_label_bar` / `make_seg_inference_grid` — seg-prefixed, "SEG MAP" label.
-  2. model loading reads `cfg.seg_model_name/seg_model_path` (not depth_*).
-  3. Preprocessing via `build_seg_square_preprocess()` from src/data/transforms.py
-     — the SAME function seg_map_calculations.py uses — so the live seg map
-     is byte-identical to what the model trained on (train/inference parity).
-
-INPUT OPTIONS:
-  a) JSON manifest file (recommended) — each entry has "raw_image_path" + "prompt":
+INPUT OPTIONS — SAME SCHEMA training's manifests already use:
+  a) JSON manifest file (recommended) — each entry needs "seg_path" (required),
+     "raw_image_path" (optional, display only), "prompt" (optional):
        inference.json_file=data/seg_training/test.jsonl
-  b) Direct list of image paths:
-       "inference.images=[data/raw/000417/raw_image.jpg]"
+  b) Direct lists:
+       "inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]"
+       "inference.images=[data/raw/000417/raw_image.jpg]"   # optional, display only
        "inference.prompts=['urban driving scene, clear weather']"
 
 OUTPUT MODES:
   Default (save_generated_only=false) — saves 4 files per image:
-    raw_image_grid.jpg         ← 4 panels: ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN
-    raw_image_original.jpg     ← input image rescaled
-    raw_image_seg.jpg          ← the seg colour map from SegFormer-b5
-    raw_image_predicted.jpg    ← the generated image
+    <stem>_grid.jpg         ← 4 panels: ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN
+    <stem>_original.jpg     ← input image if provided, else a blank placeholder
+    <stem>_seg.jpg          ← the loaded + colourised seg map
+    <stem>_predicted.jpg    ← the generated image
 
   Batch eval (save_generated_only=true, json_file required):
     Saves ONLY the generated image, mirroring folder structure from the JSON.
 
 USAGE:
-  # Standard single/multi image inference:
+  # Standard inference from a manifest (seg_path required, raw_image_path optional):
   python seg_inference.py \\
       ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
       inference.json_file=data/seg_training/test.jsonl \\
       inference.output_dir=outputs/inference/seg/results
 
-  # Direct image:
+  # Direct seg map + optional raw image for the display panel:
   python seg_inference.py \\
       ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+      "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" \\
       "inference.images=[data/raw/000888/raw_image.jpg]" \\
       "inference.prompts=['two windows on a brick building with vines']"
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
-  # --- Single image dry run (replace YYYY-MM-DD/HH-MM-SS with actual run folder) ---
-  python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.images=[data/raw/000888/raw_image.jpg]" "inference.prompts=['two windows on a brick building with vines']"
+  # --- Single map dry run (replace YYYY-MM-DD/HH-MM-SS with actual run folder) ---
+  python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" "inference.prompts=['two windows on a brick building with vines']"
 
   # --- Batch test-set inference ---
   python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model inference.json_file=data/seg_training/test.jsonl
@@ -70,7 +82,7 @@ from hydra.utils import get_original_cwd
 from src.model import ModelBase
 from src.utils import add_lora_from_config, resolve_device, compute_miou
 from src.data.transforms import build_seg_square_preprocess
-from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap
+from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap, seg_colorize_ids
 
 torch.set_float32_matmul_precision("high")
 
@@ -137,6 +149,28 @@ def make_seg_inference_grid(
     return Image.fromarray(grid)
 
 
+def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device) -> torch.Tensor:
+    """
+    Load a PRE-COMPUTED segmentation map (raw class-ID PNG, 8-bit, values
+    0..num_classes-1 — exactly what seg_map_calculations.py saves and what
+    training's seg_path manifests already point at) and colourise it.
+
+    Mirrors src/data/local_seg.py's SegJsonDataset._load_seg_colormap EXACTLY
+    (same NEAREST resize, same seg_colorize_ids call, same palette) — this is
+    what guarantees a map loaded here produces the identical conditioning
+    signal training saw for the same file. NEAREST is required: averaging
+    class ids during resize would fabricate classes that aren't in the image.
+
+    Returns [1, 3, size, size] float tensor in [0, 1].
+    """
+    ids_pil = Image.open(seg_path).convert("L")
+    if ids_pil.size != (size, size):
+        ids_pil = ids_pil.resize((size, size), Image.NEAREST)
+    ids = torch.from_numpy(np.asarray(ids_pil, dtype=np.int64)).unsqueeze(0)   # [1, H, W]
+    colour = seg_colorize_ids(ids, palette)                                    # [1, 3, size, size] in [0,1]
+    return colour.to(device)
+
+
 # ===================================================================== #
 #  MAIN                                                                   #
 # ===================================================================== #
@@ -199,7 +233,9 @@ def main(cfg):
     for m in model.mappers:  m.eval()
 
     # ------------------------------------------------------------------ #
-    # Collect input images + prompts from JSON or direct list             #
+    # Collect input seg maps (REQUIRED) + optional raw images + prompts    #
+    # from JSON or direct lists. seg_path is required on every entry --   #
+    # this script never computes a map live, only loads a provided one.   #
     # ------------------------------------------------------------------ #
     entries = []
 
@@ -209,45 +245,46 @@ def main(cfg):
             json_path = Path(_root) / json_path   # _root = original cwd (repo root), not Hydra's run dir
         with open(json_path, "r", encoding="utf-8") as f:
             data = [json.loads(line) for line in f if line.strip()]
+        skipped = 0
         for item in data:
+            if not item.get("seg_path"):
+                skipped += 1
+                continue
             entries.append({
-                "image_path": item["raw_image_path"],
+                "seg_path":   item["seg_path"],
+                "image_path": item.get("raw_image_path"),   # optional, display only
                 "prompt":     item.get("prompt", ""),
             })
+        if skipped:
+            print(f"[WARN] {skipped} entries had no 'seg_path' -- skipped (this script requires a provided map).")
         print(f"Loaded {len(entries)} entries from JSON: {json_path}")
 
-    elif cfg.inference.get("images") and cfg.inference.images:
-        images  = cfg.inference.images
-        prompts = list(cfg.inference.get("prompts") or [])
-        for i, img_path in enumerate(images):
+    elif cfg.inference.get("seg_maps") and cfg.inference.seg_maps:
+        seg_maps = cfg.inference.seg_maps
+        images   = list(cfg.inference.get("images") or [])
+        prompts  = list(cfg.inference.get("prompts") or [])
+        for i, seg_path in enumerate(seg_maps):
             entries.append({
-                "image_path": img_path,
+                "seg_path":   seg_path,
+                "image_path": images[i] if i < len(images) else None,
                 "prompt":     prompts[i] if i < len(prompts) else "",
             })
-        print(f"Processing {len(entries)} images from config.")
+        print(f"Processing {len(entries)} seg maps from config.")
 
     if not entries:
-        print("[ERROR] No input images provided.")
-        print("  Set inference.json_file=data/seg_training/test.jsonl")
-        print("  or  \"inference.images=[data/raw/000417/raw_image.jpg]\"")
+        print("[ERROR] No input seg maps provided (this script requires a PROVIDED map, not a raw photo).")
+        print("  Set inference.json_file=data/seg_training/test.jsonl  (entries need 'seg_path')")
+        print("  or  \"inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]\"")
         return
 
     # ------------------------------------------------------------------ #
-    # Image preprocessing — SHARED function (train/inference parity).      #
-    # build_seg_square_preprocess() from src/data/transforms.py is the     #
-    # SINGLE SOURCE OF TRUTH for segmentation squaring. Using it here is   #
-    # what guarantees the live seg map matches the saved training map:      #
-    #   seg_map_calculations.py -> build_seg_square_preprocess()     #
-    #   seg_inference.py              -> build_seg_square_preprocess()      #
-    # Any change to the preprocessing function propagates to both stages    #
-    # automatically. (This is the same principle depth uses via SquarePad, #
-    # but consolidated into one shared factory function.)                   #
-    # Output: [1, 3, H, W] in [-1, 1].                                      #
+    # Raw-image preprocessing — SHARED function, DISPLAY ONLY now.         #
+    # build_seg_square_preprocess() is still used so an optional raw       #
+    # image, if provided, is squared/resized identically to training's     #
+    # convention -- but it is no longer fed to any model, only shown in    #
+    # the ORIGINAL panel. Output: [1, 3, H, W] in [-1, 1].                 #
     # ------------------------------------------------------------------ #
     size        = cfg.size
-    # Letterbox squaring is FIXED project-wide (user decision 2026-07-06 —
-    # the former resize_mode toggle was removed so training and inference can
-    # never disagree; see references.md §9).
     preprocess  = build_seg_square_preprocess(size=size)
 
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
@@ -256,7 +293,17 @@ def main(cfg):
     # One mIoU per generated image (structure asked for vs. structure produced);
     # the mean over all entries is this model's controllability score, written to
     # metrics.txt at the end. See src/utils.py compute_miou.
-    _palette   = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
+    # ONLY meaningful if the loaded encoder can itself segment the GENERATED
+    # image (scoring output quality, unrelated to "computing the input map
+    # live" -- that's what this file no longer does). The Grounded-SAM Tier-1
+    # slot filler (src/encoders/grounded_sam_encoder.py) cannot do this
+    # (live_available=False), so it's skipped automatically -- no crash.
+    _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
+    _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
+    _live_seg_available = getattr(_enc0, "live_available", True)
+    if not _live_seg_available:
+        print("[INFO] Encoder has no live segmentation path (live_available=False) "
+              "-- mIoU controllability metric will be skipped for this run.")
     miou_lines = []                                # "stem: 0.6123" per image
     mious      = []                                # values, for the mean
 
@@ -264,43 +311,63 @@ def main(cfg):
     # Inference loop                                                       #
     # ------------------------------------------------------------------ #
     for entry in tqdm(entries, desc="Generating"):
-        img_path = Path(entry["image_path"])
-        if not img_path.is_absolute():
-            img_path = Path(_root) / img_path   # _root = original cwd (repo root)
+        seg_path = Path(entry["seg_path"])
+        if not seg_path.is_absolute():
+            seg_path = Path(_root) / seg_path
         prompt = entry["prompt"]
-        stem   = img_path.stem
+        stem   = seg_path.stem
 
-        if not img_path.exists():
-            print(f"[WARN] Not found: {img_path} — skipping.")
+        if not seg_path.exists():
+            print(f"[WARN] seg_path not found: {seg_path} — skipping.")
             continue
 
-        print(f"\n  Image : {img_path.name}")
-        print(f"  Prompt: {prompt!r}")
+        print(f"\n  Seg map: {seg_path.name}")
+        print(f"  Prompt : {prompt!r}")
 
-        # Load and preprocess to [-1, 1] tensor.
-        orig_pil   = Image.open(img_path).convert("RGB")
-        img_tensor = preprocess(orig_pil).unsqueeze(0).to(device)   # [1, 3, H, W]
+        # ---- Optional raw image, DISPLAY ONLY -- no model ever sees it ----
+        img_path = entry.get("image_path")
+        if img_path:
+            img_path = Path(img_path)
+            if not img_path.is_absolute():
+                img_path = Path(_root) / img_path
+            if img_path.exists():
+                orig_pil = Image.open(img_path).convert("RGB")
+            else:
+                print(f"[WARN] raw_image_path not found: {img_path} — using blank placeholder.")
+                orig_pil = Image.new("RGB", (size, size), color=(40, 40, 40))
+        else:
+            orig_pil = Image.new("RGB", (size, size), color=(40, 40, 40))
 
         with torch.no_grad():
 
-            # ---- Step 1: Seg colour map for visualization ----
-            # model.encoders[0] is SegmentationEncoder (SegFormer-b5-Cityscapes).
-            # Input: [-1, 1]  Output: [0, 1] 3-channel colour map.
-            seg_tensor = model.encoders[0](img_tensor)   # [1, 3, H, W] in [0,1]
+            # ---- Step 1: Load + colourise the PROVIDED seg map ----
+            # No model runs here -- this is a file load + palette lookup, not a
+            # live computation. See _load_seg_map (mirrors local_seg.py exactly).
+            seg_tensor = _load_seg_map(seg_path, size, _palette, device)   # [1,3,size,size] in [0,1]
             seg_pil    = TF.to_pil_image(seg_tensor[0].cpu().float().clamp(0, 1))
 
             # ---- Step 2: Generate image (prompt-conditioned) ----
-            # cs=[img_tensor]: sample_easy() calls encoder(c) unconditionally,
-            # so SegFormer runs on img_tensor again to produce the conditioning.
-            # seg_tensor above is only for visualization — same result.
+            # cs=[seg_tensor], skip_encode=True: the PROVIDED map is used AS-IS
+            # as the conditioning signal -- no encoder runs, matching exactly
+            # how training consumes pre-saved maps (skip_encode=True there too).
             preds = model.sample(
                 prompt=[prompt],
                 num_images_per_prompt=cfg.inference.n_samples,
-                cs=[img_tensor],
+                cs=[seg_tensor],
+                skip_encode=True,
                 generator=generator,
                 cfg_mask=cfg_mask,
                 num_inference_steps=cfg.inference.get("num_inference_steps", 50),
                 guidance_scale=cfg.inference.get("guidance_scale", 7.5),
+                # Generation-quality knobs (default = no-op; see model.py
+                # sample_easy docstring). conditioning_kernel_size softens hard
+                # seg-map edges; lora_scale_start/end decays structure-conditioning
+                # strength over the denoising trajectory so late steps can lean on
+                # SD's own prior for object appearance instead of a flat map.
+                conditioning_kernel_size=cfg.inference.get("conditioning_kernel_size", 0),
+                lora_scale_start=cfg.inference.get("lora_scale_start", 1.0),
+                lora_scale_end=cfg.inference.get("lora_scale_end", 1.0),
+                lora_scale_decay_start_frac=cfg.inference.get("lora_scale_decay_start_frac", 0.3),
             )
 
             # ---- Step 2b: RAW SEG GEN (empty prompt) ----
@@ -309,30 +376,37 @@ def main(cfg):
             raw_preds = model.sample(
                 prompt=[""],
                 num_images_per_prompt=cfg.inference.n_samples,
-                cs=[img_tensor],
+                cs=[seg_tensor],
+                skip_encode=True,
                 generator=torch.Generator(device=device).manual_seed(cfg.seed),
                 cfg_mask=cfg_mask,
                 num_inference_steps=cfg.inference.get("num_inference_steps", 50),
                 guidance_scale=cfg.inference.get("guidance_scale", 7.5),
+                conditioning_kernel_size=cfg.inference.get("conditioning_kernel_size", 0),
+                lora_scale_start=cfg.inference.get("lora_scale_start", 1.0),
+                lora_scale_end=cfg.inference.get("lora_scale_end", 1.0),
+                lora_scale_decay_start_frac=cfg.inference.get("lora_scale_decay_start_frac", 0.3),
             )
 
-        # ---- Step 2c: mIoU (controllability) -----------------------------
-        # TARGET ids = the seg map used as conditioning (palette-inverted, exact,
-        # no extra model call). PREDICTION ids = SegFormer re-run on the generated
-        # image (first sample). High mIoU = the generation kept the requested
-        # class layout. Scored per image; mean over the run written to metrics.txt.
-        target_ids = seg_ids_from_colormap(seg_tensor[0], _palette)   # [size,size]
-        gen_t = (TF.to_tensor(preds[0].resize((size, size)).convert("RGB"))
-                 .unsqueeze(0).to(device) * 2.0 - 1.0)                # [1,3,H,W] [-1,1]
-        with torch.no_grad():
-            pred_ids = model.encoders[0].label_ids(gen_t)[0]          # [size,size]
-        miou = compute_miou(pred_ids, target_ids, num_classes=int(_palette.shape[0]))
-        mious.append(miou)
-        miou_lines.append(f"{stem}: {miou:.4f}")
-        print(f"  mIoU  : {miou:.4f}")
+        # ---- Step 2c: mIoU (controllability) -- ONLY if the encoder can score it --
+        # TARGET ids = the PROVIDED seg map (palette-inverted, exact, no extra
+        # model call). PREDICTION ids = the encoder re-run on the GENERATED image
+        # (first sample) -- this is scoring the OUTPUT, unrelated to "computing
+        # the input map live" (which this script no longer does at all). Skipped
+        # entirely when the encoder has no live path (e.g. Grounded-SAM Tier 1).
+        if _live_seg_available:
+            target_ids = seg_ids_from_colormap(seg_tensor[0], _palette)   # [size,size]
+            gen_t = (TF.to_tensor(preds[0].resize((size, size)).convert("RGB"))
+                     .unsqueeze(0).to(device) * 2.0 - 1.0)                # [1,3,H,W] [-1,1]
+            with torch.no_grad():
+                pred_ids = _enc0.label_ids(gen_t)[0]                      # [size,size]
+            miou = compute_miou(pred_ids, target_ids, num_classes=int(_palette.shape[0]))
+            mious.append(miou)
+            miou_lines.append(f"{stem}: {miou:.4f}")
+            print(f"  mIoU  : {miou:.4f}")
 
         # ---- Step 3: Save outputs ----------------------------------------
-        orig_display = TF.to_pil_image(((img_tensor[0].cpu().float() + 1) / 2).clamp(0, 1))
+        orig_display = orig_pil.resize((size, size)).convert("RGB")
 
         save_generated_only = cfg.inference.get("save_generated_only", False)
 
@@ -341,7 +415,7 @@ def main(cfg):
 
             if save_generated_only:
                 # Mirror the exact path from the JSON so folder structure is preserved.
-                rel = Path(entry["image_path"])
+                rel = Path(entry["seg_path"])
                 out_path = output_dir / rel.parent / f"{rel.stem}{suffix}{rel.suffix}"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 pred_pil.resize((size, size)).save(out_path, quality=95)

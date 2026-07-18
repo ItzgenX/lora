@@ -63,6 +63,28 @@ conditioning under identical conditions. If the datasets, batch sizes, or traini
 differ, the comparison becomes unfair. Keep these numbers the same as depth and only
 change what segmentation genuinely requires (encoder, data paths).
 
+**Don't hand-compute this table for your own run — use the advisor script.**
+The numbers above are a worked example, not a value to copy blindly.
+`recommend_training_params.py` (repo root) counts your REAL manifest line counts
+and detects your GPU's VRAM, then prints the matching `batch_size` /
+`gradient_accumulation_steps` / `steps_per_epoch` / `val_steps` / `ckpt_steps`
+for the dataset that's actually on the machine you run it on — see §10 for the
+exact command. `--data_dir` is required (no default) because the segmentation
+dataset (real-world photos) and the Grounded-SAM dataset (CARLA renders) are
+different datasets with different counts — run it once per pipeline.
+
+**`epochs` is an upper bound, not a target — early stopping already decides
+the real stop point.** `early_stop_patience: 3` is set in the shared base
+config `configs/train_seg.yaml` (used by both `experiment=train_seg` and
+`experiment=train_grounded_sam`, since both run through `seg_training.py`):
+if val/loss produces no new best for 3 full epochs, training stops itself
+(`seg_training.py`, the "EARLY STOPPING" block near the end of the epoch
+loop) — `best_model/` is already saved at that point, so nothing is lost.
+Neither pipeline has an empirical convergence curve yet at real (60K-image)
+scale, so don't try to predict the exact right epoch count — set `epochs` to
+a generous ceiling (e.g. 15-20) and let `early_stop_patience` do the actual
+work of stopping when val/loss plateaus.
+
 ---
 
 ## 2. Every parameter in `configs/experiment/train_seg.yaml`
@@ -422,18 +444,22 @@ This generates a side-by-side table from both runs' TensorBoard logs:
 ## 9. Quick reference — config values for 60K / 4K / 4K
 
 ```yaml
-# Copy-paste ready config for 60,000 train / 4,000 val / 4,000 test
-# Single 12 GB GPU (effective batch = 16)
+# WORKED EXAMPLE for 60,000 train / 4,000 val / 4,000 test on a 12 GB GPU
+# (effective batch = 16). This is illustrative, not a value to paste blindly —
+# see §10 for the command that computes YOUR actual numbers from YOUR real
+# manifests once they're in place at data/seg_training/*.jsonl.
 # Run: python seg_training.py experiment=train_seg
-# IMPORTANT: run seg_map_calculations.py --data_dir data/ FIRST
 
 size: 512
 learning_rate: 1.0e-4
 lr_scheduler: cosine
 lr_warmup_steps: 500               # 13% of first epoch (500 / 3750)
-epochs: 5                          # 5 × 3750 = 18750 total optimizer steps
+epochs: 15                         # UPPER BOUND — early_stop_patience:3 (below)
+                                    # decides the real stop point, see §1
 gradient_checkpointing: true       # required for 12 GB GPU
 gradient_accumulation_steps: 4     # 4 bsz × 4 accum = 16 effective batch
+early_stop_patience: 3             # inherited from configs/train_seg.yaml base —
+                                    # no new best val/loss for 3 epochs -> stop
 data:
   batch_size: 4                    # max for 12 GB with checkpointing + bf16
   val_batch_size: 4
@@ -466,12 +492,17 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes   # b5, NOT b0
 
 ## 10. The full segmentation training checklist
 
-Before running `python seg_training.py experiment=train_seg`:
+Before running `python seg_training.py experiment=train_seg` **at real,
+full-capacity scale** (not the local 913-image smoke-test set):
 
 ```
 [ ] Stage C complete: seg_map_calculations.py ran without errors
-      → data/raw_seg/ exists with 913 PNG files (or your N files)
+      → data/raw_seg/ exists with your real PNG count
       → data/seg_training/train.jsonl, val.jsonl, test.jsonl all show [PASS]
+      → these are the REAL manifests, placed at data/seg_training/ on the
+        machine that will actually train (this is DIFFERENT from the local
+        913-image data/train.jsonl/val.jsonl/test.jsonl test set, which is
+        not real training data and needs no action)
 
 [ ] Model present: checkpoints/local_models/segformer-b5-cityscapes/ exists
       → contains config.json, preprocessor_config.json, pytorch_model.bin
@@ -479,15 +510,30 @@ Before running `python seg_training.py experiment=train_seg`:
 
 [ ] Base model present: checkpoints/local_models/stable-diffusion-v1-5/ exists
 
-[ ] Source JSONL present: data/train.jsonl, data/val.jsonl exist
-      → these are the split manifests (key = "source")
-
 [ ] Config correct: configs/experiment/train_seg.yaml has
       → json_file: data/seg_training/train.jsonl   (not depth_training)
       → val_json_file: data/seg_training/val.jsonl  (not test.jsonl)
       → tag: seg
 
+[ ] Hyperparameters sized for YOUR real dataset — run the advisor script,
+    on the machine where the real manifests live (it only reads local
+    files + detects the local GPU, so it must run there, not here):
+      python recommend_training_params.py --data_dir data/seg_training --epochs 15
+    Paste the printed batch_size / gradient_accumulation_steps / val_steps /
+    ckpt_steps into configs/experiment/train_seg.yaml. `--epochs` here is
+    the ceiling you're choosing to allow (§1) — early_stop_patience:3
+    (already set in the shared base config, no action needed) decides when
+    training actually stops.
+
 [ ] (Optional) Smoke test passes:
     python seg_training.py experiment=train_seg \
       epochs=1 val_steps=10 ckpt_steps=20 n_grid_images=2 "data.workers=0"
 ```
+
+**The same checklist applies to Grounded-SAM**, substituting
+`data/grounded_sam/` for `data/seg_training/`, `train_grounded_sam.yaml` for
+`train_seg.yaml`, and `--data_dir data/grounded_sam` for the advisor script —
+see [GROUNDED_SAM.md](GROUNDED_SAM.md) for its own copy of this table. The
+two pipelines have **different real dataset sizes** (different image
+domains — real-world photos vs. CARLA renders), so run the advisor script
+once per pipeline; don't reuse one pipeline's numbers for the other.

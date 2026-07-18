@@ -91,12 +91,20 @@ lora:
       model: ${seg_model_name}   # default; seg_inference.py overrides to seg_model_path when local_files_only=true
 
 # ---- Inference parameters -------------------------------------------------
+# CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED
+# segmentation map -- it never computes one live from a raw photo. seg_maps/
+# seg_path is REQUIRED; images/raw_image_path is now OPTIONAL and used ONLY
+# to display the ORIGINAL panel (no model ever runs on it). See seg_inference.py
+# module docstring for the full reasoning.
 inference:
   # Input — choose ONE:
-  images:    []         # list of image paths, e.g. ["data/raw/000417/raw_image.jpg"]
-  json_file: null       # OR path to JSON manifest (raw_image_path + prompt per entry)
+  seg_maps:  []         # list of PRE-COMPUTED seg map paths (REQUIRED for this mode),
+                         # e.g. ["data/raw_seg/000417/000417_seg_map.png"]
+  images:    []         # OPTIONAL, display-only, matched by index to seg_maps
+  json_file: null       # OR path to JSON manifest: seg_path (required) +
+                         # raw_image_path (optional, display only) + prompt per entry
 
-  prompts:   []         # prompts for 'images' list mode; leave empty to use JSON prompts
+  prompts:   []         # prompts for 'seg_maps' list mode; leave empty to use JSON prompts
 
   # Output:
   output_dir: outputs/inference/seg/results     # relative to repo root (resolved in seg_inference.py)
@@ -110,6 +118,27 @@ inference:
   n_samples:           1    # number of generated images per input image
   num_inference_steps: 50   # diffusion denoising steps
   guidance_scale:      7.5  # CFG scale
+
+  # Generation-quality knobs (see model.py sample_easy docstring for the full
+  # reasoning). Defaults below are all NO-OPS — identical output to before these
+  # existed. Tune these to fight the "fits the shape but doesn't know how it
+  # looks" artifact (flat seg-map regions carry no appearance information):
+  #   conditioning_kernel_size: odd int (e.g. 3, 5) box-blurs the seg COLOUR MAP
+  #     before the mapper, softening hard silhouette edges. Does NOT add
+  #     information to a region's flat interior — pairs with lora_scale decay
+  #     below for that. 0 = off (default).
+  conditioning_kernel_size: 0
+  #   lora_scale_start/end: decay the structure-LoRA's conditioning strength
+  #     over the denoising trajectory — full grip (scale_start) for the early
+  #     LAYOUT-deciding steps, fading to scale_end for the late DETAIL-deciding
+  #     steps, so the model can lean on its own trained prior for appearance
+  #     instead of a flat conditioning signal. Equal start/end = off (default).
+  #     Try e.g. lora_scale_start=1.0, lora_scale_end=0.4 as a first experiment.
+  lora_scale_start: 1.0
+  lora_scale_end: 1.0
+  #   lora_scale_decay_start_frac: fraction of steps (0..1) held at full
+  #     lora_scale_start before decay begins (0.3 = first 30% of steps).
+  lora_scale_decay_start_frac: 0.3
 
 hydra:
   run:

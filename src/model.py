@@ -343,6 +343,72 @@ class ModelBase(ABC, nn.Module):
 
         return lora_sd
 
+    def make_lora_scale_callback(
+        self,
+        name: str,
+        num_inference_steps: int,
+        scale_start: float,
+        scale_end: float,
+        decay_start_frac: float,
+    ):
+        """
+        Build a diffusers `callback_on_step_end` that DECAYS a struct-LoRA's grip
+        on the image as denoising proceeds, instead of holding it at full strength
+        for all 50 steps.
+
+        WHY THIS EXISTS: a diffusion model decides layout in the EARLY denoising
+        steps and fine detail/texture in the LATE steps. Our structure conditioning
+        (see NewStructLoRAConv.forward in src/lora.py) is a per-pixel FiLM shift/
+        scale applied with FULL force at every single step. Inside a flat-colour
+        segmentation region (e.g. the interior of a car), that signal carries NO
+        information beyond "this class is here" -- so forcing full strength through
+        the late, detail-deciding steps gives the model no room to use its own
+        trained prior for what the object should actually look like, producing the
+        "fits the shape but doesn't know how it looks" artifact. Decaying the scale
+        after the layout is locked in (the early steps) lets the LATE steps lean on
+        SD's own knowledge for appearance while keeping the early-decided layout.
+        This mirrors ControlNet's well-known control_guidance_start/end idea.
+
+        MECHANISM: every targeted conv layer in the UNet is its OWN
+        NewStructLoRAConv instance (self.lora_layers[name] collects all of them —
+        see add_lora_to_unet). Each instance reads its own `self.lora_scale`
+        (a plain float, not a tensor) fresh on every forward() call — see
+        `return w_out + b_out * self.lora_scale` in src/lora.py. So mutating that
+        attribute between denoising steps changes behaviour on the VERY NEXT UNet
+        call, with no architecture change needed.
+
+        SCHEDULE: full `scale_start` for the first `decay_start_frac` fraction of
+        steps (locks in layout), then LINEAR decay down to `scale_end` for the
+        remaining steps (frees up appearance). decay_start_frac=1.0 or
+        scale_start==scale_end disables decay entirely (constant scale, today's
+        behaviour) -- the caller (sample_easy) only attaches this callback when a
+        real decay is requested, so default generations are byte-for-byte unchanged.
+
+        Args:
+          name               : LoRA task name whose layers to decay (e.g. "struct").
+          num_inference_steps: must match what's passed to the pipeline call, so
+                                the schedule's step fractions line up correctly.
+          scale_start         : conditioning strength for the early "layout" steps.
+          scale_end            : conditioning strength for the late "detail" steps.
+          decay_start_frac     : fraction of steps (0..1) to hold at scale_start
+                                 before decay begins.
+        """
+        layers = self.lora_layers.get(name, [])
+        decay_start_step = int(decay_start_frac * num_inference_steps)
+        span = max(num_inference_steps - decay_start_step - 1, 1)   # avoid div-by-zero
+
+        def callback(pipe, step_index: int, timestep, callback_kwargs: dict) -> dict:
+            if step_index < decay_start_step:
+                scale = scale_start
+            else:
+                frac = min((step_index - decay_start_step) / span, 1.0)
+                scale = scale_start + (scale_end - scale_start) * frac
+            for layer in layers:
+                layer.lora_scale = scale
+            return callback_kwargs   # we mutate our own modules, not diffusers' tensors
+
+        return callback
+
     @abstractmethod
     def get_input(self, imgs: torch.Tensor, prompts: list[str]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         raise NotImplementedError()
@@ -655,8 +721,42 @@ class SD15(ModelBase):
         cfg_mask: list[bool] | None = None,
         prompt_offset_step: int = 0,
         # dtype=torch.float32,
+        conditioning_kernel_size: int = 0,
+        lora_scale_start: float = 1.0,
+        lora_scale_end: float = 1.0,
+        lora_scale_decay_start_frac: float = 0.3,
+        lora_scale_name: str = "struct",
+        skip_encode: bool = False,
         **kwargs,
     ):
+        """
+        skip_encode: when True, `cs` is already the conditioning signal itself
+          (e.g. a pre-computed segmentation colour map) and is used AS-IS —
+          the encoder is never called. When False (default), `cs` is the raw
+          input the encoder consumes to PRODUCE the conditioning signal (e.g. a
+          photo that SegFormer segments live). Mirrors sample_custom's existing
+          skip_encode param and the skip_encode path in forward()/training —
+          this is what lets inference use a PROVIDED map instead of computing
+          one on the fly, exactly like training already does with saved maps.
+
+        conditioning_kernel_size, lora_scale_* : OPTIONAL generation-quality knobs
+          (both default to a no-op, so existing calls are byte-for-byte unchanged).
+
+          conditioning_kernel_size: box-blur kernel applied to the segmentation
+            COLOUR MAP (`cond`, right after the encoder produces it) before it
+            reaches the mapper. Softens hard silhouette EDGES -- it does NOT add
+            information to a flat region's interior (averaging a solid colour with
+            itself is still that colour), so pair it with lora_scale decay below
+            for the interior problem; use this one for crisp/artificial-looking
+            object boundaries. 0 = off. Must be odd if set (e.g. 3, 5).
+
+          lora_scale_start/end/decay_start_frac: decay the struct-LoRA's grip on
+            the image over the course of denoising -- see make_lora_scale_callback
+            for the full reasoning (early steps decide layout, late steps decide
+            appearance; forcing full conditioning through the late steps starves
+            the model of its own prior for "what this should look like"). Equal
+            start/end (the default) disables decay -- no callback is attached.
+        """
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -695,7 +795,17 @@ class SD15(ModelBase):
                 c = torch.cat([c, c])
             else:
                 c = torch.cat([neg_c, c])
-            cond = encoder(c)
+            cond = c if skip_encode else encoder(c)
+
+            # Softening kernel: applied to `cond` (always the actual seg COLOUR
+            # MAP -- either `c` directly when skip_encode=True, or the encoder's
+            # output otherwise), never to a raw input photo. Box blur via
+            # avg_pool2d avoids a new dependency; count_include_pad=False keeps
+            # edge pixels correct.
+            if conditioning_kernel_size and conditioning_kernel_size > 1:
+                k = conditioning_kernel_size
+                cond = F.avg_pool2d(cond, kernel_size=k, stride=1, padding=k // 2, count_include_pad=False)
+
             mapped_cond = mapper(cond)
             # if isinstance(mapped_cond, tuple) or isinstance(mapped_cond, list):
             #     mapped_cond = [mc.to(dtype) for mc in mapped_cond]
@@ -703,6 +813,34 @@ class SD15(ModelBase):
             #     mapped_cond = mapped_cond.to(dtype)
 
             dp.set_batch(mapped_cond)
+
+        # Conditioning-strength decay: only attach the callback (and only touch
+        # module state at all) when a real decay is requested, so a default call
+        # has ZERO behaviour change and zero extra overhead.
+        decay_layers = self.lora_layers.get(lora_scale_name, [])
+        if lora_scale_start != lora_scale_end and decay_layers:
+            num_inference_steps = kwargs.get("num_inference_steps", 50)
+            original_scales = [layer.lora_scale for layer in decay_layers]   # restore after, see finally
+            kwargs["callback_on_step_end"] = self.make_lora_scale_callback(
+                lora_scale_name, num_inference_steps,
+                lora_scale_start, lora_scale_end, lora_scale_decay_start_frac,
+            )
+            try:
+                images = self.pipe(
+                    prompt=prompt,
+                    num_images_per_prompt=num_images_per_prompt,
+                    generator=generator,
+                    **kwargs,
+                ).images
+            finally:
+                # MUST restore: these are the SAME module instances used by
+                # training's forward pass and by sample_custom. Leaving them at
+                # the decayed end-of-schedule value would silently weaken the
+                # next unrelated call (a monitoring grid, or worse, a training
+                # step) that never asked for decay.
+                for layer, scale in zip(decay_layers, original_scales):
+                    layer.lora_scale = scale
+            return images
 
         return self.pipe(
             prompt=prompt,

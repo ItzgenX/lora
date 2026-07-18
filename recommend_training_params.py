@@ -2,8 +2,10 @@
 recommend_training_params.py
 -----------------------------
 Standalone advisor: detects your GPU and reads your real dataset manifests,
-then PRINTS a recommended set of training hyperparameters for
-configs/experiment/train_grounded_sam.yaml.
+then PRINTS a recommended set of training hyperparameters for EITHER
+configs/experiment/train_seg.yaml (SegFormer) OR
+configs/experiment/train_grounded_sam.yaml (Grounded-SAM) -- run it once per
+pipeline, pointed at that pipeline's own data_dir (see below).
 
 This script NEVER writes or modifies any file. You review the recommendation
 and paste the values into the YAML yourself.
@@ -15,10 +17,15 @@ than a value that silently depends on which GPU happened to run it. This
 script gives you the same calculation, but as a one-time, reviewed-by-you
 recommendation instead of hidden runtime behaviour.
 
+--data_dir has NO default and is REQUIRED: seg (SegFormer, real-world photos)
+and grounded_sam (CARLA renders) are different datasets with different image
+counts, so a single default would silently give one pipeline the other's
+numbers. Run this once per pipeline.
+
 QUICK COMMANDS (run from repo root with conda loradapter env active):
-  python recommend_training_params.py
+  python recommend_training_params.py --data_dir data/seg_training --epochs 10
   python recommend_training_params.py --data_dir data/grounded_sam --epochs 10
-  python recommend_training_params.py --device cuda:1
+  python recommend_training_params.py --data_dir data/grounded_sam --device cuda:1
 
 NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
 ~12GB GPU is MEASURED (real training runs, this project, 2026-07-02). For any
@@ -77,10 +84,12 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--data_dir", type=str, default="data/depth_training",
+        "--data_dir", type=str, default=None, required=True,
         help="Folder with train.jsonl/val.jsonl/test.jsonl to count real images from. "
-             "Default: data/depth_training. seg_training/ has identical counts "
-             "(same source split), so one run covers both YAMLs.",
+             "REQUIRED, no default -- seg (SegFormer, real-world photos) and "
+             "grounded_sam (CARLA renders) are DIFFERENT datasets with different "
+             "image counts, so each pipeline needs its own run: "
+             "--data_dir data/seg_training  or  --data_dir data/grounded_sam.",
     )
     parser.add_argument("--epochs", type=int, default=5, help="Epochs to compute step totals for. Default: 5.")
     parser.add_argument("--device", type=str, default=None, help="cuda / cuda:N / cpu. Default: auto-detect.")
@@ -192,7 +201,8 @@ def main():
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()
     print("=" * 70)
-    print("PASTE INTO configs/experiment/train_grounded_sam.yaml")
+    print(f"PASTE INTO configs/experiment/train_seg.yaml OR train_grounded_sam.yaml")
+    print(f"(whichever pipeline --data_dir={args.data_dir} belongs to)")
     print("=" * 70)
     print(f"gradient_checkpointing: true")
     print(f"gradient_accumulation_steps: {accum}")
