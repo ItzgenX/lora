@@ -31,9 +31,9 @@ script answers two more questions that need the WHOLE dataset, not a sample:
 
 USAGE (run against each split; repeat for train/val/test)
 ------
-    python scan_seg_map_classes.py --json_file data/seg_training/train.json
-    python scan_seg_map_classes.py --json_file data/seg_training/val.json
-    python scan_seg_map_classes.py --json_file data/seg_training/test.json
+    python scan_seg_map_classes.py --json_file data/grounded_sam/train.json
+    python scan_seg_map_classes.py --json_file data/grounded_sam/val.json
+    python scan_seg_map_classes.py --json_file data/grounded_sam/test.json
 
 Add --limit N to scan only the first N entries for a quick smoke check
 before committing to a full 60K-image scan.
@@ -50,7 +50,7 @@ from PIL import Image
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--json_file", required=True, help="manifest to scan, e.g. data/seg_training/train.json")
+    ap.add_argument("--json_file", required=True, help="manifest to scan, e.g. data/grounded_sam/train.json")
     ap.add_argument("--seg_key", default="seg_path", help="JSON key pointing at the seg map file (default: seg_path)")
     ap.add_argument("--limit", type=int, default=None, help="only scan the first N entries (quick check)")
     args = ap.parse_args()

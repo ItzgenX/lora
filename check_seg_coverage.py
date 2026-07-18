@@ -30,10 +30,10 @@ WHAT YOU PASS IN
                     matches -- prefer an actual PNG from the pipeline output
                     when you can, and treat (b) results as approximate.
 --json_file : the TRAINING manifest to compare against (e.g.
-              data/seg_training/train.json) -- same file Stage D reads.
+              data/grounded_sam/train.json) -- same file Stage D reads.
 --cache_file: OPTIONAL. Precomputing per-class coverage for tens of
               thousands of training images is the slow part; pass a path
-              (e.g. data/seg_training/train_coverage_cache.npz) to save it
+              (e.g. data/grounded_sam/train_coverage_cache.npz) to save it
               once and reuse instantly on every later query against the same
               manifest. Deleted/ignored automatically if the manifest's
               entry count no longer matches (e.g. you rebuilt the manifest).
@@ -42,8 +42,8 @@ USAGE
 ------
     python check_seg_coverage.py \\
         --seg_map path/to/carla_frame_seg.png \\
-        --json_file data/seg_training/train.json \\
-        --cache_file data/seg_training/train_coverage_cache.npz
+        --json_file data/grounded_sam/train.json \\
+        --cache_file data/grounded_sam/train_coverage_cache.npz
 """
 
 import argparse
@@ -144,7 +144,7 @@ def build_or_load_training_distribution(json_file: Path, cache_file: Path | None
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seg_map", required=True, help="query seg map to check (raw ID PNG or RGB colourised)")
-    ap.add_argument("--json_file", required=True, help="training manifest, e.g. data/seg_training/train.json")
+    ap.add_argument("--json_file", required=True, help="training manifest, e.g. data/grounded_sam/train.json")
     ap.add_argument("--cache_file", default=None, help="optional .npz cache path to reuse across queries")
     args = ap.parse_args()
 

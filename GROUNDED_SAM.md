@@ -257,10 +257,12 @@ prompts, none of which are set up yet. Deliberately deferred.
    `--epochs 15` here is an upper-bound ceiling, not a prediction: early
    stopping is already active for this pipeline too —
    `early_stop_patience: 3` lives in the shared base `configs/train_seg.yaml`
-   (both `experiment=train_seg` and `experiment=train_grounded_sam` run
-   through the same `seg_training.py`, which is hard-wired to that base
-   config), so training stops itself once val/loss stops improving for 3
-   epochs — `best_model/` is already saved at that point. Neither pipeline
+   (confusingly named — it's `seg_training.py`'s base config on BOTH the
+   `segformer` and `grounded_sam` branches, hard-wired via
+   `@hydra.main(config_name="train_seg")`; `experiment=train_grounded_sam`
+   just layers overrides on top of it here), so training stops itself once
+   val/loss stops improving for 3 epochs — `best_model/` is already saved at
+   that point. Neither pipeline
    has an empirical convergence curve yet at real scale, so treat `epochs`
    as "how long am I willing to let it run," not a number to get exactly right.
 
