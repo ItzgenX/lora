@@ -530,10 +530,7 @@ full-capacity scale** (not the local 913-image smoke-test set):
       epochs=1 val_steps=10 ckpt_steps=20 n_grid_images=2 "data.workers=0"
 ```
 
-**The same checklist applies to Grounded-SAM**, substituting
-`data/grounded_sam/` for `data/seg_training/`, `train_grounded_sam.yaml` for
-`train_seg.yaml`, and `--data_dir data/grounded_sam` for the advisor script —
-see [GROUNDED_SAM.md](GROUNDED_SAM.md) for its own copy of this table. The
-two pipelines have **different real dataset sizes** (different image
-domains — real-world photos vs. CARLA renders), so run the advisor script
-once per pipeline; don't reuse one pipeline's numbers for the other.
+(Grounded-SAM has its own copy of this checklist on the `grounded_sam` branch
+of this repo — a separate pipeline with a different real dataset, real-world
+photos here vs. CARLA renders there, so its hyperparameters are sized
+separately and shouldn't be reused across the two.)

@@ -2,11 +2,11 @@
 
 **Scope**: this doc answers exactly one question, in full depth: **where does
 LoRA actually sit inside the model, and how does the segmentation/depth
-conditioning signal reach it?** It applies identically to the SegFormer and
-Grounded-SAM pipelines (see [SEGMENTATION.md](SEGMENTATION.md) and
-[GROUNDED_SAM.md](GROUNDED_SAM.md)) — both go through the exact same
-`src/lora.py` / `src/model.py` code, only the encoder that produces the
-conditioning map differs.
+conditioning signal reach it?** It applies identically to any segmentation
+source that plugs into this pipeline's encoder-slot contract — SegFormer here
+(see [SEGMENTATION.md](SEGMENTATION.md)), or Grounded-SAM on its own branch of
+this repo — both go through the exact same `src/lora.py` / `src/model.py`
+code, only the encoder that produces the conditioning map differs.
 
 Every claim below is a direct citation to this repo's own code, re-read and
 verified line-by-line while writing this doc (not copy-pasted from a
@@ -328,10 +328,10 @@ independently; the segmentation/depth pipelines use only the first:
 | **Cross-attention style LoRA** | `style.yaml` (`SimpleLoraLinear`, `adaption_mode: only_cross`) | attention `to_k`/`to_v` inside `attn2` (cross-attention to text) | Same FiLM-residual math as §1, but on a `nn.Linear`, modulated by a *single pooled vector* (CLIP image embedding via `SimpleMapper`), not a spatial map |
 | **ControlNet** (optional, `use_controlnet=True`) | separately, when enabled (`src/model.py:88-103`) | UNet's down-block and mid-block **residual connections**, via a full second `ControlNetModel` (`lllyasviel/sd-controlnet-depth`) | Diffusers' own stock ControlNet mechanism — an entirely separate pretrained network, not a LoRA at all; produces residuals that diffusers adds into the UNet's skip connections. Orthogonal to (can be combined with) the LoRA mechanism |
 
-The segmentation and Grounded-SAM pipelines documented in `SEGMENTATION.md`
-and `GROUNDED_SAM.md` use **only** the first row. `use_controlnet` and
-`style.yaml` are separate, currently-unused-by-seg/grounded_sam capabilities
-that exist in this shared codebase — mentioned here only so their code isn't
+The segmentation pipeline documented in `SEGMENTATION.md` (and Grounded-SAM,
+on its own branch) uses **only** the first row. `use_controlnet` and
+`style.yaml` are separate, currently-unused-by-segmentation capabilities that
+exist in this shared codebase — mentioned here only so their code isn't
 mistaken for part of the segmentation conditioning path.
 
 ---

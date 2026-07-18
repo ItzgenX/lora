@@ -9,12 +9,10 @@ checkpoints/local_models/ to your training machine and set
 local_files_only: true in all configs.
 
 Models downloaded:
-  1. stable-diffusion-v1-5      -- base diffusion model (backbone, always frozen)
+  1. stable-diffusion-v1-5       -- base diffusion model (backbone, always frozen)
   2. dpt-hybrid-midas            -- stock upstream depth encoder (src/annotators/midas.py)
-  3. taesd                       -- Tiny AutoEncoder (fast VAE preview, optional)
-
-  (Grounded-SAM segmentation trains on PRE-SAVED maps generated externally, so
-   no live segmentation model is downloaded here — see GROUNDED_SAM.md.)
+  3. segformer-b5-cityscapes     -- live segmentation encoder (src/encoders/seg_encoder.py)
+  4. taesd                       -- Tiny AutoEncoder (fast VAE preview, optional)
 
 NOTE — DPTImageProcessor for the MiDaS model is saved but not used at runtime
   (DepthEstimator does manual preprocessing; the processor call is commented out
@@ -33,6 +31,7 @@ from diffusers import StableDiffusionPipeline, AutoencoderTiny
 from transformers import (
     DPTForDepthEstimation,
     DPTImageProcessor,
+    SegformerForSemanticSegmentation,
 )
 
 # --- Hugging Face authentication -------------------------------------------- #
@@ -53,7 +52,7 @@ def banner(title: str):
 
 
 # ── 1. Stable Diffusion 1.5 (base model, always frozen) ──────────────────── #
-banner("1/4  Stable Diffusion 1.5")
+banner("1/5  Stable Diffusion 1.5")
 sd_pipe = StableDiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
     token=HF_TOKEN or None,
@@ -71,7 +70,7 @@ print(f"  Saved -> {sd_path}")
 #   preprocessing ((x+1)/2 -> better_resize -> direct model call).
 #   We still save the processor here so the checkpoint folder is complete and
 #   no tool ever complains about a missing preprocessor_config.json.
-banner("2/4  MiDaS DPT-Hybrid (depth encoder)")
+banner("2/5  MiDaS DPT-Hybrid (depth encoder)")
 midas_model = DPTForDepthEstimation.from_pretrained(
     "Intel/dpt-hybrid-midas",
     token=HF_TOKEN or None,
@@ -87,8 +86,23 @@ print(f"  Saved -> {midas_path}")
 print(f"  (DPTImageProcessor saved for completeness — not used at runtime)")
 
 
-# ── 3. Tiny VAE / TAESD (fast VAE preview — optional) ────────────────────── #
-banner("3/4  Tiny VAE (TAESD)")
+# ── 3. SegFormer-b5-Cityscapes (live segmentation encoder) ──────────────── #
+#
+# LOCKED MODEL: b5, NOT b0 (references.md §9 / SEGMENTATION.md). No separate
+# image processor is downloaded — SegmentationEncoder (src/encoders/seg_encoder.py)
+# does not load one at runtime, only SegformerForSemanticSegmentation itself.
+banner("3/5  SegFormer-b5-Cityscapes (segmentation encoder)")
+seg_model = SegformerForSemanticSegmentation.from_pretrained(
+    "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
+    token=HF_TOKEN or None,
+)
+seg_path = os.path.join(LOCAL_MODEL_DIR, "segformer-b5-cityscapes")
+seg_model.save_pretrained(seg_path)
+print(f"  Saved -> {seg_path}")
+
+
+# ── 4. Tiny VAE / TAESD (fast VAE preview — optional) ────────────────────── #
+banner("4/5  Tiny VAE (TAESD)")
 tiny_vae = AutoencoderTiny.from_pretrained(
     "madebyollin/taesd",
     token=HF_TOKEN or None,
@@ -96,10 +110,6 @@ tiny_vae = AutoencoderTiny.from_pretrained(
 vae_path = os.path.join(LOCAL_MODEL_DIR, "taesd")
 tiny_vae.save_pretrained(vae_path)
 print(f"  Saved -> {vae_path}")
-
-
-# (SegFormer download removed — Grounded-SAM segmentation trains on pre-saved
-#  maps generated externally; no live segmentation model is needed here.)
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -111,6 +121,7 @@ print("  Folder structure:")
 for name in [
     "stable-diffusion-v1-5",
     "dpt-hybrid-midas",
+    "segformer-b5-cityscapes",
     "taesd",
 ]:
     path = os.path.join(LOCAL_MODEL_DIR, name)

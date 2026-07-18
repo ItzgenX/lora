@@ -185,14 +185,13 @@ def _save_checkpoint_segmentation_images(
     prompts, images = [], []
     psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
     mious = []              # controllability metric, FIXED scenes only (see below)
-    # Use the EXACT palette the dataset colourised with (Cityscapes SSOT for the
-    # SegFormer pipeline; the Grounded-SAM class palette when a classes_file is
-    # configured). Taking it from the dataset guarantees it matches the maps.
+    # Use the EXACT palette the dataset colourised with (Cityscapes SSOT).
+    # Taking it from the dataset guarantees it matches the maps.
     _palette = val_dataset.seg_palette.to(device)   # ID<->colour lookup
     # The mIoU controllability metric segments the GENERATED image live, so it
-    # needs a working live segmenter. The Grounded-SAM Tier-1 encoder is a
-    # training-only slot filler (live_available=False) -> skip mIoU for it.
-    # SegmentationEncoder has no such attr -> defaults True -> mIoU runs as before.
+    # needs a working live segmenter. Any encoder without one sets
+    # live_available=False and mIoU is skipped for it; SegmentationEncoder has
+    # no such attr -> defaults True -> mIoU runs as before.
     _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
     _live_seg = getattr(_enc0, "live_available", True)
 

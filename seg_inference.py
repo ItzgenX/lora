@@ -9,9 +9,10 @@ SegFormer live on an input photo to produce the conditioning map (mirroring the
 paper's original depth pipeline). That's gone: now you must supply `seg_path`
 (a pre-computed class-ID PNG, same format seg_map_calculations.py saves and
 training already reads), exactly like training does via skip_encode=True. This
-also means the script now works identically for ANY segmentation source
-(SegFormer or Grounded-SAM) since neither is asked to run live anymore — see
-GROUNDED_SAM.md.
+also means the script works identically for any segmentation source that
+plugs into this encoder-slot contract, not just SegFormer — a source with no
+live path at all (e.g. a Grounded-SAM-style encoder, maintained on its own
+branch of this repo) needs no special-casing here.
 
 This script:
   1. Loads the SD 1.5 base model + trained LoRA/mapper from a checkpoint.
@@ -22,10 +23,10 @@ This script:
   3. Saves a 4-panel grid (ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN) per image
      so you can visually evaluate quality and pick the best checkpoint.
   4. mIoU (controllability metric) is scored ONLY if the loaded encoder can
-     itself segment the GENERATED image (`encoder.live_available` — see
-     src/encoders/grounded_sam_encoder.py's Tier-1 GroundedSamEncoder, which
-     cannot and is skipped automatically). This is scoring the OUTPUT after
-     generation, a separate thing from "computing the conditioning map live."
+     itself segment the GENERATED image (`encoder.live_available` — an encoder
+     with no live path sets this False and is skipped automatically). This is
+     scoring the OUTPUT after generation, a separate thing from "computing the
+     conditioning map live."
 
 INPUT OPTIONS — SAME SCHEMA training's manifests already use:
   a) JSON manifest file (recommended) — each entry needs "seg_path" (required),
@@ -295,9 +296,8 @@ def main(cfg):
     # metrics.txt at the end. See src/utils.py compute_miou.
     # ONLY meaningful if the loaded encoder can itself segment the GENERATED
     # image (scoring output quality, unrelated to "computing the input map
-    # live" -- that's what this file no longer does). The Grounded-SAM Tier-1
-    # slot filler (src/encoders/grounded_sam_encoder.py) cannot do this
-    # (live_available=False), so it's skipped automatically -- no crash.
+    # live" -- that's what this file no longer does). An encoder with no live
+    # path sets live_available=False, so it's skipped automatically -- no crash.
     _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
     _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
     _live_seg_available = getattr(_enc0, "live_available", True)

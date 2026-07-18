@@ -890,8 +890,10 @@ every direction).
 
 Both default to no-op values (`0`, and `lora_scale_start == lora_scale_end`), so
 existing generations are byte-for-byte unchanged unless explicitly configured.
-Architecture-level (lives in shared `model.py`), so it applies identically to
-Grounded-SAM once its live encoder (Tier 2, see GROUNDED_SAM.md) exists.
+Architecture-level (lives in shared `model.py`, see
+[LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md)), so it applies identically to any
+segmentation source using the same conditioning mechanism (e.g. Grounded-SAM,
+maintained on its own branch).
 
 ### 10.4b Inference now ALWAYS uses a PROVIDED map — never computes one live [ADDED 2026-07-17]
 
@@ -920,14 +922,15 @@ populate the ORIGINAL display panel, never touched by any model.
   against the requested map — a different use of the encoder than "computing
   the input map," since it runs AFTER generation) is now guarded by
   `encoder.live_available`, mirroring the guard already added to
-  `seg_training.py`. It's skipped cleanly — not a crash — for encoders with no
-  live path, e.g. Grounded-SAM's Tier-1 `GroundedSamEncoder`.
+  `seg_training.py`. It's skipped cleanly — not a crash — for any encoder with
+  no live path.
 
-**Why this matters beyond SegFormer:** this makes inference identical for
-SegFormer and Grounded-SAM. Grounded-SAM's Tier-1 encoder was never able to run
-live at all — "always use a provided map" isn't a restriction added on top of a
-working live path, it's the contract Grounded-SAM already required, now applied
-uniformly. See GROUNDED_SAM.md §5.2 for what this newly unlocks.
+**Why this matters beyond SegFormer:** this makes inference identical for any
+segmentation source that plugs into this same encoder-slot contract (e.g. a
+Grounded-SAM-style encoder with no live path at all, maintained on its own
+branch of this repo) — "always use a provided map" isn't a restriction added
+on top of a working live path, it's a contract that works uniformly whether
+or not the encoder can run live.
 
 **New/changed config keys:** `inference.seg_maps` (list mode, replaces the old
 `inference.images` as the primary required input), `inference.images` (now

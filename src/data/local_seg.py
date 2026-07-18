@@ -3,15 +3,15 @@ src/data/local_seg.py
 ---------------------
 Dataset: load (RGB image, pre-computed segmentation map, prompt) triplets for
 training the segmentation-conditioned LoRAdapter. The maps are generated OFFLINE
-(on this branch, by Grounded-SAM — see GROUNDED_SAM.md) and read here directly.
+by seg_map_calculations.py and read here directly.
 
 Two segmentation-specific points, both critical:
 
   1. The saved map is a RAW CLASS-ID PNG (8-bit, values 0..N-1), NOT a colour
      image. We COLOURISE it at load time with the configured palette (the
-     Grounded-SAM class palette when a classes_file is set, otherwise the
-     Cityscapes SEG_CITYSCAPES_PALETTE fallback from src/encoders/seg_encoder.py),
-     producing a 3-channel RGB map in [0,1] via the shared seg_colorize_ids.
+     Cityscapes SEG_CITYSCAPES_PALETTE from src/encoders/seg_encoder.py, unless
+     an explicit `palette` list is passed in), producing a 3-channel RGB map
+     in [0,1] via the shared seg_colorize_ids.
 
   2. Resizing a class-ID map MUST use NEAREST interpolation. Averaging categorical
      class ids is meaningless: the mean of "road"=0 and "car"=6 is 3, a DIFFERENT
@@ -193,7 +193,6 @@ class SegJsonDataModule:
         val_workers: int = 2,
         palette: list = None,
         image_root: str = None,
-        classes_file: str = None,      # Grounded-SAM class-definition JSON (id->name/colour)
         image_key: str = "raw_image_path",
         seg_key: str = "seg_path",
         prompt_key: str = "prompt",
@@ -208,19 +207,9 @@ class SegJsonDataModule:
         self.workers        = workers
         self.val_workers    = val_workers
 
-        # PALETTE SOURCE — exactly one wins, in this order:
-        #   1. classes_file (Grounded-SAM): load the user's class set -> palette.
-        #   2. palette arg (explicit list).
-        #   3. neither -> SegJsonDataset falls back to the Cityscapes SSOT.
-        # Loading from classes_file here (once) guarantees train and val use the
-        # IDENTICAL palette, and lets seg_training.py resolve the same one.
-        if classes_file is not None:
-            from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
-            _cf = Path(project_root, classes_file)
-            self.class_names, palette = load_grounded_sam_palette(_cf)
-            print(f"[SegJsonDataModule] loaded {len(palette)} classes from {classes_file}")
-        else:
-            self.class_names = None
+        # PALETTE SOURCE — explicit `palette` arg if given, else SegJsonDataset
+        # falls back to the Cityscapes SSOT (SEG_CITYSCAPES_PALETTE).
+        self.class_names = None
         self.palette = palette
 
         _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key)
