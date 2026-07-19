@@ -56,6 +56,12 @@ ckpt_path: ???     # e.g. outputs/train/grounded_sam/runs/2026-01-01/00-00-00/be
 # palette raises "class id >= palette size" in seg_inference.py.
 classes_file: configs/grounded_sam_classes.json
 
+# ---- Non-square map handling ------------------------------------------------
+# Letterbox fill class for non-square provided maps (the real 1280x800 16-bit
+# PNGs) -- MUST match training's pad_id (configs/data/local_grounded_sam.yaml).
+# 0 = CARLA "Unlabeled". The loader letterboxes with this id, never stretches.
+seg_pad_id: 0
+
 # ---- Global resolution (must match training) ------------------------------
 size: 512          # square canvas; must match what training/calc used
 seed: 42

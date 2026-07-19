@@ -64,8 +64,12 @@ class SegJsonDataset(Dataset):
         image_key: str = "raw_image_path",   # JSONL key for the source RGB image
         seg_key: str = "seg_path",           # JSONL key for the class-ID seg map
         prompt_key: str = "prompt",          # JSONL key for the text caption
+        pad_id: int = 0,                     # class id used to letterbox non-square
+                                             # maps (CARLA 0 = Unlabeled; see
+                                             # _load_seg_colormap step 2)
     ):
         self.json_file    = Path(json_file)
+        self.pad_id       = pad_id
         self.json_dir     = self.json_file.parent
         self.project_root = Path(project_root) if project_root else self.json_dir
         self.image_root   = Path(image_root) if image_root else None
@@ -131,14 +135,52 @@ class SegJsonDataset(Dataset):
         """
         Load a raw class-ID PNG and return a colourised map [3, size, size] in [0,1].
 
-        Steps (the two seg-specific points live here):
-          1. Open as "L" (8-bit single channel) — pixel values ARE class ids.
-          2. NEAREST resize to (size, size) — label-preserving (NEVER bilinear).
-          3. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
+        Steps (the seg-specific points live here):
+          1. Open and read RAW pixel values — they ARE class ids. The real
+             Grounded-SAM/CARLA masks are 16-bit PNGs (PIL mode I;16, dtype
+             uint16, ids 0..28, confirmed from the user's own format scan);
+             the SegFormer pipeline saves 8-bit "L" PNGs. np.asarray on the
+             opened image handles BOTH without a .convert("L") — important
+             because I;16 -> L conversion behaviour differs between Pillow
+             versions (verified exact on THIS env 2026-07-20, but the
+             training machine may run a different Pillow; reading raw is
+             version-proof).
+          2. If the map is NOT square (the real masks are 1280x800), LETTERBOX
+             it to a square with `pad_id` fill — the SAME geometry SquarePad
+             applies to the paired RGB image (pad the shorter side, extra
+             pixel to the bottom/right on odd totals). A plain resize here
+             would STRETCH the map while the RGB is letterboxed, vertically
+             misaligning conditioning vs target by up to ~19% of the frame
+             at the top/bottom (measured 2026-07-20). Alignment is the whole
+             point of structure conditioning, so the two paths MUST match.
+          3. NEAREST resize to (size, size) — label-preserving (NEVER bilinear).
+          4. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
 
         Returns [3, size, size] float tensor in [0, 1].
         """
-        ids_pil = Image.open(seg_path).convert("L")
+        ids_np = np.asarray(Image.open(seg_path)).astype(np.int64)   # [H, W], raw ids
+
+        # Class ids must fit 8-bit for the PIL "L" round-trip below. Both live
+        # taxonomies do (Cityscapes max 18, CARLA max 28); fail loudly if not.
+        if ids_np.max() > 255:
+            raise ValueError(
+                f"{seg_path}: max pixel value {ids_np.max()} is not a class id "
+                "(expected 0..255). Is this really a raw class-ID map?"
+            )
+        ids_pil = Image.fromarray(ids_np.astype(np.uint8), mode="L")
+
+        # ---- Letterbox a non-square map (mirror SquarePad's geometry) ------ #
+        # SquarePad pads the SHORTER side: pad_before = pad_total // 2, the
+        # remainder goes after (bottom/right). Identical rounding here, so a
+        # 1280x800 map and its 1280x800 RGB land on the same square grid.
+        w, h = ids_pil.size
+        if w != h:
+            side = max(w, h)
+            pad_before = (side - min(w, h)) // 2
+            canvas = Image.new("L", (side, side), color=self.pad_id)
+            # landscape -> pad top+bottom (paste at y offset); portrait -> left+right
+            canvas.paste(ids_pil, (0, pad_before) if w > h else (pad_before, 0))
+            ids_pil = canvas
 
         # NEAREST is REQUIRED for a class-ID map: bilinear would average class
         # ids and produce fabricated class values. PIL.Image.NEAREST is the flag.
@@ -197,6 +239,8 @@ class SegJsonDataModule:
         image_key: str = "raw_image_path",
         seg_key: str = "seg_path",
         prompt_key: str = "prompt",
+        pad_id: int = 0,               # letterbox fill class for non-square maps
+                                       # (0 = Unlabeled in the CARLA taxonomy)
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
@@ -223,7 +267,8 @@ class SegJsonDataModule:
             self.class_names = None
         self.palette = palette
 
-        _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key)
+        _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key,
+                     pad_id=pad_id)
 
         self.train_dataset = SegJsonDataset(
             json_file=Path(project_root, json_file),

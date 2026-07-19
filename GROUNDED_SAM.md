@@ -187,6 +187,47 @@ This is everything needed to train the LoRAdapter model on the
   `classes_file` (build palette from your classes) and manifest-key flags
   `image_key` / `seg_key` / `prompt_key` (so your JSONL can use any key names).
 
+### 5.0a The REAL mask format, and how the loader handles it [ADDED 2026-07-20]
+
+The actual masks this pipeline trains on (user-confirmed 2026-07-20 via a
+`check_seg_map_format.py` scan of a real file) are:
+
+| Property | Value |
+|---|---|
+| File format | PNG (lossless — good, class ids survive exactly) |
+| PIL mode / dtype | `I;16` / uint16 (16-bit single channel) |
+| Size | **1280 x 800 — NOT square** |
+| Pixel values | raw CARLA class ids (e.g. 0,1,3,6,9,11,14,15,24 in the scanned file) |
+
+Two loader behaviours exist specifically because of this format (both in
+`SegJsonDataset._load_seg_colormap` and mirrored in
+`seg_inference._load_seg_map`, kept byte-identical — verified by execution
+2026-07-20 with the real dataset class, the real CARLA palette, a real
+1280x800 RGB, and a synthetic mask saved in this exact I;16 format):
+
+1. **Raw pixel read, no `.convert("L")`.** `np.asarray(Image.open(path))`
+   reads I;16 and 8-bit L masks identically. `I;16 -> L` conversion happens
+   to be exact on this machine's Pillow (tested), but the behaviour has
+   differed across Pillow versions — reading raw removes that risk on the
+   training machine entirely.
+2. **Non-square maps are LETTERBOXED, never stretched.** The RGB image is
+   squared by `SquarePad` (letterbox, pad top+bottom). Before this fix the
+   ID map was NEAREST-*stretched* to 512x512 — a geometry mismatch that
+   misaligned conditioning vs target by up to **96 px (18.8% of the frame)**
+   at the top and bottom of the image (0 px only at mid-frame; measured by
+   execution 2026-07-20). Now the map is padded with `pad_id`
+   (config `pad_id` in `local_grounded_sam.yaml`, `seg_pad_id` in
+   `inference_grounded_sam.yaml`; default **0 = CARLA Unlabeled**) using
+   SquarePad's exact rounding, so map and image share one square grid.
+   Training pairs are pixel-aligned; a boundary at mask row 400/800 lands at
+   square row 256 on both paths (asserted in the verification run).
+
+Consequence for the model: the pad band is now consistently `Unlabeled` in
+the conditioning and a flat fill colour in the target — a learnable,
+consistent mapping (previously the map had hallucination-free content
+stretched over the band while the target showed a flat fill: an impossible
+lesson that degraded everything near the top/bottom edges).
+
 ### 5.1a Generation-quality fix for "fits the shape but doesn't know how it looks"
 This exact symptom was root-caused (flat segmentation regions carry no
 appearance information through a 1×1-conv FiLM conditioning path — see full

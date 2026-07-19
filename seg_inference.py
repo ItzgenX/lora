@@ -147,21 +147,47 @@ def make_seg_inference_grid(
     return Image.fromarray(grid)
 
 
-def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device) -> torch.Tensor:
+def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device,
+                  pad_id: int = 0) -> torch.Tensor:
     """
-    Load a PRE-COMPUTED segmentation map (raw class-ID PNG, 8-bit, values
-    0..num_classes-1 — exactly what seg_map_calculations.py saves and what
-    training's seg_path manifests already point at) and colourise it.
+    Load a PRE-COMPUTED segmentation map (raw class-ID PNG) and colourise it.
 
     Mirrors src/data/local_seg.py's SegJsonDataset._load_seg_colormap EXACTLY
-    (same NEAREST resize, same seg_colorize_ids call, same palette) — this is
-    what guarantees a map loaded here produces the identical conditioning
-    signal training saw for the same file. NEAREST is required: averaging
-    class ids during resize would fabricate classes that aren't in the image.
+    (same raw read, same letterbox, same NEAREST resize, same seg_colorize_ids
+    call, same palette) — this is what guarantees a map loaded here produces
+    the identical conditioning signal training saw for the same file:
+
+      1. RAW pixel read via np.asarray, NO .convert("L") — the real
+         Grounded-SAM/CARLA masks are 16-bit PNGs (PIL mode I;16, ids 0..28)
+         and I;16 -> L behaviour differs between Pillow versions; reading raw
+         works for both I;16 and the 8-bit "L" maps identically everywhere.
+      2. Non-square maps (the real masks are 1280x800) are LETTERBOXED with
+         `pad_id` (CARLA 0 = Unlabeled) using SquarePad's exact geometry —
+         NEVER stretched, which would misalign the conditioning against the
+         letterboxed RGB convention training used (up to ~19% of the frame
+         at top/bottom, measured 2026-07-20).
+      3. NEAREST resize — averaging class ids would fabricate classes.
 
     Returns [1, 3, size, size] float tensor in [0, 1].
     """
-    ids_pil = Image.open(seg_path).convert("L")
+    ids_np = np.asarray(Image.open(seg_path)).astype(np.int64)
+    if ids_np.max() > 255:
+        raise ValueError(
+            f"{seg_path}: max pixel value {ids_np.max()} is not a class id "
+            "(expected 0..255). Is this really a raw class-ID map?"
+        )
+    ids_pil = Image.fromarray(ids_np.astype(np.uint8), mode="L")
+
+    # Letterbox a non-square map — same rounding as SquarePad (pad_before =
+    # total // 2, remainder after), so map and RGB share one square grid.
+    w, h = ids_pil.size
+    if w != h:
+        side = max(w, h)
+        pad_before = (side - min(w, h)) // 2
+        canvas = Image.new("L", (side, side), color=pad_id)
+        canvas.paste(ids_pil, (0, pad_before) if w > h else (pad_before, 0))
+        ids_pil = canvas
+
     if ids_pil.size != (size, size):
         ids_pil = ids_pil.resize((size, size), Image.NEAREST)
     ids = torch.from_numpy(np.asarray(ids_pil, dtype=np.int64)).unsqueeze(0)   # [1, H, W]
@@ -363,7 +389,10 @@ def main(cfg):
             # ---- Step 1: Load + colourise the PROVIDED seg map ----
             # No model runs here -- this is a file load + palette lookup, not a
             # live computation. See _load_seg_map (mirrors local_seg.py exactly).
-            seg_tensor = _load_seg_map(seg_path, size, _palette, device)   # [1,3,size,size] in [0,1]
+            # pad_id: letterbox fill class for non-square maps (base config
+            # `seg_pad_id`, default 0 = CARLA Unlabeled) — must match training.
+            seg_tensor = _load_seg_map(seg_path, size, _palette, device,
+                                       pad_id=int(cfg.get("seg_pad_id", 0)))   # [1,3,size,size] in [0,1]
             seg_pil    = TF.to_pil_image(seg_tensor[0].cpu().float().clamp(0, 1))
 
             # ---- Step 2: Generate image (prompt-conditioned) ----
