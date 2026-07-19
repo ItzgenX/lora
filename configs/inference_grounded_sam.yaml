@@ -50,6 +50,12 @@ defaults:
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
 ckpt_path: ???     # e.g. outputs/train/grounded_sam/runs/2026-01-01/00-00-00/best_model
 
+# ---- Class palette ---------------------------------------------------------
+# MUST match what the seg maps were saved with (configs/data/local_grounded_sam.yaml
+# uses the same file for training) -- loading/colourising a map with the wrong
+# palette raises "class id >= palette size" in seg_inference.py.
+classes_file: configs/grounded_sam_classes.json
+
 # ---- Global resolution (must match training) ------------------------------
 size: 512          # square canvas; must match what training/calc used
 seed: 42

@@ -303,7 +303,22 @@ def main(cfg):
     # live" -- that's what this file no longer does). The Grounded-SAM Tier-1
     # slot filler (src/encoders/grounded_sam_encoder.py) cannot do this
     # (live_available=False), so it's skipped automatically -- no crash.
-    _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
+    #
+    # PALETTE SOURCE -- must match whatever palette the seg maps were saved
+    # with, or _load_seg_map below raises "class id >= palette size" (a real
+    # bug found by an actual end-to-end run, not caught by config-only
+    # checks: SEG_CITYSCAPES_PALETTE only has 19 colours, Grounded-SAM's
+    # locked CARLA taxonomy has 29). Mirrors local_seg.py's
+    # SegJsonDataModule: classes_file if configured, else the Cityscapes SSOT.
+    _classes_file = cfg.get("classes_file", None)
+    if _classes_file is not None:
+        from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
+        _cf = Path(_root) / _classes_file
+        _class_names, _palette_list = load_grounded_sam_palette(_cf)
+        _palette = seg_palette_tensor(_palette_list).to(device)
+        print(f"[palette] loaded {len(_palette_list)} classes from {_classes_file}")
+    else:
+        _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
     _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
     _live_seg_available = getattr(_enc0, "live_available", True)
     if not _live_seg_available:
