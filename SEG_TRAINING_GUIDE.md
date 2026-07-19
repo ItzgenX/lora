@@ -87,6 +87,168 @@ work of stopping when val/loss plateaus.
 
 ---
 
+## 1a. The loss, from scratch — what the model is actually learning [ADDED 2026-07-19]
+
+You cannot tune a hyperparameter sensibly without knowing what number you're
+reacting to. This section explains the loss itself, line by line from the
+real code, then how to read it to make decisions — no formula tells you "the
+right epoch count" in advance; you read the loss curve from a real run.
+
+### 1a.1 What training actually does (the one-paragraph version)
+
+Take a real image. Add a random amount of noise to it. Ask the model to guess
+**exactly what noise was added**. Train it to guess correctly, at every
+possible noise strength (a little noise, up to almost-pure static). If a
+model can always correctly identify "what noise is this," it can also run the
+process **backward**: start from pure noise and repeatedly subtract its best
+guess, and a real image emerges. That backward process is generation.
+Training only ever does the easy, forward direction — we always know the true
+noise, because we added it ourselves. That's the entire trick.
+
+### 1a.2 The real code, step by step
+
+`seg_training.py:697` calls:
+```python
+model_pred, loss, x0, _ = model.forward_easy(imgs, prompts, cs, skip_encode=True, ...)
+```
+`forward_easy` (`src/model.py:571-603`) sets up one training step:
+```python
+latents, c = self.get_input(imgs, prompts)          # image -> compressed latent, text -> embedding
+noise = torch.randn_like(latents)                    # random static, same shape as latents
+timesteps = torch.randint(0, num_train_timesteps, (bsz,), device=latents.device)  # random noise LEVEL per image
+```
+- `get_input` (`src/model.py:429-471`): `latents = self.vae.encode(imgs).latent_dist.sample()`
+  compresses your 512×512 image into a small 64×64×4 latent (a VAE, trained
+  separately, ships with SD1.5). Everything below operates on this
+  compressed representation, not raw pixels — purely a compute-saving trick
+  from the original Stable Diffusion paper.
+- `noise`: literally `torch.randn_like(latents)` — pure Gaussian noise. This
+  is "the static" from the analogy above.
+- `timesteps`: a random integer 0–999 per image. This is "how much noise."
+  0 ≈ barely noisy (easy). 999 ≈ almost pure noise (hard — this is where
+  real generation actually starts from). A **different random level every
+  single training step**, so across many steps the model learns to denoise
+  at every level, not just one.
+
+Then `forward` (`src/model.py:473-569`) does the actual work:
+```python
+noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)   # :484
+```
+Blend `noise` into the real `latents` at the strength `timesteps` dictates.
+
+```python
+for i, (encoder, dp, mapper, lora_c) in enumerate(zip(encoders, self.dps, mappers, cs)):
+    cond = lora_c if skip_encode else encoder(lora_c)   # :526-535 — your seg map, unchanged here
+    mapped_cond = mapper(cond)                            # FixedStructureMapper15
+    dp.set_batch(mapped_cond)                              # :537 — handed to the shared DataProvider
+```
+Your segmentation map gets pushed into the `DataProvider` here. Every
+`NewStructLoRAConv` layer inside the UNet reads it from there on the very
+next line — see [LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md) for the full
+trace of what happens to it once it's inside the UNet.
+
+```python
+model_pred = self.unet(noisy_latents, timesteps, encoder_hidden_states=prompt_embeds).sample   # :540-542
+```
+**The "guess the noise" step.** The UNet sees the noisy latent, the noise
+level, the text, and — via every LoRA layer reading the DataProvider — your
+segmentation map. `model_pred` is its guess at what `noise` was added.
+
+```python
+target = noise                                        # :560-561 — the REAL noise (we made it, we know it exactly)
+loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")   # :567
+```
+**This is the loss**: mean squared error between the model's guess and the
+real noise — `mean((model_pred - noise)^2)`. Lower loss = better
+noise-guesses = better denoising = better generation. `loss.backward()`
+(`seg_training.py:704`) uses this single number to compute gradients and
+update every trainable weight (the LoRA `A`/`B`/`beta`/`gamma` parameters —
+the frozen UNet weights never change, per `add_lora_to_unet`).
+
+### 1a.3 Which loss to actually watch: `train/loss` vs `val/loss`
+
+Two different losses get computed, answering different questions:
+
+- **`train/loss`** (`seg_training.py:718,724`) — the MSE above, computed on
+  the batch you just trained on, WITH gradients on, logged every step.
+  Inherently noisy (small batches, random noise/timestep each time) — watch
+  the trend over dozens of steps, not any single value.
+- **`val/loss`** (`_segmentation_validation_loss`, `seg_training.py:269-332`)
+  — the SAME formula, computed on held-out images the model never trains on,
+  with `torch.no_grad()` (no learning happens), averaged over several
+  batches, only at `val_steps` intervals. Its own docstring states exactly
+  why it exists: *"(a) if it diverges from train/loss, you're overfitting.
+  (b) an objective best_model criterion — not a biased training-loss
+  average."*
+
+**Watch `val/loss` to make decisions.** It's what `best_model`/early-stopping
+(`best_loss` tracking at `seg_training.py:509`, the early-stop check at
+`:778-793`) already use automatically. `train/loss` is only a sanity check —
+is it decreasing, is it NaN — not a decision signal.
+
+### 1a.4 Tuning hyperparameters *by watching the loss curve*
+
+This is read-after-a-real-run, not computed in advance — there's no formula
+for "the right epoch count" that doesn't require actually training:
+
+| What you observe | What it means | What to change |
+|---|---|---|
+| `train/loss` is `NaN` or explodes | Numerical instability / LR too aggressive | Lower `learning_rate`; gradients are already clipped to `max_norm=1.0` (`seg_training.py:711`) as a safety net |
+| `train/grad_norm` stays pinned at 1.0 for a long time | Gradients are being clipped constantly — the optimizer wants bigger steps than allowed | Normal early on; if it never relaxes, LR may be too high for this effective batch |
+| `val/loss` decreases then **flattens** | Model has converged on this data — more epochs teach it nothing new | Nothing to do — `early_stop_patience` (§1) catches this automatically |
+| `val/loss` **increases** while `train/loss` keeps falling | Overfitting — memorizing training images instead of generalizing | More epochs make this WORSE. Real fix is more/more-diverse data, not a hyperparameter |
+| `val/loss` still steadily falling when `epochs` ceiling is hit | Ceiling was too low, model hadn't finished learning | Rerun with a higher `epochs`, resuming via `lora.struct.ckpt_path` — no need to restart from step 0 |
+| `val/loss` jumps around a lot between checks | Too few `val_batches` averaged, or a small/noisy val set | Increase `val_batches` — this is a measurement-noise artifact, not a real problem to fix with training hyperparameters |
+
+### 1a.5 The actual workflow, for however many images YOU have
+
+Say you have `N_train` training images, `N_val` validation images (any
+numbers — this generalizes, it isn't specific to 60K/4K). Nothing below
+requires you to already know the answer:
+
+1. **Run the advisor script on the real data, on the real machine**:
+   ```
+   python recommend_training_params.py --data_dir data/seg_training --epochs 15
+   ```
+   It reads your actual `N_train`/`N_val`/`N_test` by counting JSONL lines
+   (`_count_images`, `recommend_training_params.py:40-45` — no guessing) and
+   detects your actual GPU's VRAM (`torch.cuda.get_device_properties`,
+   `:104-106`). From those two REAL numbers it computes, as plain arithmetic:
+   - `batch_size`/`gradient_accumulation_steps` sized to your VRAM, holding
+     the SAME validated effective batch (16) this project's `learning_rate`
+     was tuned at (`recommend_batch_and_accum`, `:48-73`) — LR is never
+     auto-scaled here because no scaling behaviour has been verified on this
+     codebase; changing effective batch without also re-validating LR is an
+     experiment, not a safe default.
+   - `steps_per_epoch = ceil(N_train / effective_batch)` and
+     `total_steps = steps_per_epoch * epochs` — pure arithmetic on YOUR
+     `N_train`, not an assumed 60K.
+   - `val_steps`/`ckpt_steps` sized to check ~7 times and checkpoint ~3-4
+     times per epoch, scaled to your `steps_per_epoch`.
+   `--epochs 15` here is **your chosen ceiling**, not a computed answer — see
+   below for why that number can't be computed.
+2. **Paste the printed block into `configs/experiment/train_seg.yaml`.**
+3. **Leave `early_stop_patience` at its default (3)** unless you have a
+   specific reason to change it — e.g. if `val/loss` looks genuinely noisy
+   (small val set, per the table above) rather than truly plateaued, a
+   larger patience avoids stopping on a temporary blip.
+4. **Launch training**, optionally watching
+   `tensorboard --logdir outputs/train/seg/runs/` live (§5) for `val/loss`.
+5. **After it finishes** (either the epoch ceiling, or early-stop firing),
+   read `best_model/info.txt` (`seg_training.py:580-588` writes it: epoch,
+   step, and the psnr/ssim/miou metrics for the checkpoint that won). **This
+   is your empirically-discovered right epoch count for THIS dataset** —
+   discovered by running, not predicted in advance. No dataset size or
+   formula can tell you this before you actually train; task difficulty and
+   data diversity matter just as much as `N_train`, and neither is knowable
+   without a real run.
+6. **If early-stop never fired** (the run hit your `epochs` ceiling still
+   improving), rerun with a higher ceiling, resuming from the last
+   checkpoint (`lora.struct.ckpt_path=<path to checkpoint-epochN>`) rather
+   than restarting from scratch.
+
+---
+
 ## 2. Every parameter in `configs/experiment/train_seg.yaml`
 
 Parameters identical to depth are not repeated here — see `DEPTH_TRAINING_GUIDE.md §2`
