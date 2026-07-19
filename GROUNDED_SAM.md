@@ -212,6 +212,152 @@ BRAND-NEW image that has no pre-computed map yet, and (b) the mIoU metric
 auto-skip/require Tier 2 rather than crashing (`encoder.live_available=False`
 is checked before either runs).
 
+### 5.1c The loss, from scratch — what the model is actually learning [ADDED 2026-07-19]
+
+You cannot tune a hyperparameter sensibly without knowing what number you're
+reacting to. This walks the real training code line by line, then how to
+read the resulting loss curve to make decisions — no formula tells you "the
+right epoch count" in advance; you read the curve from a real run.
+
+**What training actually does, in one paragraph:** take a real image, add a
+random amount of noise to it, ask the model to guess **exactly what noise
+was added**. Train it to guess correctly at every possible noise strength (a
+little noise, up to almost-pure static). If a model can always correctly
+identify "what noise is this," it can also run the process **backward**:
+start from pure noise and repeatedly subtract its best guess, and a real
+image emerges. That backward process is generation. Training only ever does
+the easy, forward direction — we always know the true noise, because we
+added it ourselves.
+
+**The real code.** `seg_training.py:698` calls:
+```python
+model_pred, loss, x0, _ = model.forward_easy(imgs, prompts, cs, skip_encode=True, ...)
+```
+`skip_encode=True` is not a training-time shortcut here the way it can look
+on the SegFormer side — `GroundedSamEncoder` (§5.1) has **no live forward
+path at all** (`forward()` raises `NotImplementedError`, Tier 1 by design),
+so `skip_encode=True` is the only value that ever works for this pipeline.
+The pre-saved colour map goes straight to the mapper; the encoder slot exists
+only so `accelerate` has an `nn.Module` to `.prepare()`.
+
+`forward_easy` (`src/model.py:571-603`) sets up one training step:
+```python
+latents, c = self.get_input(imgs, prompts)          # image -> compressed latent, text -> embedding
+noise = torch.randn_like(latents)                    # random static, same shape as latents
+timesteps = torch.randint(0, num_train_timesteps, (bsz,), device=latents.device)  # random noise LEVEL per image
+```
+- `get_input` (`src/model.py:429-471`): `latents = self.vae.encode(imgs).latent_dist.sample()`
+  compresses your 512×512 image into a small 64×64×4 latent (a VAE, trained
+  separately, ships with SD1.5). Everything below operates on this
+  compressed representation, not raw pixels — purely a compute-saving trick
+  from the original Stable Diffusion paper.
+- `noise`: literally `torch.randn_like(latents)` — pure Gaussian noise. This
+  is "the static" from the analogy above.
+- `timesteps`: a random integer 0–999 per image. This is "how much noise."
+  0 ≈ barely noisy (easy). 999 ≈ almost pure noise (hard — this is where
+  real generation actually starts from). A **different random level every
+  single training step**, so across many steps the model learns to denoise
+  at every level, not just one.
+
+Then `forward` (`src/model.py:473-569`) does the actual work:
+```python
+noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)   # :484
+```
+Blend `noise` into the real `latents` at the strength `timesteps` dictates.
+
+```python
+for i, (encoder, dp, mapper, lora_c) in enumerate(zip(encoders, self.dps, mappers, cs)):
+    cond = lora_c if skip_encode else encoder(lora_c)   # :526-535 — your Grounded-SAM map, unchanged (always True here)
+    mapped_cond = mapper(cond)                            # FixedStructureMapper15
+    dp.set_batch(mapped_cond)                              # :537 — handed to the shared DataProvider
+```
+Your Grounded-SAM segmentation map gets pushed into the `DataProvider` here.
+Every `NewStructLoRAConv` layer inside the UNet reads it from there on the
+very next line — see [LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md) for the
+full trace of what happens to it once it's inside the UNet.
+
+```python
+model_pred = self.unet(noisy_latents, timesteps, encoder_hidden_states=prompt_embeds).sample   # :540-542
+```
+**The "guess the noise" step.** The UNet sees the noisy latent, the noise
+level, the text, and — via every LoRA layer reading the DataProvider — your
+segmentation map. `model_pred` is its guess at what `noise` was added.
+
+```python
+target = noise                                        # :560-561 — the REAL noise (we made it, we know it exactly)
+loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")   # :567
+```
+**This is the loss**: mean squared error between the model's guess and the
+real noise — `mean((model_pred - noise)^2)`. Lower loss = better
+noise-guesses = better denoising = better generation. `loss.backward()`
+(`seg_training.py:705`) uses this single number to compute gradients and
+update every trainable weight (the LoRA `A`/`B`/`beta`/`gamma` parameters —
+the frozen UNet weights never change, per `add_lora_to_unet`).
+
+**Which loss to actually watch: `train/loss` vs `val/loss`.** Two different
+losses get computed:
+- **`train/loss`** (`seg_training.py:719,725`) — the MSE above, computed on
+  the batch you just trained on, WITH gradients on, logged every step.
+  Inherently noisy (small batches, random noise/timestep each time) — watch
+  the trend over dozens of steps, not any single value.
+- **`val/loss`** (`_segmentation_validation_loss`, `seg_training.py:270-333`)
+  — the SAME formula, computed on held-out images the model never trains on,
+  with `torch.no_grad()` (no learning happens), averaged over several
+  batches, only at `val_steps` intervals. Its own docstring states exactly
+  why: *"(a) if it diverges from train/loss, you're overfitting. (b) an
+  objective best_model criterion — not a biased training-loss average."*
+
+**Watch `val/loss` to make decisions.** It's what `best_model`/early-stopping
+(`best_loss` tracking at `seg_training.py:510`, the early-stop check at
+`:779-794`) already use automatically. `train/loss` is only a sanity check —
+is it decreasing, is it NaN — not a decision signal.
+
+**Tuning hyperparameters by watching the loss curve** — read-after-a-real-run,
+not computed in advance:
+
+| What you observe | What it means | What to change |
+|---|---|---|
+| `train/loss` is `NaN` or explodes | Numerical instability / LR too aggressive | Lower `learning_rate`; gradients are already clipped to `max_norm=1.0` (`seg_training.py:712`) as a safety net |
+| `train/grad_norm` stays pinned at 1.0 for a long time | Gradients are being clipped constantly — the optimizer wants bigger steps than allowed | Normal early on; if it never relaxes, LR may be too high for this effective batch |
+| `val/loss` decreases then **flattens** | Model has converged on this data — more epochs teach it nothing new | Nothing to do — `early_stop_patience` (§6) catches this automatically |
+| `val/loss` **increases** while `train/loss` keeps falling | Overfitting — memorizing training images instead of generalizing | More epochs make this WORSE. Real fix is more/more-diverse data, not a hyperparameter |
+| `val/loss` still steadily falling when `epochs` ceiling is hit | Ceiling was too low, model hadn't finished learning | Rerun with a higher `epochs`, resuming via `lora.struct.ckpt_path` — no need to restart from step 0 |
+| `val/loss` jumps around a lot between checks | Too few `val_batches` averaged, or a small/noisy val set | Increase `val_batches` — this is a measurement-noise artifact, not a real problem to fix with training hyperparameters |
+
+**The actual workflow, for however many images YOU have.** Say you have
+`N_train` training images, `N_val` validation images (any numbers — this
+generalizes, it isn't specific to any particular dataset size). Nothing
+below requires you to already know the answer:
+
+1. **Run the advisor script on the real data, on the real machine**:
+   ```
+   python recommend_training_params.py --data_dir data/grounded_sam --epochs 15
+   ```
+   It reads your actual `N_train`/`N_val`/`N_test` by counting JSONL lines
+   (no guessing) and detects your actual GPU's VRAM (no guessing). From
+   those two REAL numbers it computes, as plain arithmetic: `batch_size`/
+   `gradient_accumulation_steps` sized to your VRAM while holding the SAME
+   validated effective batch (16) this project's `learning_rate` was tuned
+   at — LR is never auto-scaled, because no scaling behaviour has been
+   verified on this codebase; `steps_per_epoch = ceil(N_train /
+   effective_batch)` and `total_steps = steps_per_epoch * epochs`, pure
+   arithmetic on YOUR `N_train`; `val_steps`/`ckpt_steps` sized to check
+   ~7 times and checkpoint ~3-4 times per epoch. `--epochs 15` here is
+   **your chosen ceiling**, not a computed answer.
+2. **Paste the printed block into `configs/experiment/train_grounded_sam.yaml`.**
+3. **Leave `early_stop_patience` at its default (3)** unless your `val/loss`
+   looks genuinely noisy (small val set) rather than truly plateaued.
+4. **Launch training**, optionally watching
+   `tensorboard --logdir outputs/train/grounded_sam/runs/` live for `val/loss`.
+5. **After it finishes**, read `best_model/info.txt`
+   (`seg_training.py:581-589` writes it: epoch, step, psnr/ssim — no mIoU
+   here, `live_available=False`). **This is your empirically-discovered
+   right epoch count for THIS dataset** — discovered by running, not
+   predicted; task difficulty and data diversity matter as much as
+   `N_train`, and neither is knowable without a real run.
+6. **If early-stop never fired**, rerun with a higher ceiling, resuming from
+   the last checkpoint rather than restarting from scratch.
+
 ### 5.2 What was NOT built — "Tier 2": live map generation
 A live `GroundedSamEncoder` that actually runs GroundingDINO + SAM to make a map
 for a brand-new image. Needed for **inference on new frames without a
