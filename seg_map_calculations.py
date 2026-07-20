@@ -26,24 +26,31 @@ vs depth, each deliberate:
 LOCKED MODEL: nvidia/segformer-b5-finetuned-cityscapes-1024-1024
   (references.md §9 — b5 chosen for best segmentation accuracy)
 
-TYPICAL WORKFLOW (data_dir mode — recommended, mirrors depth):
-  # builds data/seg_training/{train,val,test}.jsonl from data/{train,val,test}.jsonl
-  python seg_map_calculations.py --data_dir data/
+RESIZE_MODE (user decision 2026-07-20, SEGMENTATION.md's resize_mode section):
+  --resize_mode letterbox (default, SquarePad) or --resize_mode CenterCrop
+  (original stock LoRAdapter recipe). UNLIKE the grounded_sam branch, this
+  gets BAKED INTO THE SAVED MAP -- output folders/filenames are mode-named
+  so two runs never collide, and segformer_training.py/segformer_inference.py
+  must be configured with the SAME resize_mode used here.
 
-  # then train:
-  python seg_training.py experiment=train_seg
+TYPICAL WORKFLOW (data_dir mode — recommended, mirrors depth):
+  # builds data/seg_training_letterbox/{train,val,test}.jsonl from data/{train,val,test}.jsonl
+  python seg_map_calculations.py --data_dir data/ --resize_mode letterbox
+
+  # then train (same resize_mode):
+  python segformer_training.py experiment=train_seg resize_mode=letterbox
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- SINGLE IMAGE: one new CARLA/real-world photo -> map saved BESIDE it ---
-  #     (<stem>_seg_map.png in the image's own folder; prints the ready-to-run
-  #      seg_inference.py command for the pair)
-  python seg_map_calculations.py --image path/to/frame.jpg
+  #     (<stem>_seg_map_<resize_mode>.png in the image's own folder; prints
+  #      the ready-to-run segformer_inference.py command for the pair)
+  python seg_map_calculations.py --image path/to/frame.jpg --resize_mode letterbox
 
   # --- SINGLE JSONL: entries with raw_image_path (+ prompt) -> maps in a
-  #     SIBLING <images_root>_seg_map/ folder (mirrored structure) + a new
-  #     <stem>_seg.jsonl beside the input with the STANDARD keys
+  #     SIBLING <images_root>_seg_map_<resize_mode>/ folder (mirrored structure)
+  #     + a new <stem>_seg.jsonl beside the input with the STANDARD keys
   #     raw_image_path / seg_path / prompt (self-verified) ---
-  python seg_map_calculations.py --json_file data/my_frames.jsonl
+  python seg_map_calculations.py --json_file data/my_frames.jsonl --resize_mode letterbox
 
   # --- Dry run: 15 images, verify pipeline before committing to full dataset ---
   python seg_map_calculations.py --data_dir data/ --dry_run_n 15
@@ -56,7 +63,7 @@ QUICK COMMANDS (run from repo root with conda loradapter env active):
 
   # --- Dataset-SCAN mode: dataset lives outside the repo; scans for raw_image.jpg,
   #     saves seg maps to a SIBLING folder (mirrored structure), rebuilds
-  #     seg_training/*.jsonl from data/{train,val,test}.jsonl (see §5.3b in SEGMENTATION.md) ---
+  #     seg_training_<mode>/*.jsonl from data/{train,val,test}.jsonl (see SEGMENTATION.md) ---
   python seg_map_calculations.py --dataset_dir /path/to/custome_dataset --data_dir data/ --image_path target
 
 JSON ENTRY FORMAT produced:
@@ -84,7 +91,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from src.data.transforms import build_seg_square_preprocess
+from src.data.transforms import build_seg_preprocess
 from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, SegmentationEncoder
 from src.utils import resolve_device, auto_batch_size
 
@@ -164,6 +171,7 @@ def precompute_segmentation_maps(
     input_dir: Path = None,
     local_files_only: bool = True,
     out_path_fn=None,
+    resize_mode: str = "letterbox",
 ) -> dict:
     """
     Core routine: segment a list of images, save each as a raw class-ID PNG.
@@ -175,9 +183,11 @@ def precompute_segmentation_maps(
     that was processed or found already cached.
 
     Notes:
-      • RGB preprocessing uses build_seg_square_preprocess() — the SHARED function
+      • RGB preprocessing uses build_seg_preprocess() — the SHARED function
         from src/data/transforms.py — so it is byte-identical to what
-        seg_inference.py will use. This is what guarantees train/inference parity.
+        local_seg.py's dataset loader builds for training's RGB image. This is
+        what guarantees the map's geometry matches the RGB image it's paired
+        with (both squared the SAME way, whichever resize_mode is chosen).
       • encoder.label_ids() returns raw class IDs; we save them as PIL mode "L"
         (8-bit grayscale, values 0..num_classes-1). Colour palette is applied
         later, at load time, by SegJsonDataset._load_seg_colormap().
@@ -189,6 +199,15 @@ def precompute_segmentation_maps(
         Used by dataset-scan mode to save the map into a SIBLING folder next to
         the dataset root (mirrored structure), named <folder>_seg_map.png. When
         None, the default _seg_out_path placement is used.
+      • resize_mode (user decision 2026-07-20): "letterbox" (SquarePad, default)
+        or "CenterCrop" (original stock LoRAdapter recipe) — the technique used
+        to square the RGB before SegFormer sees it. THIS GETS BAKED INTO THE
+        SAVED MAP: unlike the grounded_sam branch (which re-squares a native-
+        resolution map live at load time), here the map is already square by
+        the time it's written to disk, so training/inference must use a map
+        computed with the SAME mode they're configured for. Callers are
+        responsible for mode-naming the output folder/filename so two runs
+        with different modes never collide or get mixed up.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -227,11 +246,11 @@ def precompute_segmentation_maps(
     print(f"Segmentation encoder ready ({num_classes} classes).\n")
 
     # ---- SHARED RGB preprocessing ----------------------------------------- #
-    # build_seg_square_preprocess is the SINGLE SOURCE OF TRUTH for squaring.
-    # Using it here (offline calc) AND in seg_inference.py (live inference) is
-    # what guarantees the seg map the network sees at inference matches the
-    # map saved for training. Do not inline this or duplicate it.
-    preprocess = build_seg_square_preprocess(size=size)
+    # build_seg_preprocess is the SINGLE SOURCE OF TRUTH for squaring. Using it
+    # here (offline calc) AND in local_seg.py's dataset loader (training) is
+    # what guarantees the seg map's geometry matches the RGB image it's paired
+    # with. Do not inline this or duplicate it.
+    preprocess = build_seg_preprocess(size=size, resize_mode=resize_mode)
 
     path_to_seg = {}
     processed = skipped = errors = 0
@@ -424,6 +443,7 @@ def build_segmentation_training_jsons(
     local_files_only: bool = True,
     image_path: str = "source",
     image_root: Path = None,
+    resize_mode: str = "letterbox",
 ) -> None:
     """
     Build data/seg_training/{train,val,test}.jsonl from data/{train,val,test}.jsonl.
@@ -492,16 +512,19 @@ def build_segmentation_training_jsons(
 
     # Dataset root = deepest folder shared by ALL images (no hardcoding).
     # Sibling folder next to it holds the maps, mirroring the structure —
-    # exactly like --dataset_dir scan mode, so both commands agree.
+    # exactly like --dataset_dir scan mode, so both commands agree. Mode-named
+    # (user decision 2026-07-20) so a letterbox run and a CenterCrop run never
+    # collide or get mixed up — the map's squaring is baked in at calc time.
     dataset_root = Path(os.path.commonpath([str(p) for p in all_images]))
     if dataset_root.is_file():          # only one image -> commonpath is the file itself
         dataset_root = dataset_root.parent
-    sibling_root = dataset_root.parent / (dataset_root.name + "_seg_map")
+    _suffix = f"_seg_map_{resize_mode}"
+    sibling_root = dataset_root.parent / (dataset_root.name + _suffix)
     sibling_root.mkdir(parents=True, exist_ok=True)
     print(f"\nDataset root : {dataset_root}")
-    print(f"Seg maps     : {sibling_root}  (sibling folder, mirrored structure)")
+    print(f"Seg maps     : {sibling_root}  (sibling folder, mirrored structure, resize_mode={resize_mode})")
 
-    out_fn = lambda p: _sibling_map_path(Path(p), dataset_root, sibling_root, "_seg_map")
+    out_fn = lambda p: _sibling_map_path(Path(p), dataset_root, sibling_root, _suffix)
 
     # ---- Per split: compute maps, then write + verify the manifest -------- #
     for split in ["train", "val", "test"]:
@@ -525,6 +548,7 @@ def build_segmentation_training_jsons(
             skip_existing=skip_existing,
             local_files_only=local_files_only,
             out_path_fn=out_fn,
+            resize_mode=resize_mode,
         )
 
         # Build entries in ONE pass, each from its OWN source (zip keeps them
@@ -550,7 +574,7 @@ def build_segmentation_training_jsons(
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         skip_note = f"  ({n_skipped} skipped)" if n_skipped else ""
         print(f"\n  Written {len(out_entries)} entries -> {out_path}{skip_note}")
-        _verify_scan_seg_training_jsonl(out_path, "seg_path", "_seg_map")
+        _verify_scan_seg_training_jsonl(out_path, "seg_path", _suffix)
 
 
 # ============================================================================ #
@@ -713,6 +737,7 @@ def build_seg_training_from_scan(
     skip_existing: bool = True,
     local_files_only: bool = True,
     subset_n: int = None,
+    resize_mode: str = "letterbox",
 ) -> None:
     """
     DATASET-SCAN MODE for segmentation. Mirrors
@@ -723,11 +748,12 @@ def build_seg_training_from_scan(
        dataset can freely contain other images per folder.
     2. Compute a seg map for each and save it into a SIBLING folder that
        MIRRORS dataset_dir's internal structure — the source dataset folder
-       itself is NEVER written into:
+       itself is NEVER written into. Mode-named (user decision 2026-07-20) so
+       a letterbox run and a CenterCrop run never collide:
            dataset_dir  = .../custome_dataset
-           sibling_root = .../custome_dataset_seg_map
+           sibling_root = .../custome_dataset_seg_map_letterbox
            .../custome_dataset/000417/raw_image.jpg
-             -> .../custome_dataset_seg_map/000417/000417_seg_map.png
+             -> .../custome_dataset_seg_map_letterbox/000417/000417_seg_map_letterbox.png
     3. Read the original split manifests (train/val/test .jsonl) in data_dir to
        recover each image's PROMPT and SPLIT, matching by ABSOLUTE image path.
     4. Write data/seg_training/{train,val,test}.jsonl with ABSOLUTE
@@ -736,9 +762,12 @@ def build_seg_training_from_scan(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Sibling output tree: a NEW folder next to dataset_dir, same name + suffix.
-    sibling_root = dataset_dir.parent / (dataset_dir.name + "_seg_map")
+    # Mode-named: the map's squaring is baked in at calc time (unlike the
+    # grounded_sam branch), so two different-mode runs must never collide.
+    _suffix = f"_seg_map_{resize_mode}"
+    sibling_root = dataset_dir.parent / (dataset_dir.name + _suffix)
     sibling_root.mkdir(parents=True, exist_ok=True)
-    print(f"Seg maps will be saved to (sibling, mirrored structure): {sibling_root}")
+    print(f"Seg maps will be saved to (sibling, mirrored structure, resize_mode={resize_mode}): {sibling_root}")
 
     # ---- Step 1: SCAN for the target filename only ------------------------- #
     print(f"\nScanning for '{image_name}' under: {dataset_dir}")
@@ -752,7 +781,7 @@ def build_seg_training_from_scan(
           + (f"  (dry-run: scan capped at first {subset_n})" if subset_n else "") + ".")
 
     # ---- Step 2: compute seg, saving to the mirrored sibling tree ---------- #
-    out_fn = lambda p: _sibling_map_path(Path(p), dataset_dir, sibling_root, "_seg_map")
+    out_fn = lambda p: _sibling_map_path(Path(p), dataset_dir, sibling_root, _suffix)
     path_to_seg = precompute_segmentation_maps(
         image_paths=[str(p) for p in found],
         output_dir=output_dir,            # not used for saving (out_fn overrides)
@@ -763,6 +792,7 @@ def build_seg_training_from_scan(
         skip_existing=skip_existing,
         local_files_only=local_files_only,
         out_path_fn=out_fn,
+        resize_mode=resize_mode,
     )
 
     # ---- Step 3: index computed seg maps by NORMALISED absolute image path - #
@@ -833,7 +863,7 @@ def build_seg_training_from_scan(
         else:
             note = f"  ({n_skipped} entries had no seg on disk — skipped)" if n_skipped else ""
         print(f"\n  Written {len(out_entries)} entries -> {out_path}{note}")
-        _verify_scan_seg_training_jsonl(out_path, "seg_path", "_seg_map")
+        _verify_scan_seg_training_jsonl(out_path, "seg_path", _suffix)
 
 
 def run_seg_directory_mode(args):
@@ -849,9 +879,12 @@ def run_seg_directory_mode(args):
         print(f"[ERROR] Input directory not found: {input_dir}")
         return
 
+    # Mode-named default (user decision 2026-07-20): the map's squaring is
+    # baked in at calc time, so a letterbox run and a CenterCrop run must not
+    # collide. An explicit --output_dir is trusted as-is (your call).
     output_dir = (
         Path(args.output_dir).resolve() if args.output_dir
-        else input_dir.parent / "raw_seg"
+        else input_dir.parent / f"raw_seg_{args.resize_mode}"
     )
 
     valid_exts  = {".jpg", ".jpeg", ".png", ".webp"}
@@ -874,37 +907,42 @@ def run_seg_directory_mode(args):
         skip_existing=not args.no_skip,
         input_dir=input_dir,
         local_files_only=args.local_files_only,
+        resize_mode=args.resize_mode,
     )
-    print("\nNext step — build training JSONLs with --data_dir, then seg_training.py")
+    print("\nNext step — build training JSONLs with --data_dir, then segformer_training.py")
 
 
 # ============================================================================ #
 #  SINGLE-IMAGE MODE  (--image)                                                #
 #  One image in -> one seg map saved BESIDE it: <dir>/<stem>_seg_map.png       #
 #  This is the "I have one new CARLA/real-world photo, give me its map so I    #
-#  can run seg_inference.py on it" workflow (user spec 2026-07-20).            #
+#  can run segformer_inference.py on it" workflow (user spec 2026-07-20).            #
 # ============================================================================ #
 
 def run_single_image_mode(args) -> None:
     """
     Compute the seg map for exactly ONE image and save it NEXT TO the image
-    (same folder), named `<image_stem>_seg_map.png`.
+    (same folder), named `<image_stem>_seg_map_<resize_mode>.png`.
 
     Why beside the image (not an output tree): a single ad-hoc image has no
     dataset structure to mirror; keeping the map next to its source makes the
     (image, map) pair self-documenting and directly usable as
-    seg_inference.py's  "inference.seg_maps=[...]" + "inference.images=[...]".
+    segformer_inference.py's  "inference.seg_maps=[...]" + "inference.images=[...]".
     The `_seg_map` suffix matches the dataset-scan naming convention, so a
-    file is recognisable as pipeline output wherever it lives.
+    file is recognisable as pipeline output wherever it lives. The resize_mode
+    is baked into the FILENAME here (not a folder, since there is no separate
+    output folder in this mode) — user decision 2026-07-20 — so computing
+    both modes for the same image never overwrites the other.
     """
     image_path = Path(args.image).resolve()
     if not image_path.exists():
         raise FileNotFoundError(f"--image not found: {image_path}")
 
-    out_path = image_path.parent / (image_path.stem + "_seg_map.png")
+    out_path = image_path.parent / (image_path.stem + f"_seg_map_{args.resize_mode}.png")
     print(f"\n[single-image mode]")
-    print(f"  image   : {image_path}")
-    print(f"  seg map : {out_path}")
+    print(f"  image       : {image_path}")
+    print(f"  resize_mode : {args.resize_mode}")
+    print(f"  seg map     : {out_path}")
 
     # out_path_fn overrides ALL path derivation in the core routine — the
     # single file goes exactly beside its source, nowhere else.
@@ -918,10 +956,11 @@ def run_single_image_mode(args) -> None:
         skip_existing=not args.no_skip,
         local_files_only=args.local_files_only,
         out_path_fn=lambda src: out_path,
+        resize_mode=args.resize_mode,
     )
     if str(image_path) in results:
         print(f"\nDone. Next: run inference with this map, e.g.:")
-        print(f'  python seg_inference.py ckpt_path=<best_model> '
+        print(f'  python segformer_inference.py ckpt_path=<best_model> resize_mode={args.resize_mode} '
               f'"inference.seg_maps=[{out_path.as_posix()}]" '
               f'"inference.images=[{image_path.as_posix()}]" '
               f'"inference.prompts=[\'your prompt\']"')
@@ -943,15 +982,17 @@ def run_json_file_mode(args) -> None:
             (--image_path, default 'raw_image_path'; 'prompt' is carried
             through if present, else saved as "").
     MAPS  : saved into a SIBLING folder of the images' common root —
-            <root_parent>/<root_name>_seg_map/ — mirroring each image's
-            relative folder structure, named <image_stem>_seg_map.png.
+            <root_parent>/<root_name>_seg_map_<resize_mode>/ — mirroring each
+            image's relative folder structure, named <image_stem>_seg_map.png.
             The source image tree is never written into (same contract as
-            dataset-scan mode; see _sibling_map_path's docstring).
+            dataset-scan mode; see _sibling_map_path's docstring). Mode-named
+            (user decision 2026-07-20) so a letterbox run and a CenterCrop
+            run never collide — the map's squaring is baked in at calc time.
     OUTPUT: <input_stem>_seg.jsonl beside the input manifest, each line:
               {"raw_image_path": ..., "seg_path": ..., "prompt": ...}
-            — the project-standard keys that seg_training.py's dataset and
-            seg_inference.py's json mode both read directly. Paths are
-            written ABSOLUTE with forward slashes (match scan mode).
+            — the project-standard keys that segformer_training.py's dataset
+            and segformer_inference.py's json mode both read directly. Paths
+            are written ABSOLUTE with forward slashes (match scan mode).
     """
     json_path = Path(args.json_file).resolve()
     if not json_path.exists():
@@ -989,9 +1030,10 @@ def run_json_file_mode(args) -> None:
     # Common root = deepest folder shared by ALL images (no hardcoding),
     # exactly how --data_dir mode finds its dataset root.
     images_root  = Path(os.path.commonpath([str(p) for p in abs_paths]))
-    sibling_root = images_root.parent / (images_root.name + "_seg_map")
+    sibling_root = images_root.parent / (images_root.name + f"_seg_map_{args.resize_mode}")
     print(f"\n[json_file mode]")
     print(f"  manifest    : {json_path}")
+    print(f"  resize_mode : {args.resize_mode}")
     print(f"  images root : {images_root}")
     print(f"  maps root   : {sibling_root}   (sibling, mirrored structure)")
 
@@ -1011,6 +1053,7 @@ def run_json_file_mode(args) -> None:
         skip_existing=not args.no_skip,
         local_files_only=args.local_files_only,
         out_path_fn=_out_path,
+        resize_mode=args.resize_mode,
     )
 
     # ---- write the updated manifest with the STANDARD keys ----------------- #
@@ -1112,6 +1155,21 @@ def main():
         help="Re-compute even if a seg PNG already exists.",
     )
     parser.add_argument(
+        "--resize_mode", type=str, default="letterbox",
+        choices=["letterbox", "CenterCrop"],
+        help=(
+            "Squaring technique applied to the RGB BEFORE SegFormer sees it "
+            "(user decision 2026-07-20). 'letterbox' (default) = SquarePad, "
+            "keeps the full scene, adds a flat pad band. 'CenterCrop' = the "
+            "original stock LoRAdapter recipe (configs/data/local.yaml), no "
+            "pad band, crops scene edges. THIS GETS BAKED INTO THE SAVED "
+            "MAP (unlike the grounded_sam branch) -- output folders/"
+            "filenames are mode-named so a letterbox run and a CenterCrop "
+            "run never collide, and training/inference must be configured "
+            "with the SAME resize_mode used here."
+        ),
+    )
+    parser.add_argument(
         "--image_path", type=str, default="raw_image_path",
         help="Key in your input JSONLs that holds the image path. "
              "Default: 'raw_image_path' (the PROJECT-STANDARD key — user "
@@ -1133,9 +1191,10 @@ def main():
     parser.add_argument(
         "--image", type=str, default=None,
         help="SINGLE-IMAGE mode: compute the seg map for exactly this one image "
-             "and save it NEXT TO it as <stem>_seg_map.png (same folder). The "
-             "printed 'Next:' line shows the ready-to-paste seg_inference.py "
-             "command for the pair. Example: --image data/new_frame.jpg",
+             "and save it NEXT TO it as <stem>_seg_map_<resize_mode>.png (same "
+             "folder). The printed 'Next:' line shows the ready-to-paste "
+             "segformer_inference.py command for the pair. "
+             "Example: --image data/new_frame.jpg",
     )
 
     # ---- Single-JSONL mode (sibling _seg_map folder + standard-key manifest) #
@@ -1143,8 +1202,8 @@ def main():
         "--json_file", type=str, default=None,
         help="SINGLE-JSONL mode: compute a seg map for every entry of this one "
              "manifest. Maps go to a SIBLING folder of the images' common root "
-             "(<root>_seg_map/, mirrored structure, <stem>_seg_map.png) — the "
-             "image tree is never written into. Writes <stem>_seg.jsonl beside "
+             "(<root>_seg_map_<resize_mode>/, mirrored structure, <stem>_seg_map.png) "
+             "— the image tree is never written into. Writes <stem>_seg.jsonl beside "
              "the input with the standard keys raw_image_path/seg_path/prompt, "
              "then self-verifies it. Example: --json_file data/my_frames.jsonl",
     )
@@ -1155,10 +1214,10 @@ def main():
         help="Activates DATASET-SCAN mode. Recursively scans this folder for files "
              "named --image_name (default raw_image.jpg), computes a seg map for each, "
              "and saves it into a SIBLING folder next to --dataset_dir (e.g. "
-             "<dataset_dir>_seg_map/), mirroring the internal folder structure, named "
-             "<folder>_seg_map.png. The source dataset folder is never written into. "
-             "Requires --data_dir (the folder holding train/val/test.jsonl) to recover each "
-             "image's prompt + split. "
+             "<dataset_dir>_seg_map_<resize_mode>/), mirroring the internal folder "
+             "structure, named <folder>_seg_map_<resize_mode>.png. The source dataset "
+             "folder is never written into. Requires --data_dir (the folder holding "
+             "train/val/test.jsonl) to recover each image's prompt + split. "
              "Example: --dataset_dir /data/custome_dataset --data_dir data/ --image_path target",
     )
     parser.add_argument(
@@ -1173,11 +1232,12 @@ def main():
                 args.image, args.json_file]):
         parser.error(
             "Provide one of:\n"
-            "  --image path/to/frame.jpg   (single image — map saved beside it as <stem>_seg_map.png)\n"
-            "  --json_file path/to/list.jsonl   (one manifest — maps to sibling _seg_map folder + <stem>_seg.jsonl)\n"
+            "  --image path/to/frame.jpg   (single image — map saved beside it as <stem>_seg_map_<mode>.png)\n"
+            "  --json_file path/to/list.jsonl   (one manifest — maps to sibling _seg_map_<mode> folder + <stem>_seg.jsonl)\n"
             "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps to a sibling folder)\n"
-            "  --data_dir data/   (builds data/seg_training/*.json from JSONL paths)\n"
-            "  --input_dir data/raw   (directory mode — PNGs only, no JSON)"
+            "  --data_dir data/   (builds data/seg_training_<mode>/*.json from JSONL paths)\n"
+            "  --input_dir data/raw   (directory mode — PNGs only, no JSON)\n"
+            "All modes accept --resize_mode letterbox|CenterCrop (default letterbox)."
         )
     _n_modes = sum(bool(m) for m in
                    [args.dataset_dir, args.data_dir, args.input_dir,
@@ -1215,7 +1275,8 @@ def main():
         args.batch_size = auto_batch_size(default=4, device=args.device)
 
     print(f"Device           : {args.device}")
-    print(f"Size             : {args.size}x{args.size}   (letterbox squaring — fixed, see references.md §9)")
+    print(f"Size             : {args.size}x{args.size}")
+    print(f"resize_mode      : {args.resize_mode}  (letterbox=SquarePad, CenterCrop=original repo recipe; baked into the saved map)")
     print(f"Batch            : {args.batch_size}")
     print(f"Model            : {args.model}")
     print(f"local_files_only : {args.local_files_only}")
@@ -1234,7 +1295,13 @@ def main():
         # seg_training/{train,val,test}.jsonl from the original splits.
         dataset_dir = Path(args.dataset_dir).resolve()
         data_dir    = Path(args.data_dir).resolve()
-        out_dir     = Path(args.output_dir).resolve() if args.output_dir else data_dir / "seg_training"
+        # Mode-named default (user decision 2026-07-20): without this, running
+        # calc twice with different resize_mode values would silently
+        # OVERWRITE the first run's train/val/test.jsonl with the second's,
+        # even though the PNG maps themselves are correctly mode-separated
+        # (sibling folder). An explicit --output_dir is trusted as-is.
+        out_dir = (Path(args.output_dir).resolve() if args.output_dir
+                   else data_dir / f"seg_training_{args.resize_mode}")
 
         if not dataset_dir.exists():
             parser.error(f"--dataset_dir not found: {dataset_dir}")
@@ -1254,14 +1321,17 @@ def main():
             skip_existing=not args.no_skip,
             local_files_only=args.local_files_only,
             subset_n=args.dry_run_n,
+            resize_mode=args.resize_mode,
         )
 
     elif args.data_dir:
         data_dir  = Path(args.data_dir).resolve()
         raw_dir   = Path(args.raw_dir).resolve()   if args.raw_dir  else data_dir / "raw"
         seg_dir   = Path(args.seg_dir).resolve()   if args.seg_dir  else data_dir / "raw_seg"
-        # output_dir: data/seg_training/ — mirrors depth's data/depth_training/ layout.
-        out_dir   = Path(args.output_dir).resolve() if args.output_dir else data_dir / "seg_training"
+        # output_dir: data/seg_training_<mode>/ — mode-named for the same
+        # collision-avoidance reason as scan mode above.
+        out_dir   = (Path(args.output_dir).resolve() if args.output_dir
+                    else data_dir / f"seg_training_{args.resize_mode}")
         if args.dry_run_n:
             print(f"\n[DRY RUN] First {args.dry_run_n} entries per JSON.")
         image_root = Path(args.image_root).resolve() if args.image_root else None
@@ -1276,6 +1346,7 @@ def main():
             local_files_only=args.local_files_only,
             image_path=args.image_path,
             image_root=image_root,
+            resize_mode=args.resize_mode,
         )
     else:
         run_seg_directory_mode(args)

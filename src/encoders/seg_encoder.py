@@ -197,7 +197,7 @@ class SegmentationEncoder(nn.Module):
     a depth map. It is an nn.Module so accelerate's .prepare()/.to()/.eval()
     treat it identically to the midas encoder.
 
-    During TRAINING: this encoder is NOT called at all — seg_training.py feeds
+    During TRAINING: this encoder is NOT called at all — segformer_training.py feeds
     pre-saved colour maps via skip_encode=True, bypassing this entirely. It
     runs ONLY at live inference inside model.sample() -> sample_easy() ->
     encoder(c). (Same pattern as depth: DepthEstimator runs live at inference,

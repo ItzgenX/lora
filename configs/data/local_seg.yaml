@@ -14,17 +14,16 @@ val_batch_size: 4       # 4 is safe under no_grad; matches depth default (was 1)
 workers: 4
 val_workers: 2
 
-# resize_mode: letterbox — SquarePad pads the shorter side (flat local-mean fill) before
-# Resize, keeping the full driving-scene frame. This RGB chain mirrors the SHARED
-# build_seg_square_preprocess() used by seg_map_calculations.py and seg_inference.py
-# (resize_mode="letterbox"); keep them consistent so train RGB and live inference match.
-transform:
-  - _target_: src.data.transforms.SquarePad      # pad shorter side -> square (flat local-mean fill)
-  - _target_: torchvision.transforms.Resize
-    size:
-      - ${size}
-      - ${size}
-  - _target_: torchvision.transforms.ToTensor     # [0,255] -> [0,1]
-  - _target_: torchvision.transforms.Normalize    # [0,1] -> [-1,1]
-    mean: [0.5, 0.5, 0.5]
-    std:  [0.5, 0.5, 0.5]
+# --- Resize technique (user decision 2026-07-20) -------------------------------- #
+# "letterbox"  : SquarePad (flat-fill pad) then Resize — keeps 100% of the
+#                scene, adds a flat-colour pad band. Default.
+# "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
+#                — Resize(size) then CenterCrop(size). No pad band, crops edges.
+# Drives the RGB transform (SegJsonDataModule builds it from this key via
+# src/data/transforms.py build_seg_preprocess). MUST match the resize_mode
+# seg_map_calculations.py used to COMPUTE the seg maps this manifest's
+# seg_path entries point at — unlike the grounded_sam branch, the map's
+# geometry is baked in at calc time here, not re-applied live at load time.
+# Override on the command line to compare the two:
+#   python segformer_training.py experiment=train_seg resize_mode=CenterCrop
+resize_mode: ${resize_mode}

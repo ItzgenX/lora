@@ -1,4 +1,4 @@
-﻿# Segmentation Pipeline — Zero to Hero Guide
+# Segmentation Pipeline — Zero to Hero Guide
 
 **Pipeline**: CTRLorALTer segmentation-conditioning arm (ECCV 2024, arXiv:2405.07913)  
 **What it does**: Fine-tunes LoRA blocks inside a Stable Diffusion 1.5 UNet so the model generates images that respect a user-supplied semantic segmentation map. The seg signal (19-class Cityscapes colour palette) is injected via the same mapper-network architecture used by the depth pipeline, keeping the base model frozen.
@@ -78,8 +78,8 @@ Why segmentation as a conditioning signal?
 | Stage | File | When |
 |-------|------|------|
 | C — offline preprocessing | `seg_map_calculations.py` | **Once**, before any training |
-| D — training | `seg_training.py` | Iterative; resumes from checkpoint |
-| D — inference | `seg_inference.py` | After training; per-image generation |
+| D — training | `segformer_training.py` | Iterative; resumes from checkpoint |
+| D — inference | `segformer_inference.py` | After training; per-image generation |
 
 Supporting files:
 
@@ -105,7 +105,7 @@ RAW IMAGE (arbitrary aspect ratio)
   [Stage C -- seg_map_calculations.py]  (run ONCE offline)
         |
         +-- build_seg_square_preprocess(size=512)   # letterbox squaring built in (fixed)
-        |     (same factory used by seg_inference.py -- parity guaranteed)
+        |     (same factory used by segformer_inference.py -- parity guaranteed)
         +-- SegmentationEncoder.label_ids(tensor)
         |     (SegFormer-b5 prediction --> raw class IDs [0..18])
         +-- Save as 8-bit grayscale PNG (mode "L", values 0..18)
@@ -115,7 +115,7 @@ RAW IMAGE (arbitrary aspect ratio)
 
         |
         v
-  [Stage D -- seg_training.py]  (per training step)
+  [Stage D -- segformer_training.py]  (per training step)
         |
         +-- SegJsonDataset.__getitem__:
         |     read seg PNG (L mode) --> NEAREST resize --> seg_colorize_ids() with palette
@@ -131,7 +131,7 @@ RAW IMAGE (arbitrary aspect ratio)
 
         |
         v
-  [Stage D -- seg_inference.py]
+  [Stage D -- segformer_inference.py]
         |
         +-- build_seg_square_preprocess(size=512)   # letterbox squaring built in (fixed)
         |   (SAME factory function as Stage C -- parity by construction)
@@ -457,7 +457,7 @@ def build_seg_square_preprocess(size):   # letterbox built in — stretch remove
 
 This function is imported by both:
 - `seg_map_calculations.py` (Stage C offline)
-- `seg_inference.py` (Stage D live inference)
+- `segformer_inference.py` (Stage D live inference)
 
 Parity is guaranteed by construction — there is only one definition.
 
@@ -472,23 +472,23 @@ During training `batch["seg"]` contains the colour map loaded from the saved PNG
 
 ### 5.7 Checkpoint Grid, val_steps/ckpt_steps, test.json
 
-Identical to the depth pipeline — see DEPTH.md 5.4–5.6. The seg trainer (`seg_training.py`) is a direct mirror of `depth_training.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
+Identical to the depth pipeline — see DEPTH.md 5.4–5.6. The seg trainer (`segformer_training.py`) is a direct mirror of `depth_training.py` with `batch["depth"]` replaced by `batch["seg"]` and depth-specific helpers renamed to their `_seg_*` equivalents.
 
 ### 5.7b Training Timing, Checkpoint Resume, and `training_params.txt` — see DEPTH.md 5.8–5.10
 
-Same execution-over-assertion caveats, same self-measurement recipe (swap `depth_training.py` for `seg_training.py`), same verified checkpoint-resume limitation (weights reload correctly; LR schedule/global_step restart from 0), same `training_params.txt` snapshot written to `outputs/train/seg/runs/.../training_params.txt`. One seg-specific fact, measured not assumed: peak VRAM at `batch_size=4` was **identical to depth's measured value**, confirming `skip_encode=True` genuinely keeps the (much larger) SegFormer-b5 encoder out of the training forward pass; it isn't just architecturally true, it was checked with a real run.
+Same execution-over-assertion caveats, same self-measurement recipe (swap `depth_training.py` for `segformer_training.py`), same verified checkpoint-resume limitation (weights reload correctly; LR schedule/global_step restart from 0), same `training_params.txt` snapshot written to `outputs/train/seg/runs/.../training_params.txt`. One seg-specific fact, measured not assumed: peak VRAM at `batch_size=4` was **identical to depth's measured value**, confirming `skip_encode=True` genuinely keeps the (much larger) SegFormer-b5 encoder out of the training forward pass; it isn't just architecturally true, it was checked with a real run.
 
 ### 5.7c 2026-07-05 fixes — see DEPTH.md 5.12–5.14 (applies to seg identically)
 
 Three updates shared with depth, executed and verified on the seg side too:
 1. **Manifest collision fixed + maps regenerated** (DEPTH.md 5.12): the seg manifests had the same all-rows-point-to-one-PNG bug; 913/913 seg maps were regenerated with the fixed flat-fill SquarePad, manifests rebuilt (639/137/137, verifier PASS), regenerated PNG IDs confirmed within 0..18 on real files. Since 2026-07-07 both `--data_dir` and `--dataset_dir` save collision-free maps to the sibling `_seg_map` folder — either command is safe for this dataset.
-2. **`val/psnr_fixed` / `val/ssim_fixed` + `log_every_steps`** (DEPTH.md 5.13): identical implementation in `seg_training.py` (same `compute_psnr_ssim`, same fixed-scene protocol) — this is what makes the final depth-vs-seg comparison objective. Dead YAML keys (`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond`) removed from the seg configs too.
+2. **`val/psnr_fixed` / `val/ssim_fixed` + `log_every_steps`** (DEPTH.md 5.13): identical implementation in `segformer_training.py` (same `compute_psnr_ssim`, same fixed-scene protocol) — this is what makes the final depth-vs-seg comparison objective. Dead YAML keys (`use_empty_prompt_eval`, `n_samples`, `save_grid`, `log_cond`) removed from the seg configs too.
 3. **Batch-shape kernel jitter** (DEPTH.md 5.14): seg's measured form is 2–5 argmax flips per 262k pixels between saved PNGs and live single-image output (boundary ties). Acceptance: ID-mismatch fraction ≤ 1e-4; palette-colourisation vs `forward()` must stay exactly 0.0 (it does — shared `_predict_ids` + shared palette).
 4. **resize_mode: FINAL — letterbox only, stretch REMOVED** (2026-07-06, DEPTH.md 5.14a): the user evaluated stretch with real encoder previews (`outputs/viz/resize_mode_preview.png`) and rejected it (aspect distortion shifted seg classes — sky read as "building"). The former seg-side switch (`--resize_mode` flag, `inference.resize_mode` key, `build_seg_square_preprocess`'s `resize_mode` parameter) was deleted from the code so train and inference can never disagree by accident.
 
 ### 5.7d Best-model tracking + early stopping — see DEPTH.md 5.5 (applies to seg identically)
 
-`seg_training.py` mirrors depth's `do_validation` exactly: `do_segmentation_validation` records **when** the best model was found (`best_epoch`/`best_step`/`best_epoch_frac`) and writes the same enriched `best_model/info.txt` (epoch, epoch_frac, global_step, val/loss, timestamp + appended `val/psnr_fixed`/`val/ssim_fixed`). Each validation logs the same `[seg val] … | best: epochX stepY | N epoch(s) since improvement` plateau line and a `*** NEW BEST (seg) ***` line when best_model/ is replaced.
+`segformer_training.py` mirrors depth's `do_validation` exactly: `do_segmentation_validation` records **when** the best model was found (`best_epoch`/`best_step`/`best_epoch_frac`) and writes the same enriched `best_model/info.txt` (epoch, epoch_frac, global_step, val/loss, timestamp + appended `val/psnr_fixed`/`val/ssim_fixed`). Each validation logs the same `[seg val] … | best: epochX stepY | N epoch(s) since improvement` plateau line and a `*** NEW BEST (seg) ***` line when best_model/ is replaced.
 
 `configs/train_seg.yaml` has the same `early_stop_patience: 3` key (`0` = off): at each epoch end, if val/loss produces no new best for that many full epochs, seg training stops itself (best_model/ already saved). The interrupted epoch's final weights + grid are still captured on the way out.
 
@@ -504,7 +504,7 @@ Absent classes (in neither map) are excluded from the mean — the standard mIoU
 
 **Where it appears (rides the existing metric plumbing, no new wiring):**
 - **Training** — `_save_checkpoint_segmentation_images` scores the **fixed** scenes (fixed seed → comparable checkpoint-to-checkpoint) and adds `val/miou_fixed` to the returned `metrics` dict. It then flows automatically into TensorBoard, the `[seg metric]` log line, `best_model/info.txt`, and the checkpoint trend — same path as psnr/ssim.
-- **Inference** — `seg_inference.py` scores every entry, prints per-image mIoU, and writes `metrics.txt` (`mean mIoU (n=…)` + per-image lines) next to the results. That mean is the model's final controllability score.
+- **Inference** — `segformer_inference.py` scores every entry, prints per-image mIoU, and writes `metrics.txt` (`mean mIoU (n=…)` + per-image lines) next to the results. That mean is the model's final controllability score.
 
 **Reading it:** higher = better structural adherence; watch `val/miou_fixed` *rise* over training and plateau (a second opinion to `val/loss`, and the signal for when to stop). Note it depends on SegFormer as the judge — score every generation with the *same* SegFormer that conditioned it, or the comparison isn't apples-to-apples.
 
@@ -530,7 +530,7 @@ Absent classes (in neither map) are excluded from the mean — the standard mIoU
 2. **Best-model tracking** — `best_model/` + `best_model/info.txt` record the exact **epoch/step/timestamp** of the best val/loss (5.7d). After the run, `info.txt` *is* the answer to "how much training gave the best model."
 3. **Early stopping** — `early_stop_patience: 3` (config): if val/loss produces no new best for 3 full epochs, training **stops itself**. So a detached run finds its own stopping point; you don't have to predict it.
 
-**Practical recipe.** Launch with the 5-epoch budget (`python seg_training.py experiment=train_seg`), let early-stop + best-model do the work, then read `best_model/info.txt` for the epoch that won. If early-stop never fires and both curves are still climbing at epoch 5, the data wants more — bump `epochs` and rerun. If it plateaus at (say) epoch 2, the honest answer for *this dataset* is "~2 epochs," and you now have it **from a real run**, not from a number written in a config.
+**Practical recipe.** Launch with the 5-epoch budget (`python segformer_training.py experiment=train_seg`), let early-stop + best-model do the work, then read `best_model/info.txt` for the epoch that won. If early-stop never fires and both curves are still climbing at epoch 5, the data wants more — bump `epochs` and rerun. If it plateaus at (say) epoch 2, the honest answer for *this dataset* is "~2 epochs," and you now have it **from a real run**, not from a number written in a config.
 
 **Timing (how long in wall-clock)** is hardware-dependent and only measured on a reference 12 GB GPU, never the real Linux/A2000 target — run the self-measurement command in 5.7b once on the real machine to get seconds/step, then multiply by 18,680 for the worst-case (no early-stop) wall-clock.
 
@@ -541,6 +541,84 @@ SegFormer-b0 is a small model designed for speed, not accuracy. On Cityscapes dr
 - b5 achieves significantly higher mIoU on Cityscapes, especially on boundary-sensitive classes.
 
 Two old experiment configs (`train_seg_12gb.yaml`, `train_seg_cluster.yaml`) incorrectly referenced b0 and had wrong JSON paths (missing `data/` prefix). **Deleted on 2026-06-30** — confirmed no other file referenced them (grepped the repo), confirmed `train_seg.yaml` fully supersedes them. Use `configs/experiment/train_seg.yaml` only.
+
+### 5.9 `resize_mode` — letterbox vs CenterCrop [ADDED 2026-07-20]
+
+Mirrored from the `grounded_sam` branch (same user decision, same day): letterbox
+isn't necessarily the best squaring technique for this dataset — it's simply
+the one implemented first. `resize_mode` lets you train/calculate with either
+technique and compare by generated-image quality.
+
+| `resize_mode` | Technique | Trade-off |
+|---|---|---|
+| `letterbox` (default) | `SquarePad` (flat-fill pad) then `Resize` | Keeps 100% of the scene; the model must render a flat, information-free pad band |
+| `CenterCrop` | The **original stock LoRAdapter recipe** (`configs/data/local.yaml`) | No pad band; crops scene edges |
+
+**The critical difference from the grounded_sam branch: here the mode gets
+BAKED INTO THE SAVED MAP.** SegFormer computes the map from a squared RGB
+input, so `seg_map_calculations.py` must square the RGB *before* the map can
+even be computed — whatever `--resize_mode` you pass there becomes part of
+the saved PNG's actual pixel geometry, permanently. On grounded_sam the map
+is squared *live*, at load time, from a native-resolution file — no calc
+step exists there at all. Practical consequence: **you must calculate with
+the SAME resize_mode you intend to train with** — there is no live
+correction if they mismatch (unlike grounded_sam's loud safety check, which
+exists precisely because a live mismatch is possible there and isn't here).
+
+**One key, three stages, all mode-named so runs never collide:**
+```bash
+# 1. Calculate (bakes the mode into the saved maps + manifest folder name)
+python seg_map_calculations.py --data_dir data/ --resize_mode letterbox
+
+# 2. Train (must match — the config's data.json_file already points at the
+#    matching data/seg_training_${resize_mode}/ folder automatically)
+python segformer_training.py experiment=train_seg resize_mode=letterbox
+
+# 3. Infer (only affects the display panel here — cosmetic — but still
+#    names the output folder, so keep it consistent for traceability)
+python segformer_inference.py ckpt_path=outputs/train/seg_letterbox/runs/.../best_model resize_mode=letterbox inference.json_file=data/seg_training_letterbox/test.jsonl
+```
+To compare, run all three steps twice — once per mode — and judge the
+generated images:
+```bash
+python seg_map_calculations.py --data_dir data/ --resize_mode CenterCrop
+python segformer_training.py experiment=train_seg resize_mode=CenterCrop
+```
+
+**Output folders, all mode-named** so a `letterbox` run and a `CenterCrop`
+run never overwrite each other's maps, manifests, checkpoints, or results:
+```
+data/seg_training_letterbox/{train,val,test}.jsonl        (+ CenterCrop sibling)
+data/raw_seg_letterbox/  or  <dataset>_seg_map_letterbox/  (calc output, mode varies by input mode)
+outputs/train/seg_letterbox/runs/<date>/<time>/            (+ CenterCrop sibling)
+outputs/inference/seg_letterbox/results/<timestamp>/       (+ CenterCrop sibling)
+```
+`training_params.txt`, `best_model/info.txt`, and inference's `run_params.txt`
+all record `resize_mode` explicitly, so any output folder is self-documenting.
+
+**Verified by execution (2026-07-20, synthetic data, no real dataset
+touched):** a marker painted at an identical pixel location in a synthetic
+1280×800 image was tracked through `build_seg_preprocess` (tensor path) and
+`build_seg_display_preprocess` (display path) for both modes — 0px drift,
+paths agree exactly — and through the full `SegJsonDataModule` →
+`train_dataloader()` → real batch path, confirming `float32`, correct
+`(3,512,512)` shape, and correct `[-1,1]`/`[0,1]` ranges for both modes.
+Hydra config composition was also verified by execution: `resize_mode`
+correctly resolves `tag` → `seg_<mode>`, `data.json_file` →
+`data/seg_training_<mode>/train.jsonl`, and inference's `output_dir` →
+`outputs/inference/seg_<mode>/results`.
+
+**Known gap, disclosed rather than silently left inconsistent:** the
+worked examples elsewhere in this document (and in `SEG_TRAINING_GUIDE.md`)
+predate this change and still show the plain `data/seg_training/...` path
+without a mode suffix — they were not exhaustively rewritten. The path
+convention above (`data/seg_training_<mode>/...`) is the current, correct
+one; treat any un-suffixed `data/seg_training/` path you see elsewhere in
+these two docs as pre-2026-07-20 and in need of a mental `_<mode>` suffix.
+
+See [GROUNDED_SAM.md §5.0b](GROUNDED_SAM.md) for the twin explanation on
+the other branch, and [SEGFORMER_FILES.md](SEGFORMER_FILES.md) for a plain
+file-copy checklist.
 
 ---
 
@@ -634,7 +712,7 @@ Success:
 ### Stage D — Training
 
 ```powershell
-python seg_training.py experiment=train_seg
+python segformer_training.py experiment=train_seg
 ```
 
 Expected startup log:
@@ -665,13 +743,13 @@ The tfevents hostname field will be `seg` (from `cfg.tag = "seg"`), not the mach
 
 ```bash
 # single image + prompt:
-python seg_inference.py \
+python segformer_inference.py \
   ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \
   "inference.images=[/path/to/raw_image.jpg]" \
   "inference.prompts=['your prompt here']"
 
 # or a whole manifest:
-python seg_inference.py \
+python segformer_inference.py \
   ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \
   inference.json_file=data/seg_training/test.jsonl
 ```
@@ -710,20 +788,20 @@ Success: 4-panel JPG grids written to `outputs/inference/seg/results/`.
 | S1 | Config files — correct experiment YAML | **FIXED** | `configs/experiment/train_seg.yaml` confirmed correct (b5 model, correct `data/seg_training/*.json` paths). The two stale b0 configs (`train_seg_12gb.yaml`, `train_seg_cluster.yaml`) were deleted on 2026-06-30 after grepping the repo to confirm nothing else referenced them. |
 | S2 | b5 model availability | FIXED | Model was in HF cache (`~/.cache/huggingface/hub/models--nvidia--segformer-b5-finetuned-cityscapes-1024-1024/`). Copied to `checkpoints/local_models/segformer-b5-cityscapes/` on 2026-06-30. Dry run with `local_files_only=True` confirmed load succeeded (19 classes, 1172 weights loaded). |
 | S3 | Stage C — offline seg map generation | **PASS** | `python seg_map_calculations.py --data_dir data/` completed with 0 errors. 913 PNG files written to `data/raw_seg/`. All 3 JSON splits verified by built-in checker: `train.json 639/639`, `val.json 137/137`, `test.json 137/137`. PNG inspection: shape `(512, 512)`, dtype `uint8`, values in `[0, 18]` — correct. |
-| S4 | Stage D — training startup | PENDING FIRST RUN | `seg_training.py` mirrors `train_depth.py` exactly; training not yet executed. Next step: `python seg_training.py experiment=train_seg`. Success criterion: startup log shows `19 classes`, loss begins decreasing within first 100 steps. |
-| S5 | Train/inference preprocessing parity | CODE READS CORRECT — NOT YET VERIFIED BY EXECUTION | `build_seg_square_preprocess()` SSOT confirmed imported by both `seg_map_calculations.py` and `seg_inference.py`. Parity is guaranteed by construction. Cannot be verified by execution until inference is run with a trained checkpoint. |
+| S4 | Stage D — training startup | PENDING FIRST RUN | `segformer_training.py` mirrors `train_depth.py` exactly; training not yet executed. Next step: `python segformer_training.py experiment=train_seg`. Success criterion: startup log shows `19 classes`, loss begins decreasing within first 100 steps. |
+| S5 | Train/inference preprocessing parity | CODE READS CORRECT — NOT YET VERIFIED BY EXECUTION | `build_seg_square_preprocess()` SSOT confirmed imported by both `seg_map_calculations.py` and `segformer_inference.py`. Parity is guaranteed by construction. Cannot be verified by execution until inference is run with a trained checkpoint. |
 | S6 | Val loss + checkpoint grid | PENDING FIRST RUN | Blocked on S4 (training). Code mirrors train_depth.py's verified grid logic. |
 | S7 | TensorBoard tags | PENDING FIRST RUN | Blocked on S4. Expected tags: `train/loss`, `train/lr`, `val/loss`, `val/sample_00`…`val/sample_09`. |
-| S8 | Inference | PENDING FIRST RUN | `seg_inference.py` untested — no checkpoint available yet. Blocked on S4. |
+| S8 | Inference | PENDING FIRST RUN | `segformer_inference.py` untested — no checkpoint available yet. Blocked on S4. |
 | S9 | Known issues documented | DOCUMENTED | See 8 above. NEAREST-resize slow on large batches, no test-eval script. Stale configs (formerly S1) are now deleted, not just documented. |
 
 ### What is now unblocked
 
-Stage C is verified. The single remaining blocker before training can start is **running `seg_training.py`** — there are no more missing models, no empty data directories, no broken JSON paths. All prerequisites are met.
+Stage C is verified. The single remaining blocker before training can start is **running `segformer_training.py`** — there are no more missing models, no empty data directories, no broken JSON paths. All prerequisites are met.
 
 ```powershell
 # Run on Ubuntu (final training machine):
-python seg_training.py experiment=train_seg
+python segformer_training.py experiment=train_seg
 ```
 
 Watch for these in the first 50 steps to confirm training is working:
@@ -746,7 +824,7 @@ See DEPTH.md 9.1 — identical for seg. The key difference: the experiment confi
 
 ```powershell
 # Override any key without editing a file:
-python seg_training.py experiment=train_seg epochs=3 val_steps=100 data.batch_size=2
+python segformer_training.py experiment=train_seg epochs=3 val_steps=100 data.batch_size=2
 ```
 
 ---
@@ -818,12 +896,12 @@ Same keys (`val_steps=500`, `ckpt_steps=1000`, `val_batches=64`). See DEPTH.md 9
 
 ```powershell
 # From a JSONL manifest:
-python seg_inference.py \
+python segformer_inference.py \
   ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \
   inference.json_file=data/seg_training/test.jsonl
 
 # Single image:
-python seg_inference.py \
+python segformer_inference.py \
   ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \
   "inference.images=[data/raw/000417/raw_image.jpg]" \
   "inference.prompts=['a driving scene at night in the rain']"
@@ -865,7 +943,7 @@ warped into a generic blob (deep interior pixels see nothing but flat colour in
 every direction).
 
 **Two independent inference-time knobs, no retraining required** (both in
-`sample_easy`, `src/model.py`; wired through `seg_inference.py` above):
+`sample_easy`, `src/model.py`; wired through `segformer_inference.py` above):
 
 1. **`lora_scale_start`/`lora_scale_end`/`lora_scale_decay_start_frac`** — holds
    full conditioning strength for the early layout-deciding steps, then linearly
@@ -897,7 +975,7 @@ maintained on its own branch).
 
 ### 10.4b Inference now ALWAYS uses a PROVIDED map — never computes one live [ADDED 2026-07-17]
 
-**Change (user decision):** `seg_inference.py` no longer runs any segmentation
+**Change (user decision):** `segformer_inference.py` no longer runs any segmentation
 model live. Previously it ran SegFormer on the input photo TWICE — once via
 `model.encoders[0](img_tensor)` to build the "SEG MAP" display panel, and again
 inside `sample_easy` (which called `encoder(c)` unconditionally) to build the
@@ -910,10 +988,10 @@ populate the ORIGINAL display panel, never touched by any model.
 **Mechanism:**
 - `sample_easy` gained a `skip_encode: bool = False` parameter, mirroring the
   pattern `sample_custom` already had (`cond = c if skip_encode else
-  encoder(c)`). `seg_inference.py` now calls `model.sample(..., cs=[seg_tensor],
+  encoder(c)`). `segformer_inference.py` now calls `model.sample(..., cs=[seg_tensor],
   skip_encode=True)` for both the prompted and empty-prompt (RAW SEG GEN)
   generations.
-- A new helper `_load_seg_map()` in `seg_inference.py` loads the raw class-ID PNG
+- A new helper `_load_seg_map()` in `segformer_inference.py` loads the raw class-ID PNG
   and colourises it, mirroring `src/data/local_seg.py`'s
   `_load_seg_colormap` EXACTLY (same NEAREST resize, same `seg_colorize_ids`
   call, same palette) — this is what guarantees a map loaded at inference
@@ -922,7 +1000,7 @@ populate the ORIGINAL display panel, never touched by any model.
   against the requested map — a different use of the encoder than "computing
   the input map," since it runs AFTER generation) is now guarded by
   `encoder.live_available`, mirroring the guard already added to
-  `seg_training.py`. It's skipped cleanly — not a crash — for any encoder with
+  `segformer_training.py`. It's skipped cleanly — not a crash — for any encoder with
   no live path.
 
 **Why this matters beyond SegFormer:** this makes inference identical for any
@@ -953,47 +1031,47 @@ training machine.
 ```powershell
 python seg_map_calculations.py --data_dir data/ --image_path target --dry_run_n 3
 
-python seg_training.py experiment=train_seg `
+python segformer_training.py experiment=train_seg `
   epochs=1 val_steps=10 ckpt_steps=20 val_batches=4 n_grid_images=2 `
   "data.workers=0" ignore_check=true
 ```
 
 #### Full training run (Ubuntu, 5 epochs)
 ```bash
-python seg_training.py experiment=train_seg
+python segformer_training.py experiment=train_seg
 ```
 
 #### Resume interrupted training
 ```bash
-python seg_training.py experiment=train_seg \
+python segformer_training.py experiment=train_seg \
   "lora.struct.ckpt_path=outputs/train/seg/runs/2026-07-01/00-47-30/checkpoint-epoch2/step4000"
 ```
 
 #### Reduce memory (OOM on a 12 GB GPU)
 ```powershell
-python seg_training.py experiment=train_seg data.batch_size=1 gradient_accumulation_steps=4
+python segformer_training.py experiment=train_seg data.batch_size=1 gradient_accumulation_steps=4
 ```
 
 #### Images on a different drive (Ubuntu training with images at /mnt/data)
 ```bash
-python seg_training.py experiment=train_seg data.image_root=/mnt/data
+python segformer_training.py experiment=train_seg data.image_root=/mnt/data
 ```
 
 #### Watch 20 fixed scenes per checkpoint (strong convergence signal)
 ```powershell
-python seg_training.py experiment=train_seg n_grid_images=40
+python segformer_training.py experiment=train_seg n_grid_images=40
 # 20 fixed + 20 fresh — each checkpoint grid shows same 20 scenes for comparison
 ```
 
 #### Add empty-prompt panel (see pure seg conditioning)
 ```powershell
-python seg_training.py experiment=train_seg grid_include_empty_prompt=true
+python segformer_training.py experiment=train_seg grid_include_empty_prompt=true
 # 4th panel: "RAW SEG GEN" — no text, only the seg map drives generation
 ```
 
 #### Evaluate on test split after training
 ```powershell
-python seg_inference.py `
+python segformer_inference.py `
   ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model `
   inference.json_file=data/seg_training/test.jsonl `
   inference.save_generated_only=true `

@@ -8,7 +8,7 @@ configs/experiment/train_seg.yaml (the SegFormer pipeline).
 This script NEVER writes or modifies any file. You review the recommendation
 and paste the values into the YAML yourself.
 
-WHY THIS EXISTS: seg_training.py used to auto-scale batch_size /
+WHY THIS EXISTS: segformer_training.py used to auto-scale batch_size /
 gradient_accumulation_steps to the detected GPU at runtime. That was removed
 deliberately -- a fixed, explicit YAML you can read and quote is worth more
 than a value that silently depends on which GPU happened to run it. This
@@ -16,18 +16,20 @@ script gives you the same calculation, but as a one-time, reviewed-by-you
 recommendation instead of hidden runtime behaviour.
 
 --data_dir has NO default and is REQUIRED: point it at your real
-data/seg_training directory (train.jsonl/val.jsonl/test.jsonl) -- there is no
-sensible default across different machines/datasets, so it's always explicit.
+data/seg_training_<resize_mode> directory (train.jsonl/val.jsonl/test.jsonl,
+mode-named since seg_map_calculations.py wrote it -- user decision
+2026-07-20) -- there is no sensible default across different
+machines/datasets/modes, so it's always explicit.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
-  python recommend_training_params.py --data_dir data/seg_training --epochs 10
-  python recommend_training_params.py --data_dir data/seg_training --device cuda:1
+  python recommend_training_params.py --data_dir data/seg_training_letterbox --epochs 10
+  python recommend_training_params.py --data_dir data/seg_training_letterbox --device cuda:1
 
 NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
 ~12GB GPU is MEASURED (real training runs, this project, 2026-07-02). For any
 other GPU size, the recommendation is a REASONED linear extrapolation of that
 measurement, NOT independently verified on such hardware -- always sanity
-check with a short real dry run (see seg_training.py's docstring) before
+check with a short real dry run (see segformer_training.py's docstring) before
 committing to a long training run.
 """
 
@@ -83,7 +85,7 @@ def main():
         "--data_dir", type=str, default=None, required=True,
         help="Folder with train.jsonl/val.jsonl/test.jsonl to count real images from. "
              "REQUIRED, no default -- there is no sensible default across "
-             "different machines/datasets. Example: --data_dir data/seg_training.",
+             "different machines/datasets. Example: --data_dir data/seg_training_letterbox.",
     )
     parser.add_argument("--epochs", type=int, default=5, help="Epochs to compute step totals for. Default: 5.")
     parser.add_argument("--device", type=str, default=None, help="cuda / cuda:N / cpu. Default: auto-detect.")
@@ -190,7 +192,13 @@ def main():
     print()
     print(f"  n_grid_images                : 10   (5 fixed + 5 fresh -- already-validated default)")
     print(f"  size                         : 512")
-    print(f"  resize_mode                  : letterbox")
+    print(f"  resize_mode                  : letterbox  [default -- YOUR CHOICE, not a recommendation]")
+    print(f"    letterbox (SquarePad, default) keeps 100% of the scene, adds a pad band.")
+    print(f"    CenterCrop (original stock LoRAdapter recipe) has no pad band, crops scene edges.")
+    print(f"    UNLIKE the grounded_sam branch, this mode is baked into the SAVED MAP -- you")
+    print(f"    must run seg_map_calculations.py with the SAME --resize_mode before training.")
+    print(f"    This tool doesn't pick for you -- calculate + train both and compare by")
+    print(f"    generated-image quality: --resize_mode letterbox or --resize_mode CenterCrop.")
 
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()

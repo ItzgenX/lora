@@ -1,38 +1,43 @@
 # configs/inference_seg.yaml
 # --------------------------
-# Base config for seg_inference.py — the segmentation twin of inference_depth.yaml.
+# Base config for segformer_inference.py — the segmentation twin of inference_depth.yaml.
 #
 # Loads a trained segmentation-conditioned LoRAdapter checkpoint and generates
 # images conditioned on the LIVE SegFormer-b5-Cityscapes segmentation of each input.
 #
 # HOW IT WORKS:
-#   - SegmentationEncoder (the seg encoder) runs automatically inside model.sample()
-#     (sample_easy calls encoder(c) — no skip_encode), so segmentation is computed
-#     LIVE at inference. You do NOT need pre-computed maps at inference time.
-#   - The preprocess used here (build_seg_square_preprocess in seg_inference.py) is
-#     IDENTICAL to the one used by seg_map_calculations.py, guaranteeing that
-#     the live seg map matches the saved training map (train/inference parity).
+#   - CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED
+#     segmentation map (seg_path) -- it NEVER computes one live from a raw
+#     photo. The paragraph this replaces (claiming live SegFormer inference)
+#     went stale when that change landed and was corrected 2026-07-20 -- the
+#     `inference:` block's own comments below were already accurate; this
+#     header wasn't. See segformer_inference.py's module docstring for the
+#     full mechanism (skip_encode=True, exactly like training).
+#   - resize_mode (below) only affects the ORIGINAL display panel's geometry
+#     (cosmetic) -- the seg map itself was already squared at CALC time by
+#     seg_map_calculations.py, so there is no live train/inference squaring
+#     mismatch possible here (unlike the grounded_sam branch).
 #
 # USAGE — from a JSON manifest (recommended):
-#   python seg_inference.py \
-#       ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-3000 \
-#       inference.json_file=data/seg_training/test.jsonl \
-#       inference.output_dir=results/seg
+#   python segformer_inference.py \
+#       ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       resize_mode=letterbox \
+#       inference.json_file=data/seg_training_letterbox/test.jsonl
 #
-# USAGE — single image:
-#   python seg_inference.py \
-#       ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-3000 \
+# USAGE — direct seg map + optional raw image for the display panel:
+#   python segformer_inference.py \
+#       ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       resize_mode=letterbox \
+#       "inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]" \
 #       "inference.images=[data/raw/000417/raw_image.jpg]" \
-#       "inference.prompts=['driving in rain at night']" \
-#       inference.output_dir=results/seg
+#       "inference.prompts=['driving in rain at night']"
 #
-# OUTPUT (per input image):
-#   results/seg/
-#       raw_image_grid.jpg        ← 4-panel: ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN
-#       raw_image_original.jpg
-#       raw_image_seg.jpg         ← SegFormer-b5 colour conditioning map
-#       raw_image_predicted.jpg
-#       raw_image_raw_seg_gen.jpg ← same seg, empty prompt (pure seg adherence)
+# OUTPUT (per input image, under outputs/inference/seg_<mode>/results/<timestamp>/):
+#       <stem>_grid.jpg        ← 4-panel: ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN
+#       <stem>_original.jpg
+#       <stem>_seg.jpg         ← SegFormer-b5 colour conditioning map
+#       <stem>_predicted.jpg
+#       <stem>_raw_seg_gen.jpg ← same seg, empty prompt (pure seg adherence)
 
 defaults:
   - model: sd15
@@ -41,10 +46,18 @@ defaults:
   - _self_
 
 # ---- Checkpoint -----------------------------------------------------------
-# Path to the checkpoint directory produced by seg_training.py.
+# Path to the checkpoint directory produced by segformer_training.py.
 # Structure expected:  <ckpt_path>/struct/lora-checkpoint.pt
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
-ckpt_path: ???     # e.g. outputs/train/seg/runs/2024-01-01/00-00-00/checkpoint-3000
+ckpt_path: ???     # e.g. outputs/train/seg_letterbox/runs/2026-01-01/00-00-00/best_model
+
+# ---- Resize technique (user decision 2026-07-20) -----------------------------
+# Only affects the ORIGINAL display panel's geometry here (cosmetic) — the
+# seg map itself was already squared at CALC time (seg_map_calculations.py),
+# so there's no live squaring mismatch risk the way there is on the
+# grounded_sam branch. Still recorded in run_params.txt for a self-documenting
+# result folder, and names the output folder below.
+resize_mode: letterbox
 
 # ---- Global resolution (must match training) ------------------------------
 size: 512          # square canvas; must match what training/calc used
@@ -54,8 +67,8 @@ seed: 42
 # null (default) = auto-detect a GPU and REFUSE to run if none is visible
 # (see src/utils.py resolve_device() — this script must never silently fall
 # back to CPU). Set explicitly to override, e.g.:
-#   python seg_inference.py device=cuda:1 ...
-#   python seg_inference.py device=cpu ...       (explicit opt-in to CPU)
+#   python segformer_inference.py device=cuda:1 ...
+#   python segformer_inference.py device=cpu ...       (explicit opt-in to CPU)
 device: null
 
 # =============================================================================
@@ -66,7 +79,7 @@ device: null
 # Both the local folder AND the hub id are listed; the flag picks which.
 #   local_files_only: true   -> use LOCAL folders (*_model_path), offline.
 #   local_files_only: false  -> use HUB ids (*_model_name); download if missing.
-# The choice is made in seg_inference.py (reads this flag, sets model.model_name
+# The choice is made in segformer_inference.py (reads this flag, sets model.model_name
 # / encoder.model before the model is built). Local paths are relative to the repo
 # root; the code makes them absolute.
 local_files_only: true
@@ -80,21 +93,24 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes
 
 # ---- Base diffusion model -------------------------------------------------
 model:
-  model_name: ${base_model_name}   # default; seg_inference.py overrides to base_model_path when local_files_only=true
+  model_name: ${base_model_name}   # default; segformer_inference.py overrides to base_model_path when local_files_only=true
 
 # ---- LoRA (inference mode — weights not updated) --------------------------
 lora:
   struct:
     optimize: false   # frozen at inference
     encoder:
-      # LIVE seg encoder at inference — same model the training maps were computed with.
-      model: ${seg_model_name}   # default; seg_inference.py overrides to seg_model_path when local_files_only=true
+      # NOT called during inference (skip_encode=True, see segformer_inference.py's
+      # docstring) -- this key exists only because the encoder slot's `model` field
+      # is inspected before the encoder-model rewrite is skipped; the SAME model
+      # the training maps were computed with, for provenance clarity only.
+      model: ${seg_model_name}   # default; segformer_inference.py overrides to seg_model_path when local_files_only=true
 
 # ---- Inference parameters -------------------------------------------------
 # CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED
 # segmentation map -- it never computes one live from a raw photo. seg_maps/
 # seg_path is REQUIRED; images/raw_image_path is now OPTIONAL and used ONLY
-# to display the ORIGINAL panel (no model ever runs on it). See seg_inference.py
+# to display the ORIGINAL panel (no model ever runs on it). See segformer_inference.py
 # module docstring for the full reasoning.
 inference:
   # Input — choose ONE:
@@ -106,13 +122,14 @@ inference:
 
   prompts:   []         # prompts for 'seg_maps' list mode; leave empty to use JSON prompts
 
-  # Output:
-  output_dir: outputs/inference/seg/results     # relative to repo root (resolved in seg_inference.py)
+  # Output: mode-named so results are always traceable to which technique made them.
+  output_dir: outputs/inference/seg_${resize_mode}/results     # relative to repo root (resolved in segformer_inference.py)
   save_generated_only: false   # true → save only predicted image, mirroring folder structure
 
-  # Preprocessing: letterbox squaring is FIXED project-wide (stretch option
-  # removed by user decision 2026-07-06); there is deliberately no knob here,
-  # so inference can never disagree with training.
+  # Preprocessing: squaring technique is controlled by the top-level
+  # `resize_mode` key above (user decision 2026-07-20) -- affects ONLY the
+  # ORIGINAL display panel here (cosmetic); the seg map's own squaring is
+  # already baked in at calc time and unaffected by this key.
 
   # Generation:
   n_samples:           1    # number of generated images per input image
@@ -142,6 +159,6 @@ inference:
 
 hydra:
   run:
-    dir: outputs/inference/seg/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/inference/seg_${resize_mode}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
   job:
     chdir: true

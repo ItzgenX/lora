@@ -115,8 +115,8 @@ what happens when your training needs longer than that.
 ```
 "300 seconds before my time limit hits, send my script a USR1 signal as a
 warning" (`B:` = deliver it to the (B)atch script itself, not just child
-processes). This project's `seg_training.py` already listens for USR1
-(`seg_training.py:90-93`) and responds by saving a checkpoint and exiting
+processes). This project's `segformer_training.py` already listens for USR1
+(`segformer_training.py:90-93`) and responds by saving a checkpoint and exiting
 cleanly — this line is what makes that safety-net actually fire. Without it,
 SLURM just kills the job outright at the 24h mark with no warning.
 
@@ -140,7 +140,7 @@ is done once it starts your script; everything after the `#SBATCH` block
 just runs top to bottom like any shell script would on your own machine.
 
 ```bash
-srun python seg_training.py experiment=train_seg ...
+srun python segformer_training.py experiment=train_seg ...
 ```
 `srun` launches your program **inside the SLURM job's resource
 allocation** — it's what actually puts your Python process on the GPU node
@@ -150,7 +150,7 @@ resource usage properly tracked by SLURM (visible later via `sacct`).
 
 ### 4a. The block right before that `srun` line — sizing to THIS GPU
 
-`seg_training.py` itself never auto-scales its batch size — it just reads a
+`segformer_training.py` itself never auto-scales its batch size — it just reads a
 static `data.batch_size=4` from `configs/experiment/train_seg.yaml`, hand-
 tuned for a ~12GB reference GPU. Left as-is on a 16GB V100, that leaves real
 VRAM unused every step (not wrong, just wasteful). The script runs this
@@ -328,7 +328,7 @@ actually accurate for your specific case:
    ```bash
    sbatch --partition=develgpus --time=00:20:00 train_seg_jusuf.sbatch
    ```
-2. Open the `.out` log. `seg_training.py`'s progress bar prints a live
+2. Open the `.out` log. `segformer_training.py`'s progress bar prints a live
    `s/it` (seconds per iteration) or `it/s` figure. **Ignore the first
    5-10 steps** — those include one-time CUDA/cuDNN warmup and are
    noticeably slower than steady-state. Read the number once it stabilizes.
@@ -380,13 +380,13 @@ clusters, and it's why §4's `--signal=B:USR1@300` line matters:
 
 1. Your job runs for up to 24h.
 2. 300 seconds before the limit, SLURM sends `SIGUSR1`.
-3. `seg_training.py`'s signal handler (`seg_training.py:90-93`) sets a flag;
+3. `segformer_training.py`'s signal handler (`segformer_training.py:90-93`) sets a flag;
    the training loop finishes its current step, force-saves a validation +
-   checkpoint, and exits cleanly (`seg_training.py:759-802`) — instead of
+   checkpoint, and exits cleanly (`segformer_training.py:759-802`) — instead of
    being killed mid-write with a corrupted or missing checkpoint.
 4. The job's `.out` log prints the checkpoint path it just saved.
 5. You submit AGAIN, this time setting `RESUME_CKPT` in the script to that
-   path — `seg_training.py` loads it via
+   path — `segformer_training.py` loads it via
    `lora.struct.ckpt_path=<that path>` and continues from there.
 6. Repeat until `early_stop_patience` decides training is done (see
    `SEG_TRAINING_GUIDE.md` §1a / `GROUNDED_SAM.md` §5.1c for how that

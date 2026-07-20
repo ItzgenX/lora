@@ -5,7 +5,7 @@ from PIL import Image, ImageFile, ImageStat
 # most other viewers/decoders (Windows Photo Viewer, browsers, libjpeg-turbo
 # used elsewhere) silently accept these same files. This flag is process-
 # global; it lives here because src/data/transforms.py is imported by the
-# segmentation pipeline entrypoints (seg_map_calculations.py, seg_inference.py),
+# segmentation pipeline entrypoints (seg_map_calculations.py, segformer_inference.py),
 # so setting it once here covers every place an image gets loaded — a single
 # source of truth.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -169,12 +169,35 @@ class SquarePad:
 from torchvision import transforms as _tv   # local alias: avoids shadowing outer scope
 
 
-def build_seg_square_preprocess(size: int):
+RESIZE_MODES = ("letterbox", "CenterCrop")
+
+
+def _square_rgb_steps(size: int, resize_mode: str) -> list:
+    """
+    The GEOMETRIC steps (no ToTensor/Normalize) that square a PIL RGB image,
+    for the chosen resize_mode. Shared by build_seg_preprocess (adds tensor
+    conversion, for the model) and build_seg_display_preprocess (stays PIL,
+    for on-screen panels) so the two can never geometrically disagree.
+
+      "letterbox"  : SquarePad (flat-fill pad, current default) then Resize.
+                     Keeps 100% of the scene; adds a flat-colour pad band.
+      "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
+                     — torchvision Resize(size) [shorter edge -> size, aspect kept]
+                     then CenterCrop(size). No pad band, but crops the longer
+                     edge's overhang off the left/right (or top/bottom).
+    """
+    assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
+    if resize_mode == "letterbox":
+        return [SquarePad(), _tv.Resize((size, size))]
+    return [_tv.Resize(size), _tv.CenterCrop(size)]
+
+
+def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     """
     Build the ONE canonical RGB preprocessing pipeline for the SEGMENTATION pipeline.
 
     WHY THIS EXISTS (and why it belongs here, not in a seg-specific file):
-      Both seg_map_calculations.py (offline calc) and seg_inference.py (live
+      Both seg_map_calculations.py (offline calc) and segformer_inference.py (live
       inference) must apply byte-for-byte identical preprocessing so the seg map the
       network sees at inference exactly matches what was saved for training. The only
       way to guarantee that is to import the SAME function in both places — this is it.
@@ -192,29 +215,34 @@ def build_seg_square_preprocess(size: int):
     Args:
         size: final square side in pixels (e.g. 512). Must match cfg.size
               and the size used when the offline seg PNGs were computed.
+        resize_mode: "letterbox" (default) or "CenterCrop" — see _square_rgb_steps.
+          User decision 2026-07-20 (mirrored from the grounded_sam branch):
+          both techniques are selectable via the `resize_mode` config key so
+          results can be compared by training/calculating twice, once per mode.
+          UNLIKE the grounded_sam branch, this mode must also match what
+          seg_map_calculations.py used to COMPUTE the saved maps (the map's
+          squaring is baked in at calc time here, not re-applied live at load
+          time) — see seg_map_calculations.py's own resize_mode docs.
 
-    RESIZE STRATEGY IS FIXED: letterbox — SquarePad pads the shorter side to a
-    square with a flat local-mean fill, THEN Resize is a uniform scale (no
-    distortion). This is a FINAL user decision (2026-07-06, references.md §9):
-      • "crop" was excluded from the start (cuts driving-scene frame edges).
-      • "stretch" (direct Resize to square) was evaluated with real side-by-side
-        encoder previews (outputs/viz/resize_mode_preview.png) and REJECTED —
-        the aspect distortion shifted segmentation classes (sky read as
-        "building" in the test scene), and the former resize_mode toggle was
-        REMOVED so training and inference can never be run in different modes
-        by accident. Do not re-add a mode switch without a new decision.
-
-    Correctness note: the padded image is a (size, size) square before the
-    ToTensor step, so SegmentationEncoder always receives exactly (size, size)
-    input and never triggers the kind of internal forced-crop that MiDaS does.
+    Correctness note: the image is a (size, size) square before the ToTensor
+    step, so SegmentationEncoder always receives exactly (size, size) input
+    and never triggers the kind of internal forced-crop that MiDaS does.
     """
-    return _tv.Compose([
-        SquarePad(),                    # pad shorter side -> square (flat local-mean fill)
-        _tv.Resize((size, size)),       # uniform scale — input already square, no distortion
+    return _tv.Compose(_square_rgb_steps(size, resize_mode) + [
         _tv.ToTensor(),                 # PIL [0,255] -> tensor [0,1]
         # mean=std=0.5 maps [0,1] linearly to [-1,1] (the SD1.5 VAE / encoder range).
         _tv.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
+
+
+def build_seg_display_preprocess(size: int, resize_mode: str = "letterbox"):
+    """
+    Same geometry as build_seg_preprocess, but stops after squaring — returns a
+    PIL.Image, not a tensor. For DISPLAY-ONLY panels (e.g. the inference grid's
+    ORIGINAL panel) that must visually match what the model actually saw,
+    without needing the [-1,1] tensor conversion.
+    """
+    return _tv.Compose(_square_rgb_steps(size, resize_mode))
 
 
 if __name__ == "__main__":

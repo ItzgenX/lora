@@ -13,8 +13,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=24:00:00                        # 24h = hard max on 'gpus' — see §9 (resume) in the 0-to-hero guide
-#SBATCH --signal=B:USR1@300                    # warns the job 300s before the wall; seg_training.py already
-                                                # handles SIGUSR1 (seg_training.py:90-93) by saving a checkpoint
+#SBATCH --signal=B:USR1@300                    # warns the job 300s before the wall; segformer_training.py already
+                                                # handles SIGUSR1 (segformer_training.py:90-93) by saving a checkpoint
                                                 # and exiting cleanly instead of being killed mid-step
 #SBATCH --output=logs/train-%j.out
 #SBATCH --error=logs/train-%j.err
@@ -39,7 +39,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 RESUME_CKPT=""   # e.g. "outputs/train/seg/runs/2026-01-01/00-00-00/checkpoint-epoch3/step9000"
 
 # ---- Size batch_size / gradient_accumulation_steps to THIS GPU ------------
-# seg_training.py itself does NOT auto-scale batch_size -- it just reads the
+# segformer_training.py itself does NOT auto-scale batch_size -- it just reads the
 # static value in configs/experiment/train_seg.yaml (batch_size=4, tuned for
 # a ~12GB reference GPU: "peak VRAM ~11.1GB/12GB at batch_size=4"). Left as-is
 # on JUSUF's 16GB V100 nodes, that under-uses ~4GB of VRAM every step -- not
@@ -61,7 +61,7 @@ print(b, a)
 ")"
 echo "[INFO] GPU-sized: data.batch_size=${REC_BATCH}  gradient_accumulation_steps=${REC_ACCUM}  (effective batch = $((REC_BATCH * REC_ACCUM)))"
 
-srun python seg_training.py experiment=train_seg \
+srun python segformer_training.py experiment=train_seg \
     data.json_file="${DATA_DIR}/train.jsonl" \
     data.val_json_file="${DATA_DIR}/val.jsonl" \
     data.batch_size=${REC_BATCH} \

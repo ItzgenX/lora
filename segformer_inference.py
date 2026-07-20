@@ -1,5 +1,5 @@
 """
-seg_inference.py
+segformer_inference.py
 ----------------
 Run inference with a trained segmentation-conditioned LoRAdapter.
 
@@ -28,10 +28,16 @@ This script:
      scoring the OUTPUT after generation, a separate thing from "computing the
      conditioning map live."
 
+RESIZE_MODE (user decision 2026-07-20): pass resize_mode=letterbox (default)
+  or resize_mode=CenterCrop -- affects ONLY the ORIGINAL display panel's
+  geometry here (cosmetic); the seg map itself was already squared at CALC
+  time by seg_map_calculations.py. Also names the output folder:
+  outputs/inference/seg_<mode>/results/.
+
 INPUT OPTIONS — SAME SCHEMA training's manifests already use:
   a) JSON manifest file (recommended) — each entry needs "seg_path" (required),
      "raw_image_path" (optional, display only), "prompt" (optional):
-       inference.json_file=data/seg_training/test.jsonl
+       inference.json_file=data/seg_training_letterbox/test.jsonl
   b) Direct lists:
        "inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]"
        "inference.images=[data/raw/000417/raw_image.jpg]"   # optional, display only
@@ -49,24 +55,25 @@ OUTPUT MODES:
 
 USAGE:
   # Standard inference from a manifest (seg_path required, raw_image_path optional):
-  python seg_inference.py \\
-      ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      inference.json_file=data/seg_training/test.jsonl \\
-      inference.output_dir=outputs/inference/seg/results
+  python segformer_inference.py \\
+      ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+      resize_mode=letterbox \\
+      inference.json_file=data/seg_training_letterbox/test.jsonl
 
   # Direct seg map + optional raw image for the display panel:
-  python seg_inference.py \\
-      ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+  python segformer_inference.py \\
+      ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+      resize_mode=letterbox \\
       "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" \\
       "inference.images=[data/raw/000888/raw_image.jpg]" \\
       "inference.prompts=['two windows on a brick building with vines']"
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Single map dry run (replace YYYY-MM-DD/HH-MM-SS with actual run folder) ---
-  python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" "inference.prompts=['two windows on a brick building with vines']"
+  python segformer_inference.py ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=letterbox "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" "inference.prompts=['two windows on a brick building with vines']"
 
   # --- Batch test-set inference ---
-  python seg_inference.py ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/best_model inference.json_file=data/seg_training/test.jsonl
+  python segformer_inference.py ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=letterbox inference.json_file=data/seg_training_letterbox/test.jsonl
 """
 
 import hydra
@@ -83,7 +90,7 @@ from tqdm import tqdm
 from hydra.utils import get_original_cwd
 from src.model import ModelBase
 from src.utils import add_lora_from_config, resolve_device, compute_miou
-from src.data.transforms import build_seg_square_preprocess
+from src.data.transforms import build_seg_display_preprocess
 from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap, seg_colorize_ids
 
 torch.set_float32_matmul_precision("high")
@@ -197,10 +204,21 @@ def main(cfg):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"  seg_inference.py")
+    print(f"  segformer_inference.py")
     print(f"  Device     : {device}")
     print(f"  Output dir : {output_dir}")
     print(f"{'='*60}\n")
+
+    # resize_mode (user decision 2026-07-20): only affects the ORIGINAL
+    # display panel's geometry here (cosmetic) -- the seg map itself was
+    # already squared at CALC time (seg_map_calculations.py), so there is no
+    # live squaring mismatch risk the way there is on the grounded_sam
+    # branch. Still printed + recorded for a self-documenting run.
+    size        = cfg.size
+    resize_mode = cfg.get("resize_mode", "letterbox")
+    print(f"[resize_mode] {resize_mode}  (display-panel geometry only; seg map's "
+          f"squaring is baked in at calc time -- ensure it matches how your "
+          f"maps were computed)")
 
     # ── Pick LOCAL model folders vs HUB ids from the local_files_only flag ──────
     # Same logic as training, so inference uses the SAME model (parity rule).
@@ -284,19 +302,17 @@ def main(cfg):
 
     if not entries:
         print("[ERROR] No input seg maps provided (this script requires a PROVIDED map, not a raw photo).")
-        print("  Set inference.json_file=data/seg_training/test.jsonl  (entries need 'seg_path')")
+        print("  Set inference.json_file=data/seg_training_letterbox/test.jsonl  (entries need 'seg_path')")
         print("  or  \"inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]\"")
         return
 
-    # ------------------------------------------------------------------ #
-    # Raw-image preprocessing — SHARED function, DISPLAY ONLY now.         #
-    # build_seg_square_preprocess() is still used so an optional raw       #
-    # image, if provided, is squared/resized identically to training's     #
-    # convention -- but it is no longer fed to any model, only shown in    #
-    # the ORIGINAL panel. Output: [1, 3, H, W] in [-1, 1].                 #
-    # ------------------------------------------------------------------ #
-    size        = cfg.size
-    preprocess  = build_seg_square_preprocess(size=size)
+    # Raw-image preprocessing — DISPLAY ONLY (never fed to any model): squares
+    # an optional raw image with the SAME resize_mode geometry as training's
+    # RGB convention, so the ORIGINAL and SEG MAP grid panels visually align
+    # (previously this panel used a plain stretch-resize while the SEG MAP
+    # panel was letterboxed -- the two didn't align; fixed 2026-07-20,
+    # mirrored from the grounded_sam branch). Output: PIL.Image.
+    display_preprocess = build_seg_display_preprocess(size=size, resize_mode=resize_mode)
 
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
 
@@ -327,11 +343,12 @@ def main(cfg):
     # ------------------------------------------------------------------ #
     _inf = cfg.inference
     _params_lines = [
-        "seg_inference.py run parameters",
+        "segformer_inference.py run parameters",
         f"timestamp                    : {datetime.now().isoformat(timespec='seconds')}",
         f"ckpt_path                    : {cfg.ckpt_path}",
         f"seed                         : {cfg.seed}",
         f"size                         : {cfg.size}",
+        f"resize_mode                  : {resize_mode}  (display-panel geometry only; seg map's own squaring is baked in at calc time)",
         f"num_inference_steps          : {_inf.get('num_inference_steps', 50)}",
         f"guidance_scale               : {_inf.get('guidance_scale', 7.5)}",
         f"n_samples                    : {_inf.get('n_samples', 1)}",
@@ -378,7 +395,10 @@ def main(cfg):
             if not img_path.is_absolute():
                 img_path = Path(_root) / img_path
             if img_path.exists():
-                orig_pil = Image.open(img_path).convert("RGB")
+                # Square with the SAME resize_mode as the seg map's original
+                # squaring convention, so the ORIGINAL panel visually matches
+                # what SEG MAP shows.
+                orig_pil = display_preprocess(Image.open(img_path).convert("RGB"))
             else:
                 print(f"[WARN] raw_image_path not found: {img_path} — using blank placeholder.")
                 orig_pil = Image.new("RGB", (size, size), color=(40, 40, 40))
@@ -453,7 +473,8 @@ def main(cfg):
             print(f"  mIoU  : {miou:.4f}")
 
         # ---- Step 3: Save outputs ----------------------------------------
-        orig_display = orig_pil.resize((size, size)).convert("RGB")
+        # orig_pil is already (size,size) via display_preprocess above.
+        orig_display = orig_pil.convert("RGB")
 
         save_generated_only = cfg.inference.get("save_generated_only", False)
 
@@ -473,7 +494,7 @@ def main(cfg):
                 grid_path = output_dir / f"{stem}{suffix}_grid.jpg"
                 grid.save(grid_path, quality=95)
 
-                orig_display.resize((size, size)).save(
+                orig_display.save(
                     output_dir / f"{stem}_original.jpg"
                 )
                 seg_pil.resize((size, size)).convert("RGB").save(

@@ -9,7 +9,7 @@ maps on YOUR domain (car-hood in frame, night scenes) instead of the messy
 output the stock Cityscapes model gives you.
 
   THIS FILE          : image  +  correct label mask  ->  better SegFormer weights
-  seg_training.py    : (different job) trains the LoRAdapter diffusion model,
+  segformer_training.py    : (different job) trains the LoRAdapter diffusion model,
                        USING a frozen SegFormer to make conditioning maps.
 
 Do not confuse the two. This one has nothing to do with diffusion — it is a

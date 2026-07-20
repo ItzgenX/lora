@@ -11,7 +11,7 @@ parameter reference with seg-specific values.
 **Companion files:**
 - `SEGMENTATION.md` — architecture and pipeline explanation
 - `configs/experiment/train_seg.yaml` — the config you edit
-- `seg_training.py` — the training script
+- `segformer_training.py` — the training script
 
 ---
 
@@ -76,9 +76,9 @@ different datasets with different counts — run it once per pipeline.
 **`epochs` is an upper bound, not a target — early stopping already decides
 the real stop point.** `early_stop_patience: 3` is set in the shared base
 config `configs/train_seg.yaml` (used by both `experiment=train_seg` and
-`experiment=train_grounded_sam`, since both run through `seg_training.py`):
+`experiment=train_grounded_sam`, since both run through `segformer_training.py`):
 if val/loss produces no new best for 3 full epochs, training stops itself
-(`seg_training.py`, the "EARLY STOPPING" block near the end of the epoch
+(`segformer_training.py`, the "EARLY STOPPING" block near the end of the epoch
 loop) — `best_model/` is already saved at that point, so nothing is lost.
 Neither pipeline has an empirical convergence curve yet at real (60K-image)
 scale, so don't try to predict the exact right epoch count — set `epochs` to
@@ -107,7 +107,7 @@ noise, because we added it ourselves. That's the entire trick.
 
 ### 1a.2 The real code, step by step
 
-`seg_training.py:697` calls:
+`segformer_training.py:697` calls:
 ```python
 model_pred, loss, x0, _ = model.forward_easy(imgs, prompts, cs, skip_encode=True, ...)
 ```
@@ -161,7 +161,7 @@ loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")   # :567
 **This is the loss**: mean squared error between the model's guess and the
 real noise — `mean((model_pred - noise)^2)`. Lower loss = better
 noise-guesses = better denoising = better generation. `loss.backward()`
-(`seg_training.py:704`) uses this single number to compute gradients and
+(`segformer_training.py:704`) uses this single number to compute gradients and
 update every trainable weight (the LoRA `A`/`B`/`beta`/`gamma` parameters —
 the frozen UNet weights never change, per `add_lora_to_unet`).
 
@@ -169,11 +169,11 @@ the frozen UNet weights never change, per `add_lora_to_unet`).
 
 Two different losses get computed, answering different questions:
 
-- **`train/loss`** (`seg_training.py:718,724`) — the MSE above, computed on
+- **`train/loss`** (`segformer_training.py:718,724`) — the MSE above, computed on
   the batch you just trained on, WITH gradients on, logged every step.
   Inherently noisy (small batches, random noise/timestep each time) — watch
   the trend over dozens of steps, not any single value.
-- **`val/loss`** (`_segmentation_validation_loss`, `seg_training.py:269-332`)
+- **`val/loss`** (`_segmentation_validation_loss`, `segformer_training.py:269-332`)
   — the SAME formula, computed on held-out images the model never trains on,
   with `torch.no_grad()` (no learning happens), averaged over several
   batches, only at `val_steps` intervals. Its own docstring states exactly
@@ -182,7 +182,7 @@ Two different losses get computed, answering different questions:
   average."*
 
 **Watch `val/loss` to make decisions.** It's what `best_model`/early-stopping
-(`best_loss` tracking at `seg_training.py:509`, the early-stop check at
+(`best_loss` tracking at `segformer_training.py:509`, the early-stop check at
 `:778-793`) already use automatically. `train/loss` is only a sanity check —
 is it decreasing, is it NaN — not a decision signal.
 
@@ -193,7 +193,7 @@ for "the right epoch count" that doesn't require actually training:
 
 | What you observe | What it means | What to change |
 |---|---|---|
-| `train/loss` is `NaN` or explodes | Numerical instability / LR too aggressive | Lower `learning_rate`; gradients are already clipped to `max_norm=1.0` (`seg_training.py:711`) as a safety net |
+| `train/loss` is `NaN` or explodes | Numerical instability / LR too aggressive | Lower `learning_rate`; gradients are already clipped to `max_norm=1.0` (`segformer_training.py:711`) as a safety net |
 | `train/grad_norm` stays pinned at 1.0 for a long time | Gradients are being clipped constantly — the optimizer wants bigger steps than allowed | Normal early on; if it never relaxes, LR may be too high for this effective batch |
 | `val/loss` decreases then **flattens** | Model has converged on this data — more epochs teach it nothing new | Nothing to do — `early_stop_patience` (§1) catches this automatically |
 | `val/loss` **increases** while `train/loss` keeps falling | Overfitting — memorizing training images instead of generalizing | More epochs make this WORSE. Real fix is more/more-diverse data, not a hyperparameter |
@@ -235,7 +235,7 @@ requires you to already know the answer:
 4. **Launch training**, optionally watching
    `tensorboard --logdir outputs/train/seg/runs/` live (§5) for `val/loss`.
 5. **After it finishes** (either the epoch ceiling, or early-stop firing),
-   read `best_model/info.txt` (`seg_training.py:580-588` writes it: epoch,
+   read `best_model/info.txt` (`segformer_training.py:580-588` writes it: epoch,
    step, and the psnr/ssim/miou metrics for the checkpoint that won). **This
    is your empirically-discovered right epoch count for THIS dataset** —
    discovered by running, not predicted in advance. No dataset size or
@@ -269,7 +269,7 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes
 ```
 
 **What it is:** the frozen SegFormer-b5 encoder that produces segmentation maps.
-Used at inference (`seg_inference.py`) and in Stage C (`seg_map_calculations.py`).
+Used at inference (`segformer_inference.py`) and in Stage C (`seg_map_calculations.py`).
 NOT used during training (skip_encode=True).
 
 **Why b5 is locked (never use b0):**
@@ -278,7 +278,7 @@ For driving scenes (pedestrians, poles, traffic lights), b0 misclassifies thin s
 that matter for structural conditioning. See `SEGMENTATION.md §4` for full evidence.
 
 **This model is NOT loaded during training.** Only at Stage C and inference.
-The config key exists so `seg_inference.py` knows where to find it.
+The config key exists so `segformer_inference.py` knows where to find it.
 
 ---
 
@@ -325,7 +325,7 @@ JSONL:
 
 ```bash
 # ONE image -> map saved BESIDE it as <stem>_seg_map.png, same folder.
-# Prints a ready-to-paste seg_inference.py command for the pair.
+# Prints a ready-to-paste segformer_inference.py command for the pair.
 python seg_map_calculations.py --image path/to/frame.jpg
 
 # ONE manifest (only needs raw_image_path + optional prompt per line) ->
@@ -416,7 +416,7 @@ tag: seg
 **Never change this** when running seg training. If you run multiple seg experiments,
 use CLI overrides to add a sub-tag:
 ```powershell
-python seg_training.py experiment=train_seg tag=seg_lr3e4
+python segformer_training.py experiment=train_seg tag=seg_lr3e4
 # outputs go to outputs/train/seg_lr3e4/runs/...
 ```
 
@@ -432,7 +432,7 @@ lora:
 
 Identical to depth. CLI usage:
 ```powershell
-python seg_training.py experiment=train_seg \
+python segformer_training.py experiment=train_seg \
   "lora.struct.ckpt_path=outputs/train/seg/runs/2026-07-01/00-47-30/checkpoint-epoch2/step7500"
 ```
 
@@ -601,7 +601,7 @@ Neither is "better" — they condition on different aspects of the scene.
 | Seg path missing from manifest | `KeyError: seg_path` on training start | Rerun `seg_map_calculations.py --data_dir data/` to rebuild manifests |
 | Colour palette mismatch | Generated image has wrong class colours | `SEG_CITYSCAPES_PALETTE` in `seg_encoder.py` was modified; restore from git |
 | Val/loss worse than depth | Seg val/loss stuck above depth's | Normal at early steps; both should converge to similar range by epoch 3 |
-| PREDICTED ignores seg map | Generated image looks random | `skip_encode` may be False; check `seg_training.py` batch["seg"] path |
+| PREDICTED ignores seg map | Generated image looks random | `skip_encode` may be False; check `segformer_training.py` batch["seg"] path |
 
 ---
 
@@ -640,7 +640,7 @@ This generates a side-by-side table from both runs' TensorBoard logs:
 # (effective batch = 16). This is illustrative, not a value to paste blindly —
 # see §10 for the command that computes YOUR actual numbers from YOUR real
 # manifests once they're in place at data/seg_training/*.jsonl.
-# Run: python seg_training.py experiment=train_seg
+# Run: python segformer_training.py experiment=train_seg
 
 size: 512
 learning_rate: 1.0e-4
@@ -684,7 +684,7 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes   # b5, NOT b0
 
 ## 10. The full segmentation training checklist
 
-Before running `python seg_training.py experiment=train_seg` **at real,
+Before running `python segformer_training.py experiment=train_seg` **at real,
 full-capacity scale** (not the local 913-image smoke-test set):
 
 ```
@@ -718,7 +718,7 @@ full-capacity scale** (not the local 913-image smoke-test set):
     training actually stops.
 
 [ ] (Optional) Smoke test passes:
-    python seg_training.py experiment=train_seg \
+    python segformer_training.py experiment=train_seg \
       epochs=1 val_steps=10 ckpt_steps=20 n_grid_images=2 "data.workers=0"
 ```
 
@@ -731,7 +731,7 @@ separately and shouldn't be reused across the two.)
 
 ## 11. Running inference — output layout and the run recipe [ADDED 2026-07-20]
 
-`seg_inference.py` never computes a seg map — every call must supply a
+`segformer_inference.py` never computes a seg map — every call must supply a
 `seg_path` (single-image via `inference.seg_maps=[...]`, or a manifest via
 `inference.json_file=...`; `raw_image_path`/`inference.images` is optional,
 display-only). This is unconditional — there's no live-SegFormer inference
@@ -743,7 +743,7 @@ mode any more (see the file's own module docstring, "CHANGED 2026-07-17").
 with the same `output_dir`) can never overwrite or mix each other's files:
 
 ```bash
-python seg_inference.py \
+python segformer_inference.py \
     ckpt_path=outputs/train/seg/runs/2026-01-01/00-00-00/best_model \
     "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" \
     "inference.images=[data/raw/000888/raw_image.jpg]" \

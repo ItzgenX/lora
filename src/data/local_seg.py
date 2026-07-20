@@ -25,7 +25,7 @@ Returned by __getitem__:
     "seg"    : colour map   [3, H, W] in [0, 1]    (palette RGB)
     "caption": prompt string
   }
-seg_training.py reads batch["seg"].
+segformer_training.py reads batch["seg"].
 """
 
 import json
@@ -36,9 +36,9 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 
 from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, seg_palette_tensor, seg_colorize_ids
+from src.data.transforms import build_seg_preprocess
 
 
 class SegJsonDataset(Dataset):
@@ -176,7 +176,7 @@ class SegJsonDataModule:
     Data module reading a JSON manifest for train + optional validation.
 
     Exposes train_dataloader()/val_dataloader() and
-    .train_dataset / .val_dataset (seg_training.py indexes val_dataset directly for
+    .train_dataset / .val_dataset (segformer_training.py indexes val_dataset directly for
     the fixed-scene monitoring images). val_json_file MUST point at the real
     validation set — NEVER test.json (references.md §8).
     """
@@ -184,7 +184,6 @@ class SegJsonDataModule:
     def __init__(
         self,
         json_file: str,
-        transform: list,               # Hydra-instantiated image transforms (-> [-1,1])
         size: int = 512,
         val_json_file: str = None,
         batch_size: int = 8,
@@ -196,10 +195,19 @@ class SegJsonDataModule:
         image_key: str = "raw_image_path",
         seg_key: str = "seg_path",
         prompt_key: str = "prompt",
+        resize_mode: str = "letterbox",  # "letterbox" or "CenterCrop" (user decision
+                                       # 2026-07-20) — built ONCE here from
+                                       # build_seg_preprocess so train/val use the
+                                       # identical RGB transform. UNLIKE the
+                                       # grounded_sam branch, this does NOT affect
+                                       # the seg map here (already squared at calc
+                                       # time by seg_map_calculations.py) — it MUST
+                                       # match whatever mode that script used to
+                                       # compute the maps this manifest points at.
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
-        image_tfm    = transforms.Compose(transform)
+        image_tfm    = build_seg_preprocess(size=size, resize_mode=resize_mode)
         _img_root    = Path(project_root, image_root) if image_root else project_root
 
         self.batch_size     = batch_size

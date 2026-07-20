@@ -20,7 +20,7 @@ defaults:
 # Both the local folder AND the hub id are listed below; the flag picks which.
 #   local_files_only: true  -> use LOCAL folders (*_model_path). Fully offline.
 #   local_files_only: false -> use HUB ids (*_model_name); downloads if missing.
-# The choice is made in seg_training.py (sets model.model_name / encoder.model).
+# The choice is made in segformer_training.py (sets model.model_name / encoder.model).
 # Local paths are relative to the repo root; the code makes them absolute.
 local_files_only: true
 
@@ -39,12 +39,27 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes
 # below are exactly what runs. For a suggested starting point on your actual
 # GPU + dataset (prints only, never edits this file):
 #   python recommend_training_params.py
-#   For cluster: accelerate launch --num_processes=N seg_training.py ...
+#   For cluster: accelerate launch --num_processes=N segformer_training.py ...
 #   (values below are PER-GPU; re-run recommend_training_params.py and edit
 #   this file yourself if cluster GPUs have a different VRAM size)
 gradient_checkpointing: true           # REQUIRED on 12 GB — saves ~800MB VRAM (measured) at ~20% compute cost
 gradient_accumulation_steps: 4        # 4 bsz x 4 accum = 16 effective batch
 size: 512                              # square canvas; must match SD1.5 native resolution
+
+# --- Resize technique (user decision 2026-07-20) -------------------------------- #
+# "letterbox" (default) = SquarePad, keeps full scene, adds a pad band.
+# "CenterCrop"           = original stock LoRAdapter recipe (configs/data/local.yaml),
+#                          no pad band, crops scene edges. MUST match the mode
+#                          seg_map_calculations.py used to compute your maps
+#                          (SEGMENTATION.md's resize_mode section). Compare the
+#                          two by calculating + training twice and judging
+#                          generated-image quality:
+#   python seg_map_calculations.py --data_dir data/ --resize_mode letterbox
+#   python segformer_training.py experiment=train_seg resize_mode=letterbox
+# Drives data.resize_mode (below, via ${resize_mode}) AND the output folder
+# name via `tag`, so a trained model's folder always says which technique
+# (and therefore which map set) produced it.
+resize_mode: letterbox
 
 # =============================================================================
 # 1. GENERAL TRAINING PARAMETERS  (identical to depth — required for valid comparison)
@@ -92,10 +107,10 @@ data:
   val_batch_size: 4         # val uses no_grad — 4 is safe, gives 4x more coverage
   workers:        4
   val_workers:    2
-  # DIFF: seg_training/ (was depth_training/).
-  # Built by: python seg_map_calculations.py --data_dir data/
-  json_file:     data/seg_training/train.jsonl
-  val_json_file: data/seg_training/val.jsonl   # NEVER test.jsonl here (references.md §8)
+  # DIFF: seg_training/ (was depth_training/). Mode-named (resize_mode above):
+  # Built by: python seg_map_calculations.py --data_dir data/ --resize_mode letterbox
+  json_file:     data/seg_training_${resize_mode}/train.jsonl
+  val_json_file: data/seg_training_${resize_mode}/val.jsonl   # NEVER test.jsonl here (references.md §8)
 
 # =============================================================================
 # 3. GLOBAL FALLBACK PROMPT  (identical to depth)
@@ -124,7 +139,7 @@ grid_include_empty_prompt: false # OFF -> generate WITH prompt only (matches dep
 # =============================================================================
 bf16: true
 ignore_check: true                # live: silences the checkpoint-key completeness assert in add_lora_from_config
-tag: seg                          # DIFF: "seg" (was "depth") -> outputs/train/seg/...
+tag: seg_${resize_mode}           # DIFF: "seg_letterbox"/"seg_CenterCrop" -> outputs/train/seg_<mode>/...
 
 # =============================================================================
 # 6. MODEL OVERRIDES  (identical to depth)
@@ -157,8 +172,8 @@ lora:
 
 # LAUNCH COMMANDS:
 #   Single 12 GB GPU:
-#     python seg_training.py experiment=train_seg
+#     python segformer_training.py experiment=train_seg
 #
 #   Multi-GPU (if needed later):
-#     accelerate launch --num_processes=N seg_training.py experiment=train_seg
+#     accelerate launch --num_processes=N segformer_training.py experiment=train_seg
 #     # With N GPUs, effective batch = 4 x 4 x N. Consider scaling LR by sqrt(N).

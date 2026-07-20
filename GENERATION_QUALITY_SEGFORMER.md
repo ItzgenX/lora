@@ -66,7 +66,7 @@ at dataset-prep time, before `seg_map_calculations.py` runs on them.
 ## 5. What's already improved, no data change needed
 
 Two no-retrain inference knobs exist today (`model.py`'s `sample_easy`,
-wired through `seg_inference.py`'s `inference.*` config keys — see
+wired through `segformer_inference.py`'s `inference.*` config keys — see
 `SEG_TRAINING_GUIDE.md` §11 for the full run-recipe/output-layout docs):
 - `lora_scale_start=1.0, lora_scale_end=0.4` (`lora_scale_decay_start_frac`
   controls where the fade begins) lets the late denoising steps lean on

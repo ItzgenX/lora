@@ -1,5 +1,5 @@
 """
-seg_training.py
+segformer_training.py
 ---------------
 Train the segmentation-conditioned LoRAdapter on PRE-SAVED segmentation colour
 maps. On this branch the maps come from SegFormer (see SEGMENTATION.md); the
@@ -7,16 +7,16 @@ class palette + manifests are selected by the experiment config.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Smoke test (a few images, 3 short epochs) ---
-  python seg_training.py experiment=train_seg epochs=3 data.batch_size=1 gradient_accumulation_steps=1 val_steps=5 ckpt_steps=10
+  python segformer_training.py experiment=train_seg epochs=3 data.batch_size=1 gradient_accumulation_steps=1 val_steps=5 ckpt_steps=10
 
   # --- Full training run ---
-  python seg_training.py experiment=train_seg
+  python segformer_training.py experiment=train_seg
 
   # --- Full training — 4-GPU cluster ---
-  accelerate launch --num_processes=4 seg_training.py experiment=train_seg
+  accelerate launch --num_processes=4 segformer_training.py experiment=train_seg
 
   # --- Resume from checkpoint ---
-  python seg_training.py experiment=train_seg "lora.struct.ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
+  python segformer_training.py experiment=train_seg "lora.struct.ckpt_path=outputs/train/seg/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
 
 GPU / HARDWARE:
   data.batch_size, gradient_accumulation_steps, and gradient_checkpointing in
@@ -457,6 +457,7 @@ def main(cfg):
         logger.info("")
         logger.info("=" * 64)
         logger.info("  PIPELINE   :  SEGMENTATION  (SegFormer-b5 Cityscapes conditioning)")
+        logger.info(f"  resize_mode:  {cfg.get('resize_mode', 'letterbox')}")
         logger.info(f"  Output     :  {output_path}")
         logger.info(f"  TensorBoard:  tensorboard --logdir \"{tb_dir}\"")
         logger.info(f"  Train      :  {len(dm.train_dataset):,} images  |  Val: {len(dm.val_dataset):,} images")
@@ -658,6 +659,11 @@ def main(cfg):
                 f"global_step: {global_step}",
                 f"val/loss:    {val_loss:.6f}",
                 f"timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                # resize_mode: informational -- unlike the grounded_sam branch,
+                # segformer's seg map squaring is baked in at CALC time, so
+                # there's no live train/inference mismatch to warn about; this
+                # just documents which technique's manifest this run used.
+                f"resize_mode: {cfg.get('resize_mode', 'letterbox')}",
             ]
             save_seg_ckpt_and_grid("best_model", is_best=True, info_lines=info)
             if accelerator.is_main_process:
