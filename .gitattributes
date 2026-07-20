@@ -1,0 +1,11 @@
+# Force LF line endings on files that run as shell scripts on Linux (the
+# JUSUF cluster, or any Linux training machine), regardless of this repo's
+# core.autocrlf setting on a given Windows checkout. CRLF in a script with a
+# #!/bin/bash shebang breaks on Linux with "bad interpreter: ... no such
+# file or directory" or "$'\r': command not found" -- a real, easy-to-hit
+# runtime error the moment a Windows-checked-out .sbatch file is copied
+# straight to the cluster. Without this, Windows' core.autocrlf=true
+# (confirmed set on this machine) converts these back to CRLF on every
+# checkout, silently reintroducing the bug after any git operation.
+*.sbatch text eol=lf
+*.sh     text eol=lf
