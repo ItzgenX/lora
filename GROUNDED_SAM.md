@@ -399,6 +399,34 @@ below requires you to already know the answer:
 6. **If early-stop never fired**, rerun with a higher ceiling, resuming from
    the last checkpoint rather than restarting from scratch.
 
+### 5.1d Real mask format handling, class taxonomy verification, and the inference run recipe [ADDED 2026-07-20]
+
+**Class taxonomy verified against the official CARLA docs.** The user posted
+the full CARLA `instance-segmentation-camera` tag table (0–28, names + RGB)
+directly from the CARLA docs; every id/name/colour in
+`configs/grounded_sam_classes.json` was checked against it line by line —
+all 29 entries match exactly. (CARLA's semantic- and instance-segmentation
+camera pages share one underlying tag table, so citing either is correct;
+this file's `__README__` cites the semantic-segmentation page.) If your saved
+masks ever encode *instance* IDs rather than plain semantic tags, that's a
+different question this file doesn't answer — confirm your `class_map.png`
+pixel values are the plain 0–28 semantic tag before trusting this palette.
+
+**Inference run layout — same change as the segformer branch, same day.**
+`seg_inference.py` now writes every run into its own timestamped subfolder of
+`inference.output_dir` (`<output_dir>/<YYYY-MM-DD_HH-MM-SS>/`), so two runs
+never overwrite each other, and saves a `run_params.txt` into that folder
+*before* generating — checkpoint, seed, size, `num_inference_steps`,
+`guidance_scale`, `conditioning_kernel_size`, `lora_scale_start`/`_end`/
+`_decay_start_frac`, base model, `classes_file`, `seg_pad_id`, and every
+`seg_path | raw_image_path | prompt` triplet processed. Any result folder is
+self-documenting.
+
+**`seg_pad_id`** (new inference config key, `configs/inference_grounded_sam.yaml`)
+must match training's `pad_id` (`configs/data/local_grounded_sam.yaml`, both
+default 0 = CARLA `Unlabeled`) — see §5.0a for what it controls (letterbox
+fill for non-square maps).
+
 ### 5.2 What was NOT built — "Tier 2": live map generation
 A live `GroundedSamEncoder` that actually runs GroundingDINO + SAM to make a map
 for a brand-new image. Needed for **inference on new frames without a
@@ -415,10 +443,14 @@ prompts, none of which are set up yet. Deliberately deferred.
    further action needed on the class file itself.
 
 2. **Confirm the map format.** Run
-   `python check_seg_map_format.py --seg_map <one_real_map>`. You already did
-   this once — it showed mode `L`, uint8, clean IDs 0–17. If the scan in step 3
-   shows stray out-of-range values or many per-file noise outliers, **re-export
-   as PNG** (lossless) before training.
+   `python check_seg_map_format.py --seg_map <one_real_map>`. Your real masks
+   (user-confirmed 2026-07-20, `class_map.png`) are mode `I;16` (16-bit), PNG
+   (lossless — good), **1280x800, non-square**, clean CARLA ids. The loader
+   handles this format directly as of `5db3624` (§5.0a) — raw pixel read
+   (no lossy conversion) + letterbox to square (not stretch), matching the
+   paired RGB's geometry. (An earlier, now-superseded scan of a *different,
+   unused* file showed 8-bit JPEG — ignore that finding; it does not describe
+   what this pipeline actually trains on.)
 
 3. **Recommended (not required): sanity-check the pixel range against the locked
    list.** Run
