@@ -148,6 +148,36 @@ SLURM gave you. For a single-GPU job like this, `srun python foo.py` behaves
 much like just running `python foo.py`, but `srun` also gets your job's
 resource usage properly tracked by SLURM (visible later via `sacct`).
 
+### 4a. The block right before that `srun` line — sizing to THIS GPU
+
+`seg_training.py` itself never auto-scales its batch size — it just reads a
+static `data.batch_size=4` from `configs/experiment/train_seg.yaml`, hand-
+tuned for a ~12GB reference GPU. Left as-is on a 16GB V100, that leaves real
+VRAM unused every step (not wrong, just wasteful). The script runs this
+BEFORE the `srun` line to fix that, on the job's real allocated GPU (no
+`srun` needed for this part — the whole batch script already executes ON
+the compute node, not the login node):
+```bash
+read -r REC_BATCH REC_ACCUM <<< "$(python -c "
+import torch
+from recommend_training_params import recommend_batch_and_accum
+total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+b, a, _, _ = recommend_batch_and_accum(total_gb)
+print(b, a)
+")"
+```
+This reuses `recommend_training_params.py`'s OWN validated formula (the
+same one that already prints numbers for a manual `--data_dir` run) —
+nothing new invented. `REC_BATCH`/`REC_ACCUM` are then passed as
+`data.batch_size=${REC_BATCH} gradient_accumulation_steps=${REC_ACCUM}` on
+the `srun` line. The formula holds `batch_size * accum` (the "effective
+batch") fixed at 16 — the value `learning_rate=1e-4` was validated at — so
+only how that 16 is SPLIT changes with the GPU, never the learning rate's
+validity. Verified by execution: on a real 12GB GPU this returns `(4, 4)`
+unchanged (confirms it's a no-op on the size it was already tuned for); fed
+JUSUF's documented 16GB V100 spec it returns `(5, 3)` (effective batch 15,
+≈16 — the same real function, not a hand-guessed number).
+
 ## 5. Modules — how software gets loaded
 
 JUSUF doesn't give you a plain empty Linux box — it has a **module system**
@@ -263,7 +293,86 @@ a 2-3 image manifest, and add `epochs=1 val_steps=2 ckpt_steps=50` to the
 `srun python` line, mirroring how this was smoke-tested locally before any
 real cluster run).
 
-## 9. The 24-hour wall — how a multi-day training run actually finishes
+## 9. How long should `--time=` actually be? (sizing it to YOUR epochs)
+
+Two numbers multiply together to give you the answer: **how many optimizer
+steps** your run will do, and **how many seconds each step actually takes on
+the GPU you land on**. Neither is a number to guess — both are computed or
+measured, here's exactly how.
+
+### Step 1 — how many steps, for N epochs
+
+```
+steps_per_epoch = ceil(N_train / effective_batch)
+total_steps     = steps_per_epoch * epochs
+```
+`effective_batch` is `data.batch_size * gradient_accumulation_steps` — as of
+§4a, this is `REC_BATCH * REC_ACCUM`, printed by the script itself
+at the top of your `.out` log (e.g. `effective batch = 15` on a V100).
+`N_train` is your real training-set image count.
+`recommend_training_params.py --data_dir <your_manifests> --epochs <N>`
+(run on a login node, reads local files only) prints this exact number for
+you — no need to compute it by hand.
+
+### Step 2 — seconds per step: MEASURE it, don't guess it
+
+This depends on the GPU, image resolution, `gradient_checkpointing`, and
+disk/dataloader speed — enough variables that a number given here (from a
+different machine, a 2-image test, or a spec sheet) would not be
+trustworthy for YOUR real run. The correct way, and the only way that's
+actually accurate for your specific case:
+
+1. Submit a short SMOKE run first — same script, `--partition=develgpus`,
+   a tight time budget, real data (even just a few hundred images is
+   enough to get stable per-step timing once past warmup):
+   ```bash
+   sbatch --partition=develgpus --time=00:20:00 train_seg_jusuf.sbatch
+   ```
+2. Open the `.out` log. `seg_training.py`'s progress bar prints a live
+   `s/it` (seconds per iteration) or `it/s` figure. **Ignore the first
+   5-10 steps** — those include one-time CUDA/cuDNN warmup and are
+   noticeably slower than steady-state. Read the number once it stabilizes.
+3. Alternatively, after the smoke job finishes: `sacct -j <jobid>
+   --format=Elapsed` gives you real total wall-clock for however many
+   steps that job actually completed — divide by step count for the same
+   per-step figure, cross-checking the progress-bar reading.
+
+### Step 3 — put it together
+
+```
+estimated_wall_clock = total_steps * measured_seconds_per_step
+```
+Add a **20-30% safety margin** on top — periodic validation (`val_steps`)
+and checkpoint saves (`ckpt_steps`) are real time not captured in a raw
+per-training-step measurement, and dataloader I/O can hiccup under cluster
+filesystem load that a short smoke test won't fully reveal.
+
+### Step 4 — set `--time=`, or chain jobs
+
+- If `estimated_wall_clock` (with margin) fits under 24h: set `--time=`
+  to that value, rounded up (SLURM format `HH:MM:SS`) — no need to always
+  max out at 24h if your real run is shorter; a tighter time limit can mean
+  a shorter queue wait.
+- If it's OVER 24h: **do not try to raise `--time=` past the partition
+  max** — 24h is a hard ceiling on `gpus`/`develgpus` (§3), not a
+  suggestion. Instead use the resume mechanism (below) to chain
+  `ceil(estimated_wall_clock / 24h)` sequential jobs, each picking up from
+  the last one's saved checkpoint.
+
+### Worksheet (fill in with YOUR real numbers)
+
+| Quantity | Where it comes from | Your value |
+|---|---|---|
+| `N_train` | your real manifest line count | |
+| `effective_batch` | printed by the GPU-sizing block in the job's `.out` log | |
+| `steps_per_epoch` | `ceil(N_train / effective_batch)`, or `recommend_training_params.py`'s printed value | |
+| `epochs` (ceiling, not a prediction — see the loss-tuning guide's §1a.5) | your choice | |
+| `total_steps` | `steps_per_epoch * epochs` | |
+| `measured_seconds_per_step` | from a real `develgpus` smoke run (Step 2 above) | |
+| `estimated_wall_clock` | `total_steps * measured_seconds_per_step * 1.25` (margin) | |
+| `--time=` to set | the above, or split across chained 24h jobs if it exceeds 24h | |
+
+## 10. The 24-hour wall — how a multi-day training run actually finishes
 
 Real training on tens of thousands of images will very likely take longer
 than the 24h max a single job is allowed to run. This is normal on shared
@@ -284,7 +393,7 @@ clusters, and it's why §4's `--signal=B:USR1@300` line matters:
    decision is made) — this is chaining several 24h jobs into one long
    training run, each picking up exactly where the last left off.
 
-## 10. The two "calculation" situations — segformer vs grounded_sam
+## 11. The two "calculation" situations — segformer vs grounded_sam
 
 - **segformer**: `seg_map_calculations.py` runs SegFormer (a real neural
   network) over every raw image to PRODUCE the class-ID PNG maps training
@@ -299,7 +408,7 @@ clusters, and it's why §4's `--signal=B:USR1@300` line matters:
   masks; the only "job" beforehand is copying files (`rsync`, §7), not
   running a model.
 
-## 11. Quick command cheat-sheet
+## 12. Quick command cheat-sheet
 
 ```bash
 sbatch script.sbatch          # submit a job
@@ -312,7 +421,7 @@ module spider <name>           # search for a specific module
 jutil env activate -p <project> # activate your project's $PROJECT/$SCRATCH/$DATA
 ```
 
-## 12. What's fact-checked vs what needs your confirmation
+## 13. What's fact-checked vs what needs your confirmation
 
 **Verified against JUSUF's official docs** (quoted/cited while researching,
 not guessed): hardware specs, partition names/limits, filesystem table and
