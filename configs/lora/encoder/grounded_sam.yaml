@@ -10,7 +10,7 @@ defaults:
 # for accelerate to .prepare().
 #
 # Deliberately has NO `model` key (unlike segformer.yaml): there is no HF
-# checkpoint to load. seg_training.py detects the absence and skips the
+# checkpoint to load. grounded_sam_training.py detects the absence and skips the
 # encoder.model rewrite + the live-segmenter mIoU metric automatically.
 #
 # Live map generation for inference on NEW images is Tier 2 (not built here).

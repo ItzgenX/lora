@@ -8,7 +8,7 @@ configs/experiment/train_grounded_sam.yaml (the Grounded-SAM pipeline).
 This script NEVER writes or modifies any file. You review the recommendation
 and paste the values into the YAML yourself.
 
-WHY THIS EXISTS: seg_training.py used to auto-scale batch_size /
+WHY THIS EXISTS: grounded_sam_training.py used to auto-scale batch_size /
 gradient_accumulation_steps to the detected GPU at runtime. That was removed
 deliberately -- a fixed, explicit YAML you can read and quote is worth more
 than a value that silently depends on which GPU happened to run it. This
@@ -27,7 +27,7 @@ NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
 ~12GB GPU is MEASURED (real training runs, this project, 2026-07-02). For any
 other GPU size, the recommendation is a REASONED linear extrapolation of that
 measurement, NOT independently verified on such hardware -- always sanity
-check with a short real dry run (see seg_training.py's docstring) before
+check with a short real dry run (see grounded_sam_training.py's docstring) before
 committing to a long training run.
 """
 
@@ -190,7 +190,11 @@ def main():
     print()
     print(f"  n_grid_images                : 10   (5 fixed + 5 fresh -- already-validated default)")
     print(f"  size                         : 512")
-    print(f"  resize_mode                  : letterbox")
+    print(f"  resize_mode                  : letterbox  [default -- YOUR CHOICE, not a recommendation]")
+    print(f"    letterbox (SquarePad, default) keeps 100% of the scene, adds a pad band.")
+    print(f"    CenterCrop (original stock LoRAdapter recipe) has no pad band, crops scene edges.")
+    print(f"    This tool doesn't pick for you -- train both and compare by generated-image quality")
+    print(f"    (GROUNDED_SAM.md Sec 5.0b): resize_mode=letterbox or resize_mode=CenterCrop on the CLI.")
 
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()

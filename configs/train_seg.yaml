@@ -28,7 +28,7 @@ seed: 42
 val_batches: 4
 log_every_steps: 50   # mirror step/loss/lr into the run's .log file every N optimizer steps
 
-# Segmentation-specific monitoring knobs (resolved by seg_training.py via cfg.get()).
+# Segmentation-specific monitoring knobs (resolved by grounded_sam_training.py via cfg.get()).
 # Set here as base defaults; the experiment yaml overrides with the real values.
 # n_grid_images          : N val scenes per checkpoint (split 50/50 fixed/fresh).
 # grid_include_empty_prompt: also render the 4th "RAW SEG GEN" (empty-prompt) panel.

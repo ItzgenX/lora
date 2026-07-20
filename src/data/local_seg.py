@@ -25,7 +25,7 @@ Returned by __getitem__:
     "seg"    : colour map   [3, H, W] in [0, 1]    (palette RGB)
     "caption": prompt string
   }
-seg_training.py reads batch["seg"].
+grounded_sam_training.py reads batch["seg"].
 """
 
 import json
@@ -36,9 +36,9 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 
 from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, seg_palette_tensor, seg_colorize_ids
+from src.data.transforms import square_id_map, build_seg_preprocess
 
 
 class SegJsonDataset(Dataset):
@@ -67,9 +67,14 @@ class SegJsonDataset(Dataset):
         pad_id: int = 0,                     # class id used to letterbox non-square
                                              # maps (CARLA 0 = Unlabeled; see
                                              # _load_seg_colormap step 2)
+        resize_mode: str = "letterbox",      # "letterbox" or "CenterCrop" — MUST
+                                             # match the RGB image_transform's mode
+                                             # (SegJsonDataModule builds both from
+                                             # the same key, so this can't drift).
     ):
         self.json_file    = Path(json_file)
         self.pad_id       = pad_id
+        self.resize_mode  = resize_mode
         self.json_dir     = self.json_file.parent
         self.project_root = Path(project_root) if project_root else self.json_dir
         self.image_root   = Path(image_root) if image_root else None
@@ -145,16 +150,15 @@ class SegJsonDataset(Dataset):
              versions (verified exact on THIS env 2026-07-20, but the
              training machine may run a different Pillow; reading raw is
              version-proof).
-          2. If the map is NOT square (the real masks are 1280x800), LETTERBOX
-             it to a square with `pad_id` fill — the SAME geometry SquarePad
-             applies to the paired RGB image (pad the shorter side, extra
-             pixel to the bottom/right on odd totals). A plain resize here
-             would STRETCH the map while the RGB is letterboxed, vertically
-             misaligning conditioning vs target by up to ~19% of the frame
-             at the top/bottom (measured 2026-07-20). Alignment is the whole
-             point of structure conditioning, so the two paths MUST match.
-          3. NEAREST resize to (size, size) — label-preserving (NEVER bilinear).
-          4. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
+          2. Square the map (the real masks are 1280x800) using the SAME
+             `resize_mode` ("letterbox" or "CenterCrop") the paired RGB
+             image_transform used — square_id_map() (src/data/transforms.py)
+             is the single shared geometry, so image and map can never drift
+             apart even though this is a per-run config choice now (user
+             decision 2026-07-20). NEAREST-only throughout: a plain bilinear
+             resize/stretch here would misalign conditioning vs target by up
+             to ~19% of the frame (measured 2026-07-20, letterbox mode).
+          3. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
 
         Returns [3, size, size] float tensor in [0, 1].
         """
@@ -169,23 +173,7 @@ class SegJsonDataset(Dataset):
             )
         ids_pil = Image.fromarray(ids_np.astype(np.uint8), mode="L")
 
-        # ---- Letterbox a non-square map (mirror SquarePad's geometry) ------ #
-        # SquarePad pads the SHORTER side: pad_before = pad_total // 2, the
-        # remainder goes after (bottom/right). Identical rounding here, so a
-        # 1280x800 map and its 1280x800 RGB land on the same square grid.
-        w, h = ids_pil.size
-        if w != h:
-            side = max(w, h)
-            pad_before = (side - min(w, h)) // 2
-            canvas = Image.new("L", (side, side), color=self.pad_id)
-            # landscape -> pad top+bottom (paste at y offset); portrait -> left+right
-            canvas.paste(ids_pil, (0, pad_before) if w > h else (pad_before, 0))
-            ids_pil = canvas
-
-        # NEAREST is REQUIRED for a class-ID map: bilinear would average class
-        # ids and produce fabricated class values. PIL.Image.NEAREST is the flag.
-        if ids_pil.size != (self.size, self.size):
-            ids_pil = ids_pil.resize((self.size, self.size), Image.NEAREST)
+        ids_pil = square_id_map(ids_pil, self.size, self.resize_mode, self.pad_id)
 
         ids = torch.from_numpy(np.asarray(ids_pil, dtype=np.int64))   # [size, size]
 
@@ -218,7 +206,7 @@ class SegJsonDataModule:
     Data module reading a JSON manifest for train + optional validation.
 
     Exposes train_dataloader()/val_dataloader() and
-    .train_dataset / .val_dataset (seg_training.py indexes val_dataset directly for
+    .train_dataset / .val_dataset (grounded_sam_training.py indexes val_dataset directly for
     the fixed-scene monitoring images). val_json_file MUST point at the real
     validation set — NEVER test.json (references.md §8).
     """
@@ -226,7 +214,6 @@ class SegJsonDataModule:
     def __init__(
         self,
         json_file: str,
-        transform: list,               # Hydra-instantiated image transforms (-> [-1,1])
         size: int = 512,
         val_json_file: str = None,
         batch_size: int = 8,
@@ -241,10 +228,16 @@ class SegJsonDataModule:
         prompt_key: str = "prompt",
         pad_id: int = 0,               # letterbox fill class for non-square maps
                                        # (0 = Unlabeled in the CARLA taxonomy)
+        resize_mode: str = "letterbox",  # "letterbox" or "CenterCrop" (user decision
+                                       # 2026-07-20) — built ONCE here from
+                                       # build_seg_preprocess so train/val use the
+                                       # identical RGB transform, and passed to
+                                       # SegJsonDataset so the seg map uses the SAME
+                                       # geometry (square_id_map). One key drives both.
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
-        image_tfm    = transforms.Compose(transform)
+        image_tfm    = build_seg_preprocess(size=size, resize_mode=resize_mode)
         _img_root    = Path(project_root, image_root) if image_root else project_root
 
         self.batch_size     = batch_size
@@ -257,7 +250,7 @@ class SegJsonDataModule:
         #   2. palette arg (explicit list).
         #   3. neither -> SegJsonDataset falls back to the Cityscapes SSOT.
         # Loading from classes_file here (once) guarantees train and val use the
-        # IDENTICAL palette, and lets seg_training.py resolve the same one.
+        # IDENTICAL palette, and lets grounded_sam_training.py resolve the same one.
         if classes_file is not None:
             from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
             _cf = Path(project_root, classes_file)
@@ -268,7 +261,7 @@ class SegJsonDataModule:
         self.palette = palette
 
         _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key,
-                     pad_id=pad_id)
+                     pad_id=pad_id, resize_mode=resize_mode)
 
         self.train_dataset = SegJsonDataset(
             json_file=Path(project_root, json_file),

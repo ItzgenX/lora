@@ -255,7 +255,7 @@ just called with `skip_encode=True` and the real training loss instead of a
 ```
  segmentation colour map `c`  (either a live encoder's output, or a
      [B,3,H,W] in [0,1]        pre-saved map passed straight through when
-        |                      skip_encode=True — see seg_inference.py's
+        |                      skip_encode=True — see grounded_sam_inference.py's
         |                      module docstring for the full mechanism)
         v
  ┌──────────────────────┐

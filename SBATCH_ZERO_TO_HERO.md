@@ -8,6 +8,74 @@ fact below is sourced from the official docs at
 
 ---
 
+## 0. What "SBATCH" actually IS, mechanically — read this even if §1-12 already made sense
+
+§1 below tells you WHAT a cluster is and WHAT to do. This section explains
+the one thing that trips up almost everyone the first time: **`#SBATCH`
+lines look like comments, and to `bash` they ARE comments — so how do they
+configure anything at all?**
+
+**The short answer: two different programs read the same file, for two
+different purposes, and only one of them understands `#SBATCH`.**
+
+Take the smallest possible example:
+```bash
+#!/bin/bash -x
+#SBATCH --time=00:10:00
+#SBATCH --job-name=my-first-job
+
+echo "hello from the compute node"
+```
+- To **`bash`** (the shell that eventually RUNS this file), a line starting
+  with `#` is a comment, full stop — `bash` skips both `#SBATCH` lines
+  exactly like it would skip a line that just says `# some notes to self`.
+  If you ran `bash script.sh` directly, this file would just print
+  `hello from the compute node` and the `#SBATCH` lines would have zero effect.
+- But you never run it with plain `bash`. You run it with **`sbatch
+  script.sh`** — a completely different program, SLURM's own submission
+  tool. `sbatch` opens the file itself, BEFORE any of it executes, and
+  specifically scans for lines matching the pattern `#SBATCH <flag>
+  <value>` (they can be mixed among ordinary `#`-comments — see the real
+  block at the top of [train_grounded_sam_jusuf.sbatch](slurm/train_grounded_sam_jusuf.sbatch),
+  which has a whole paragraph of plain comments interleaved right next to
+  its `#SBATCH` lines, and `sbatch` correctly ignores the plain ones while
+  reading the `#SBATCH` ones). Every `#SBATCH` line it finds becomes one
+  entry in a **resource request** — "give me 1 GPU, 32 CPUs, up to 24
+  hours" — which `sbatch` sends to the SLURM controller.
+
+**What happens next, in order, is the whole mental model you need:**
+1. You type `sbatch train_grounded_sam_jusuf.sbatch` on a login node.
+2. `sbatch` reads the file, extracts every `#SBATCH` line, builds the
+   resource request, and hands it to SLURM's scheduler daemon.
+3. `sbatch` **returns immediately** — you get your terminal prompt back in
+   under a second, with a line like `Submitted batch job 123456`. It did
+   **not** wait for a GPU, and it did **not** run your script. It only
+   queued the request.
+4. **Sometime later** — seconds, minutes, or hours, depending on how busy
+   the cluster is — SLURM finds a node matching your request and actually
+   executes your script there, **top to bottom, as plain bash**, starting
+   from `#!/bin/bash -x`. At this point, every `#SBATCH` line is now just
+   an inert comment again (its job — configuring the request — already
+   happened back in step 2) — the script's REAL bash commands (module
+   loads, the `srun` line, everything in §5-§7 below) are what actually run.
+5. Output goes to the `--output=`/`--error=` files (§5) because, by the
+   time step 4 happens, you are not watching — you're not even necessarily
+   logged in anymore. That's the entire reason `sbatch` exists instead of
+   just running `python train.py` directly: it lets you queue work that
+   runs unattended, later, on a machine you're not currently using.
+
+This is why §1's step 3 ("You submit it... It queues") and step 4 ("SLURM...
+runs your script there, unattended") are two SEPARATE moments in time, often
+far apart — and why editing a `#SBATCH` line has NO effect on a job that's
+already running (its resource request was locked in back at submission time).
+
+*(This mechanism — `#SBATCH` parsing, queue, delayed execution — is general
+SLURM behaviour, true on any SLURM cluster, not something specific to
+JUSUF. §1 below still starts with a few more general cluster concepts
+before the facts turn JUSUF-specific — hardware numbers, partition names,
+filesystem paths — which is exactly what §12 lists as verified against
+JUSUF's own docs.)*
+
 ## 1. What a cluster actually is, and why you can't just run `python train.py`
 
 A cluster is hundreds of shared computers ("nodes"). You never log into a
@@ -65,7 +133,11 @@ of that. It doesn't, and here's exactly why:
   directly.
 
 So the whole workflow is: **stage your files (§7) → train (§8-9)**. No
-compute step in between.
+compute step in between. This holds regardless of which `resize_mode` you
+train with (§5) — squaring the map to match the image happens live, inside
+the training dataloader, every time a sample is read, not as a separate
+pre-computation — so switching `letterbox` <-> `CenterCrop` between two
+submitted jobs never needs a recalculation step either.
 
 **Optional, and NOT a GPU job:** two lightweight CPU-only sanity scripts
 exist to sanity-check your masks before you spend GPU time —
@@ -134,9 +206,9 @@ longer.
 #SBATCH --signal=B:USR1@300
 ```
 300 seconds before the 24h limit, SLURM sends your script a `SIGUSR1`
-warning (`B:` = to the batch script itself). `seg_training.py` — the SAME
+warning (`B:` = to the batch script itself). `grounded_sam_training.py` — the SAME
 training script both branches use — already listens for this
-(`seg_training.py:90-93`, confirmed byte-identical on this branch) and
+(`grounded_sam_training.py:90-93`, confirmed byte-identical on this branch) and
 responds by saving a checkpoint and exiting cleanly instead of being killed
 mid-write. Without this line, SLURM just kills the job with no warning at
 the 24h mark.
@@ -160,7 +232,7 @@ your script starts running; the rest executes top to bottom like it would
 on your own machine.
 
 ```bash
-srun python seg_training.py experiment=train_grounded_sam ...
+srun python grounded_sam_training.py experiment=train_grounded_sam ...
 ```
 `srun` launches your program inside the resources SLURM allocated to this
 job — what actually puts your Python process on the GPU node. For a
@@ -171,9 +243,24 @@ segformer training script — it selects `configs/experiment/train_grounded_sam.
 (29-class CARLA palette, `GroundedSamEncoder` slot-filler) instead of
 `train_seg.yaml`.
 
+**`resize_mode` — pick which squaring technique this job trains with**
+(user decision 2026-07-20, GROUNDED_SAM.md §5.0b): add `resize_mode=letterbox`
+or `resize_mode=CenterCrop` to the `srun` line. Say nothing and you get
+`letterbox` (this project's current default — `SquarePad`, keeps 100% of the
+scene, adds a flat pad band). `CenterCrop` is the ORIGINAL stock LoRAdapter
+recipe (`Resize`+`CenterCrop`) — no pad band, but crops ~37% of frame width
+off the left/right. The output folder always names which one ran
+(`outputs/train/grounded_sam_letterbox/...` vs `..._CenterCrop/...`), so
+submitting two jobs — one per mode — never collides and both are directly
+comparable by generated-image quality afterward:
+```bash
+srun python grounded_sam_training.py experiment=train_grounded_sam resize_mode=letterbox ...
+srun python grounded_sam_training.py experiment=train_grounded_sam resize_mode=CenterCrop ...
+```
+
 ### 5a. The block right before that `srun` line — sizing to THIS GPU
 
-`seg_training.py` never auto-scales its batch size — it just reads a static
+`grounded_sam_training.py` never auto-scales its batch size — it just reads a static
 `data.batch_size=4` from `configs/experiment/train_grounded_sam.yaml`
 (confirmed: same "4 batch x 4 accum = 16 effective batch" baseline as the
 segformer branch's config, hand-tuned for a ~12GB reference GPU). Left as
@@ -329,7 +416,7 @@ actually accurate for your specific case:
    ```bash
    sbatch --partition=develgpus --time=00:20:00 train_grounded_sam_jusuf.sbatch
    ```
-2. Open the `.out` log. `seg_training.py`'s progress bar prints a live
+2. Open the `.out` log. `grounded_sam_training.py`'s progress bar prints a live
    `s/it` (seconds per iteration) or `it/s` figure. **Ignore the first
    5-10 steps** — those include one-time CUDA/cuDNN warmup and are
    noticeably slower than steady-state. Read the number once it stabilizes.
@@ -380,9 +467,9 @@ normal and handled by resuming:
 
 1. Job runs up to 24h.
 2. 300s before the limit, SLURM sends `SIGUSR1` (§5's `--signal` line).
-3. `seg_training.py`'s handler (`seg_training.py:90-93`) finishes the
+3. `grounded_sam_training.py`'s handler (`grounded_sam_training.py:90-93`) finishes the
    current step, force-saves a checkpoint, exits cleanly
-   (`seg_training.py:759-802`) — no corrupted/missing checkpoint.
+   (`grounded_sam_training.py:759-802`) — no corrupted/missing checkpoint.
 4. The job's `.out` log prints the checkpoint path.
 5. Resubmit, setting `RESUME_CKPT` in the script to that path —
    `lora.struct.ckpt_path=<path>` picks up exactly where it left off.
@@ -405,6 +492,11 @@ jutil env activate -p <project> # activate $PROJECT/$SCRATCH/$DATA
 
 ## 12. What's fact-checked vs what needs your confirmation
 
+**General SLURM knowledge, not JUSUF-specific** (§0): the `#SBATCH`-parsing/
+queue/delayed-execution mechanism is standard SLURM behaviour, true on any
+SLURM cluster — not sourced from JUSUF's docs specifically, and not
+something that could differ per-cluster.
+
 **Verified against JUSUF's official docs**: hardware specs, partition
 names/limits, the filesystem table + `$DATA` login-only restriction + 90-day
 `$SCRATCH` purge, the `--account` requirement, the Anaconda prohibition +
@@ -412,10 +504,43 @@ names/limits, the filesystem table + `$DATA` login-only restriction + 90-day
 `sbatch`/`squeue`/`scancel`/`sacct` usage.
 
 **Verified against THIS repo's code** (not the cluster docs): the
-`SIGUSR1`-triggers-checkpoint-then-exit behaviour (`seg_training.py:90-93,
+`SIGUSR1`-triggers-checkpoint-then-exit behaviour (`grounded_sam_training.py:90-93,
 759-802`), confirmed identical on the grounded_sam branch by diffing against
 the segformer branch's copy of the same file.
 
 **You must confirm/fill in yourself**: your `--account` budget id, your
 `$PROJECT` directory name, and the exact current module names for the Stage
 you load (`module spider PyTorch` tells you) — these change every Stage.
+
+## 13. File inventory — every file this guide talks about
+
+Same provenance tagging as [GROUNDED_SAM.md §7.0](GROUNDED_SAM.md):
+🟦 **ORIGINAL — unchanged** (stock repo, untouched), 🟨 **MODIFIED**
+(pre-existed, usually built for the SegFormer pipeline, adapted here), 🟩
+**NEW** (written specifically for this work).
+
+| File | Provenance | Where it's covered |
+|---|---|---|
+| [slurm/train_grounded_sam_jusuf.sbatch](slurm/train_grounded_sam_jusuf.sbatch) | 🟩 NEW | The whole guide — §0 explains the mechanism, §5-5a its exact contents |
+| [SBATCH_ZERO_TO_HERO.md](SBATCH_ZERO_TO_HERO.md) | 🟩 NEW | This file |
+| [grounded_sam_training.py](grounded_sam_training.py) | 🟨 MODIFIED *(renamed from `seg_training.py` 2026-07-20; the `srun` line launches it)* | §5, §9, §10 |
+| [configs/train_seg.yaml](configs/train_seg.yaml) | 🟨 MODIFIED *(shared Hydra base config both pipelines layer onto)* | §5 |
+| [recommend_training_params.py](recommend_training_params.py) | 🟨 MODIFIED | §5a's GPU-sizing block, §9's step-count math |
+| [src/encoders/grounded_sam_encoder.py](src/encoders/grounded_sam_encoder.py) | 🟩 NEW | §4 (explains why `forward()` deliberately raises, so no calc job exists) |
+| [configs/experiment/train_grounded_sam.yaml](configs/experiment/train_grounded_sam.yaml) | 🟩 NEW | §5 (`experiment=train_grounded_sam`), §5a (its hardcoded `batch_size`) |
+| [check_seg_map_format.py](check_seg_map_format.py) | 🟩 NEW | §4's optional login-node sanity check |
+| [scan_seg_map_classes.py](scan_seg_map_classes.py) | 🟩 NEW | §4's optional login-node sanity check |
+| `train.py` | 🟦 ORIGINAL — unchanged | §1, mentioned once for contrast (`python train.py` vs `sbatch ...`) |
+
+**Not present on this branch at all** (mentioned only for contrast, so you
+don't go looking for it here): `seg_map_calculations.py` — the SegFormer
+branch's GPU calc job (§4). Grounded-SAM has no equivalent; your masks are
+already CARLA-computed before this repo is ever involved.
+
+**What this guide does NOT cover** (by design, not an oversight): what
+`grounded_sam_training.py` actually DOES once it's running — the diffusion
+model, LoRA, the conditioning mechanism. This guide is only about getting
+that script running unattended on a cluster; for the mechanism itself, see
+[GROUNDED_SAM.md Part A](GROUNDED_SAM.md) (original-repo fundamentals) and
+§5.1c (the training-step code, same mechanism whether it runs locally or on
+JUSUF — nothing about that code cares which machine it's on).

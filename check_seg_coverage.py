@@ -22,7 +22,7 @@ WHAT YOU PASS IN
                 (a) a raw class-ID PNG (single-channel, values 0..18) --
                     exactly what seg_map_calculations.py / seg_path entries
                     in the training manifest already are, or
-                (b) an RGB colourised seg map (e.g. seg_inference.py's
+                (b) an RGB colourised seg map (e.g. grounded_sam_inference.py's
                     visual output, or a palette-coloured PNG) -- pixels are
                     matched to the nearest SEG_CITYSCAPES_PALETTE colour to
                     recover class IDs. A JPEG photo of a screen (heavy

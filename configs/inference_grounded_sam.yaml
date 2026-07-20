@@ -1,6 +1,6 @@
 # configs/inference_grounded_sam.yaml
 # ------------------------------------
-# Base config for seg_inference.py — the Grounded-SAM twin of inference_seg.yaml
+# Base config for grounded_sam_inference.py — the Grounded-SAM twin of inference_seg.yaml
 # (SegFormer's equivalent, maintained on the segformer branch of this repo).
 #
 # Loads a trained Grounded-SAM-conditioned LoRAdapter checkpoint and generates
@@ -12,26 +12,31 @@
 #     on top of a working live path: GroundedSamEncoder has no live path at
 #     all (Tier 1 only, see src/encoders/grounded_sam_encoder.py), so "always
 #     use a provided map" is the only contract that ever worked here. See
-#     seg_inference.py's module docstring for the full mechanism (skip_encode).
+#     grounded_sam_inference.py's module docstring for the full mechanism (skip_encode).
 #   - Because the encoder never runs, cfg.lora.struct.encoder has NO `model`
-#     key to rewrite (unlike SegFormer) -- seg_inference.py detects this via
-#     the same _enc_has_model guard seg_training.py already uses and skips
+#     key to rewrite (unlike SegFormer) -- grounded_sam_inference.py detects this via
+#     the same _enc_has_model guard grounded_sam_training.py already uses and skips
 #     the rewrite + the live-segmenter mIoU metric automatically.
 #
+# RESIZE_MODE (user decision 2026-07-20): pass resize_mode=letterbox (default)
+# or resize_mode=CenterCrop -- MUST MATCH what ckpt_path was trained with (a
+# mismatch is warned about loudly at runtime). Also names ckpt_path's folder
+# AND this run's output folder (see `resize_mode:` key below).
+#
 # USAGE — from a JSON manifest (recommended):
-#   python seg_inference.py --config-name inference_grounded_sam \
-#       ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model \
-#       inference.json_file=data/grounded_sam/test.jsonl \
-#       inference.output_dir=outputs/inference/grounded_sam/results
+#   python grounded_sam_inference.py --config-name inference_grounded_sam \
+#       ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       resize_mode=letterbox \
+#       inference.json_file=data/grounded_sam/test.jsonl
 #
 # USAGE — direct seg map + optional raw image for the display panel:
-#   python seg_inference.py --config-name inference_grounded_sam \
-#       ckpt_path=outputs/train/grounded_sam/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#   python grounded_sam_inference.py --config-name inference_grounded_sam \
+#       ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       resize_mode=letterbox \
 #       "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" \
 #       "inference.prompts=['a car driving down a rainy street']"
 #
-# OUTPUT (per input image):
-#   outputs/inference/grounded_sam/results/
+# OUTPUT (per input image, under outputs/inference/grounded_sam_<mode>/results/<timestamp>/):
 #       <stem>_grid.jpg        ← 4-panel: ORIGINAL | SEG MAP | PREDICTED | RAW SEG GEN
 #       <stem>_original.jpg
 #       <stem>_seg.jpg         ← Grounded-SAM colour conditioning map
@@ -45,22 +50,32 @@ defaults:
   - _self_
 
 # ---- Checkpoint -----------------------------------------------------------
-# Path to the checkpoint directory produced by seg_training.py experiment=train_grounded_sam.
+# Path to the checkpoint directory produced by grounded_sam_training.py experiment=train_grounded_sam.
 # Structure expected:  <ckpt_path>/struct/lora-checkpoint.pt
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
-ckpt_path: ???     # e.g. outputs/train/grounded_sam/runs/2026-01-01/00-00-00/best_model
+ckpt_path: ???     # e.g. outputs/train/grounded_sam_letterbox/runs/2026-01-01/00-00-00/best_model
 
 # ---- Class palette ---------------------------------------------------------
 # MUST match what the seg maps were saved with (configs/data/local_grounded_sam.yaml
 # uses the same file for training) -- loading/colourising a map with the wrong
-# palette raises "class id >= palette size" in seg_inference.py.
+# palette raises "class id >= palette size" in grounded_sam_inference.py.
 classes_file: configs/grounded_sam_classes.json
 
 # ---- Non-square map handling ------------------------------------------------
 # Letterbox fill class for non-square provided maps (the real 1280x800 16-bit
 # PNGs) -- MUST match training's pad_id (configs/data/local_grounded_sam.yaml).
-# 0 = CARLA "Unlabeled". The loader letterboxes with this id, never stretches.
+# 0 = CARLA "Unlabeled". Only used when resize_mode=letterbox (ignored by CenterCrop).
 seg_pad_id: 0
+
+# ---- Resize technique (user decision 2026-07-20) -----------------------------
+# MUST match the technique the loaded checkpoint (ckpt_path) was TRAINED with
+# (grounded_sam_inference.py warns loudly on a mismatch by reading best_model/info.txt).
+#   "letterbox"  : SquarePad geometry (default).
+#   "CenterCrop" : original stock LoRAdapter recipe (configs/data/local.yaml).
+# Also names the output folder below (outputs/inference/grounded_sam_<mode>/...)
+# so results are always traceable to the technique that produced them:
+#   python grounded_sam_inference.py resize_mode=CenterCrop ckpt_path=... inference.json_file=...
+resize_mode: letterbox
 
 # ---- Global resolution (must match training) ------------------------------
 size: 512          # square canvas; must match what training/calc used
@@ -70,8 +85,8 @@ seed: 42
 # null (default) = auto-detect a GPU and REFUSE to run if none is visible
 # (see src/utils.py resolve_device() — this script must never silently fall
 # back to CPU). Set explicitly to override, e.g.:
-#   python seg_inference.py --config-name inference_grounded_sam device=cuda:1 ...
-#   python seg_inference.py --config-name inference_grounded_sam device=cpu ...
+#   python grounded_sam_inference.py --config-name inference_grounded_sam device=cuda:1 ...
+#   python grounded_sam_inference.py --config-name inference_grounded_sam device=cpu ...
 device: null
 
 # =============================================================================
@@ -89,7 +104,7 @@ base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
 
 # ---- Base diffusion model -------------------------------------------------
 model:
-  model_name: ${base_model_name}   # default; seg_inference.py overrides to base_model_path when local_files_only=true
+  model_name: ${base_model_name}   # default; grounded_sam_inference.py overrides to base_model_path when local_files_only=true
 
 # ---- LoRA (inference mode — weights not updated) --------------------------
 lora:
@@ -104,7 +119,7 @@ lora:
 # Inference ALWAYS uses a PROVIDED segmentation map -- it never computes one
 # live from a raw photo. seg_maps/seg_path is REQUIRED; images/raw_image_path
 # is OPTIONAL and used ONLY to display the ORIGINAL panel (no model ever runs
-# on it). See seg_inference.py module docstring for the full reasoning.
+# on it). See grounded_sam_inference.py module docstring for the full reasoning.
 inference:
   # Input — choose ONE:
   seg_maps:  []         # list of PRE-COMPUTED Grounded-SAM seg map paths (REQUIRED for
@@ -115,12 +130,14 @@ inference:
 
   prompts:   []         # prompts for 'seg_maps' list mode; leave empty to use JSON prompts
 
-  # Output:
-  output_dir: outputs/inference/grounded_sam/results   # relative to repo root (resolved in seg_inference.py)
+  # Output: mode-named so results are always traceable to which technique made them.
+  output_dir: outputs/inference/grounded_sam_${resize_mode}/results   # relative to repo root (resolved in grounded_sam_inference.py)
   save_generated_only: false   # true → save only predicted image, mirroring folder structure
 
-  # Preprocessing: letterbox squaring is FIXED project-wide; there is
-  # deliberately no knob here, so inference can never disagree with training.
+  # Preprocessing: squaring technique is controlled by the top-level
+  # `resize_mode` key above (user decision 2026-07-20) -- NOT fixed anymore.
+  # Kept as one knob (not two) so training and inference can never disagree
+  # by accident: this same key drives both.
 
   # Generation:
   n_samples:           1    # number of generated images per input image
@@ -151,6 +168,6 @@ inference:
 
 hydra:
   run:
-    dir: outputs/inference/grounded_sam/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/inference/grounded_sam_${resize_mode}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
   job:
     chdir: true

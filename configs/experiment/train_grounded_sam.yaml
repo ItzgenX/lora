@@ -3,7 +3,7 @@
 # configs/experiment/train_grounded_sam.yaml
 # ------------------------------------------
 # Grounded-SAM training experiment. Reuses the ENTIRE segmentation pipeline
-# (seg_training.py, SegJsonDataModule, the struct LoRA + mapper) and swaps only:
+# (grounded_sam_training.py, SegJsonDataModule, the struct LoRA + mapper) and swaps only:
 #   • the encoder slot     -> GroundedSamEncoder (training-only slot filler)
 #   • the data module      -> local_grounded_sam (your class palette + manifests)
 # Everything else (LoRA rank/mode, LR, schedule, grid knobs) is identical to the
@@ -34,10 +34,21 @@ base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
 # =============================================================================
 # For a suggested starting point on your GPU + dataset (prints only, never edits):
 #   python recommend_training_params.py --data_dir data/grounded_sam
-#   Multi-GPU: accelerate launch --num_processes=N seg_training.py experiment=train_grounded_sam
+#   Multi-GPU: accelerate launch --num_processes=N grounded_sam_training.py experiment=train_grounded_sam
 gradient_checkpointing: true
 gradient_accumulation_steps: 4        # 4 batch x 4 accum = 16 effective batch
 size: 512                              # square canvas; must match SD1.5 native resolution
+
+# --- Resize technique (user decision 2026-07-20) -------------------------------- #
+# "letterbox" (default) = SquarePad, keeps full scene, adds a pad band.
+# "CenterCrop"           = original stock LoRAdapter recipe (configs/data/local.yaml),
+#                          no pad band, crops scene edges. Compare the two by training
+#                          twice and judging generated-image quality:
+#   python grounded_sam_training.py experiment=train_grounded_sam resize_mode=letterbox
+#   python grounded_sam_training.py experiment=train_grounded_sam resize_mode=CenterCrop
+# Drives data.resize_mode (below) AND the output folder name via `tag`, so a
+# trained model's folder always says which technique produced it.
+resize_mode: letterbox
 
 # =============================================================================
 # 1. GENERAL TRAINING PARAMETERS
@@ -94,7 +105,9 @@ grid_include_empty_prompt: false
 # =============================================================================
 bf16: true
 ignore_check: true
-tag: grounded_sam                 # DIFF: outputs/train/grounded_sam/...
+tag: grounded_sam_${resize_mode}  # DIFF: outputs/train/grounded_sam_letterbox/... or
+                                   # outputs/train/grounded_sam_CenterCrop/... — the
+                                   # folder name always says which technique trained it.
 
 # =============================================================================
 # 6. MODEL OVERRIDES
@@ -102,7 +115,7 @@ tag: grounded_sam                 # DIFF: outputs/train/grounded_sam/...
 model:
   _target_: src.model.SD15
   pipeline_type: diffusers.StableDiffusionPipeline
-  model_name: ${base_model_name}   # seg_training.py overrides to base_model_path when local
+  model_name: ${base_model_name}   # grounded_sam_training.py overrides to base_model_path when local
   local_files_only: ${local_files_only}
   guidance_scale: 7.5
 
@@ -124,5 +137,5 @@ lora:
       lora_scale: 1
 
 # LAUNCH:
-#   Single GPU : python seg_training.py experiment=train_grounded_sam
-#   Multi-GPU  : accelerate launch --num_processes=N seg_training.py experiment=train_grounded_sam
+#   Single GPU : python grounded_sam_training.py experiment=train_grounded_sam
+#   Multi-GPU  : accelerate launch --num_processes=N grounded_sam_training.py experiment=train_grounded_sam

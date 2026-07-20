@@ -5,7 +5,7 @@ from PIL import Image, ImageFile, ImageStat
 # most other viewers/decoders (Windows Photo Viewer, browsers, libjpeg-turbo
 # used elsewhere) silently accept these same files. This flag is process-
 # global; it lives here because src/data/transforms.py is imported by the
-# segmentation pipeline entrypoints (seg_map_calculations.py, seg_inference.py),
+# segmentation pipeline entrypoints (seg_map_calculations.py, grounded_sam_inference.py),
 # so setting it once here covers every place an image gets loaded — a single
 # source of truth.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -169,15 +169,39 @@ class SquarePad:
 from torchvision import transforms as _tv   # local alias: avoids shadowing outer scope
 
 
-def build_seg_square_preprocess(size: int):
+RESIZE_MODES = ("letterbox", "CenterCrop")
+
+
+def _square_rgb_steps(size: int, resize_mode: str) -> list:
+    """
+    The GEOMETRIC steps (no ToTensor/Normalize) that square a PIL RGB image,
+    for the chosen resize_mode. Shared by build_seg_preprocess (adds tensor
+    conversion, for the model) and build_seg_display_preprocess (stays PIL,
+    for on-screen panels) so the two can never geometrically disagree.
+
+      "letterbox"  : SquarePad (flat-fill pad, current default) then Resize.
+                     Keeps 100% of the scene; adds a flat-colour pad band.
+      "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
+                     — torchvision Resize(size) [shorter edge -> size, aspect kept]
+                     then CenterCrop(size). No pad band, but crops the longer
+                     edge's overhang (~37% of width for this project's 1280x800
+                     frames) off the left/right.
+    """
+    assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
+    if resize_mode == "letterbox":
+        return [SquarePad(), _tv.Resize((size, size))]
+    return [_tv.Resize(size), _tv.CenterCrop(size)]
+
+
+def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     """
     Build the ONE canonical RGB preprocessing pipeline for the SEGMENTATION pipeline.
 
     WHY THIS EXISTS (and why it belongs here, not in a seg-specific file):
-      Both seg_map_calculations.py (offline calc) and seg_inference.py (live
-      inference) must apply byte-for-byte identical preprocessing so the seg map the
-      network sees at inference exactly matches what was saved for training. The only
-      way to guarantee that is to import the SAME function in both places — this is it.
+      Every stage that reads a raw photo (offline calc, training's dataset,
+      inference) must apply byte-for-byte identical preprocessing so the map the
+      network sees at inference exactly matches what training used. The only
+      way to guarantee that is to import the SAME function everywhere — this is it.
       (Depth triplicated this preprocessing and references.md flags that as a drift
       risk; segmentation fixes it with this single source of truth.)
 
@@ -186,35 +210,82 @@ def build_seg_square_preprocess(size: int):
 
     INPUT  (of the returned callable): PIL.Image of any size, any aspect ratio.
     OUTPUT (of the returned callable): float tensor [3, size, size] in [-1, 1].
-      This is the range every encoder slot in src/model.py expects
-      (asserted by SegmentationEncoder._predict_ids).
+      This is the range every encoder slot in src/model.py expects.
 
     Args:
-        size: final square side in pixels (e.g. 512). Must match cfg.size
-              and the size used when the offline seg PNGs were computed.
-
-    RESIZE STRATEGY IS FIXED: letterbox — SquarePad pads the shorter side to a
-    square with a flat local-mean fill, THEN Resize is a uniform scale (no
-    distortion). This is a FINAL user decision (2026-07-06, references.md §9):
-      • "crop" was excluded from the start (cuts driving-scene frame edges).
-      • "stretch" (direct Resize to square) was evaluated with real side-by-side
-        encoder previews (outputs/viz/resize_mode_preview.png) and REJECTED —
-        the aspect distortion shifted segmentation classes (sky read as
-        "building" in the test scene), and the former resize_mode toggle was
-        REMOVED so training and inference can never be run in different modes
-        by accident. Do not re-add a mode switch without a new decision.
-
-    Correctness note: the padded image is a (size, size) square before the
-    ToTensor step, so SegmentationEncoder always receives exactly (size, size)
-    input and never triggers the kind of internal forced-crop that MiDaS does.
+        size: final square side in pixels (e.g. 512). Must match cfg.size.
+        resize_mode: "letterbox" (default) or "CenterCrop" — see _square_rgb_steps.
+          This is a per-run TRAINING CHOICE (user decision 2026-07-20, superseding
+          the 2026-07-06 "letterbox only" decision): both techniques are now
+          selectable via the `resize_mode` config key so results can be compared
+          by training/inferring twice, once per mode, on real data. The seg-ID map
+          MUST use the identical mode + geometry (see square_id_map below) or
+          conditioning and image misalign.
     """
-    return _tv.Compose([
-        SquarePad(),                    # pad shorter side -> square (flat local-mean fill)
-        _tv.Resize((size, size)),       # uniform scale — input already square, no distortion
+    return _tv.Compose(_square_rgb_steps(size, resize_mode) + [
         _tv.ToTensor(),                 # PIL [0,255] -> tensor [0,1]
         # mean=std=0.5 maps [0,1] linearly to [-1,1] (the SD1.5 VAE / encoder range).
         _tv.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
+
+
+def build_seg_display_preprocess(size: int, resize_mode: str = "letterbox"):
+    """
+    Same geometry as build_seg_preprocess, but stops after squaring — returns a
+    PIL.Image, not a tensor. For DISPLAY-ONLY panels (e.g. the inference grid's
+    ORIGINAL panel) that must visually match what the model actually saw,
+    without needing the [-1,1] tensor conversion.
+    """
+    return _tv.Compose(_square_rgb_steps(size, resize_mode))
+
+
+def square_id_map(ids_pil, size: int, resize_mode: str = "letterbox", pad_id: int = 0):
+    """
+    Square a raw class-ID PIL image (mode "L", one integer id per pixel) to
+    (size, size), using the SAME geometric technique as build_seg_preprocess
+    applies to the paired RGB image — so image and map stay pixel-aligned
+    regardless of which resize_mode a run picked. NEAREST-only: averaging or
+    blending class ids fabricates classes that don't exist.
+
+    Shared by src/data/local_seg.py (training/val dataset) and grounded_sam_inference.py
+    (_load_seg_map) so both read a saved map identically — the parity rule
+    this project follows everywhere else.
+
+      "letterbox"  : pad the shorter side with `pad_id` (mirrors SquarePad's
+                     exact pad-before/pad-after split), then NEAREST resize to
+                     (size, size).
+      "CenterCrop" : replicate torchvision's Resize(size) + CenterCrop(size)
+                     geometry exactly (same shorter-edge-to-size scale, same
+                     round-half crop offsets) but with NEAREST interpolation
+                     instead of the RGB path's default bilinear resize.
+    """
+    assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
+    w, h = ids_pil.size
+
+    if resize_mode == "letterbox":
+        if w != h:
+            side = max(w, h)
+            pad_before = (side - min(w, h)) // 2
+            canvas = Image.new("L", (side, side), color=pad_id)
+            # landscape -> pad top+bottom (paste at y offset); portrait -> left+right
+            canvas.paste(ids_pil, (0, pad_before) if w > h else (pad_before, 0))
+            ids_pil = canvas
+        if ids_pil.size != (size, size):
+            ids_pil = ids_pil.resize((size, size), Image.NEAREST)
+        return ids_pil
+
+    # CenterCrop: mirror torchvision.transforms.functional's own formulas
+    # exactly (Resize(int) shorter-edge scale; center_crop's round-half offsets)
+    # so the ID map lands on precisely the same pixel box the RGB Resize+
+    # CenterCrop chain produces.
+    if w < h:
+        new_w, new_h = size, int(size * h / w)
+    else:
+        new_w, new_h = int(size * w / h), size
+    ids_pil = ids_pil.resize((new_w, new_h), Image.NEAREST)
+    crop_left = int(round((new_w - size) / 2.0))
+    crop_top  = int(round((new_h - size) / 2.0))
+    return ids_pil.crop((crop_left, crop_top, crop_left + size, crop_top + size))
 
 
 if __name__ == "__main__":

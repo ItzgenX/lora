@@ -17,7 +17,7 @@ MODE = Literal[
 
 # ============================================================================ #
 #  GPU RESOLUTION — single source of truth for the segmentation pipeline       #
-#  entrypoints (seg_map_calculations.py, seg_training.py, seg_inference.py)    #
+#  entrypoints (seg_map_calculations.py, grounded_sam_training.py, grounded_sam_inference.py)    #
 #                                                                                #
 #  WHY THIS EXISTS: the calc/inference scripts used to pick a device with      #
 #  `"cuda" if torch.cuda.is_available() else "cpu"` and silently run on CPU     #
@@ -245,6 +245,7 @@ def write_training_params_txt(cfg, output_path: Path, device: str, original_cwd:
         f"train manifest   : {cfg.data.json_file}  ({train_n} images)",
         f"val manifest     : {cfg.data.get('val_json_file', 'null')}  ({val_n} images)",
         f"image size       : {cfg.get('size', '?')}",
+        f"resize_mode      : {cfg.get('resize_mode', 'letterbox')}  (letterbox=SquarePad, CenterCrop=original repo recipe)",
         "",
         "-- Schedule --",
         f"epochs           : {cfg.get('epochs', '?')}",
@@ -408,7 +409,7 @@ def roll_list(l, n):
 
 
 # ============================================================================ #
-#  PER-CHECKPOINT QUANTITATIVE METRIC — used by seg_training.py                #
+#  PER-CHECKPOINT QUANTITATIVE METRIC — used by grounded_sam_training.py                #
 #                                                                               #
 #  WHY THIS EXISTS: eyeballing checkpoint grids alone can't tell you whether    #
 #  a checkpoint is actually improving; a number logged per checkpoint can.     #

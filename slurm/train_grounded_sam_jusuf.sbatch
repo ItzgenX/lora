@@ -23,7 +23,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=24:00:00
-#SBATCH --signal=B:USR1@300                    # same graceful-stop mechanism as train_seg (seg_training.py:90-93,
+#SBATCH --signal=B:USR1@300                    # same graceful-stop mechanism as train_seg (grounded_sam_training.py:90-93,
                                                 # byte-identical on this branch, verified)
 #SBATCH --output=logs/train-%j.out
 #SBATCH --error=logs/train-%j.err
@@ -49,7 +49,14 @@ DATA_DIR=$SCRATCH/<your_project>/grounded_sam
 
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-RESUME_CKPT=""   # e.g. "outputs/train/grounded_sam/runs/2026-01-01/00-00-00/checkpoint-epoch3/step9000"
+# RESIZE_MODE (user decision 2026-07-20, GROUNDED_SAM.md §5.0b): "letterbox"
+# (SquarePad, default) or "CenterCrop" (original stock LoRAdapter recipe).
+# Also names the output folder: outputs/train/grounded_sam_${RESIZE_MODE}/...
+# -- submit this script twice, once per mode, to compare both by trained
+# generation quality. No calc step needed for either (see banner above).
+RESIZE_MODE="letterbox"
+
+RESUME_CKPT=""   # e.g. "outputs/train/grounded_sam_letterbox/runs/2026-01-01/00-00-00/checkpoint-epoch3/step9000"
 
 # (Optional, no GPU needed, cheap CPU sanity check before spending GPU time —
 # run this on a LOGIN node beforehand, not inside this GPU job:
@@ -60,7 +67,7 @@ RESUME_CKPT=""   # e.g. "outputs/train/grounded_sam/runs/2026-01-01/00-00-00/che
 # Same situation as the segformer branch's train_seg_jusuf.sbatch: this
 # branch's configs/experiment/train_grounded_sam.yaml also hardcodes
 # batch_size=4, gradient_accumulation_steps=4 (confirmed: "4 batch x 4 accum
-# = 16 effective batch", same 12GB-reference baseline) and seg_training.py
+# = 16 effective batch", same 12GB-reference baseline) and grounded_sam_training.py
 # never auto-scales it. Bare python (no srun -- this script already executes
 # ON the allocated compute node) reuses this repo's OWN validated formula
 # (recommend_training_params.py's recommend_batch_and_accum) against THIS
@@ -76,7 +83,8 @@ print(b, a)
 ")"
 echo "[INFO] GPU-sized: data.batch_size=${REC_BATCH}  gradient_accumulation_steps=${REC_ACCUM}  (effective batch = $((REC_BATCH * REC_ACCUM)))"
 
-srun python seg_training.py experiment=train_grounded_sam \
+srun python grounded_sam_training.py experiment=train_grounded_sam \
+    resize_mode=${RESIZE_MODE} \
     data.json_file="${DATA_DIR}/train.jsonl" \
     data.val_json_file="${DATA_DIR}/val.jsonl" \
     data.batch_size=${REC_BATCH} \
