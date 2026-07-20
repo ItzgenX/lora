@@ -608,6 +608,22 @@ correctly resolves `tag` → `seg_<mode>`, `data.json_file` →
 `data/seg_training_<mode>/train.jsonl`, and inference's `output_dir` →
 `outputs/inference/seg_<mode>/results`.
 
+**A real bug found by self-review AFTER the first push, fixed same day:**
+because SegFormer's RGB squaring happens LIVE at training time (built from
+THIS dataset's `resize_mode`) while the paired seg map was squared
+PERMANENTLY at calc time, the two could silently diverge — e.g. training
+configured with `letterbox` while `data.json_file` points at a manifest
+built with `CenterCrop` — with nothing catching it. `SegJsonDataset` now
+cross-checks: `seg_map_calculations.py` always stamps its output path with
+the mode used (folder name for scan/data_dir/json_file modes, filename for
+single-image mode), so the dataset re-derives that stamp from every
+`seg_path` at load time and prints a loud `[SegJsonDataset] WARN resize_mode
+mismatch` if it disagrees with this dataset's own `resize_mode` — or `WARN...
+MIXES` if a manifest accidentally combines maps from two different calc
+runs. Verified by execution against 4 real scenarios (matched, mismatched,
+mixed, and unstamped/legacy paths) — all four behave correctly, including
+correctly staying silent on unstamped paths rather than false-alarming.
+
 **Known gap, disclosed rather than silently left inconsistent:** the
 worked examples elsewhere in this document (and in `SEG_TRAINING_GUIDE.md`)
 predate this change and still show the plain `data/seg_training/...` path

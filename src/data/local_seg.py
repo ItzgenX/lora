@@ -30,6 +30,7 @@ segformer_training.py reads batch["seg"].
 
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +39,22 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, seg_palette_tensor, seg_colorize_ids
-from src.data.transforms import build_seg_preprocess
+from src.data.transforms import build_seg_preprocess, RESIZE_MODES
+
+
+# Matches the mode stamp seg_map_calculations.py always bakes into its output
+# path (folder name for scan/data_dir/json_file modes: "..._seg_map_letterbox/...";
+# filename for single-image mode: "<stem>_seg_map_letterbox.png") -- reused here
+# (not a separate marker file) since it's already guaranteed present by every
+# calc-mode's own naming convention.
+_SEG_MAP_MODE_RE = re.compile(r"_seg_map_(" + "|".join(RESIZE_MODES) + r")\b")
+
+
+def _detect_seg_map_resize_mode(seg_path: str) -> str | None:
+    """Return the resize_mode baked into a calc-produced seg_path, or None if
+    the path doesn't carry the stamp (e.g. a hand-placed/legacy map)."""
+    m = _SEG_MAP_MODE_RE.search(str(seg_path))
+    return m.group(1) if m else None
 
 
 class SegJsonDataset(Dataset):
@@ -64,12 +80,26 @@ class SegJsonDataset(Dataset):
         image_key: str = "raw_image_path",   # JSONL key for the source RGB image
         seg_key: str = "seg_path",           # JSONL key for the class-ID seg map
         prompt_key: str = "prompt",          # JSONL key for the text caption
+        resize_mode: str = "letterbox",      # MUST match what seg_map_calculations.py
+                                             # used to COMPUTE these maps (baked in at
+                                             # calc time, unlike the grounded_sam branch)
+                                             # -- used ONLY to cross-check seg_path's own
+                                             # mode stamp below, catching a real silent
+                                             # training-data-misalignment risk found by
+                                             # self-review 2026-07-20: this dataset's own
+                                             # image_transform (built from resize_mode)
+                                             # squares the RGB HERE, live, while the
+                                             # paired seg map was squared PERMANENTLY at
+                                             # calc time -- if the two modes ever
+                                             # disagree, image and map geometrically
+                                             # diverge with no other check catching it.
     ):
         self.json_file    = Path(json_file)
         self.json_dir     = self.json_file.parent
         self.project_root = Path(project_root) if project_root else self.json_dir
         self.image_root   = Path(image_root) if image_root else None
         self.size         = size
+        self.resize_mode  = resize_mode
         self.image_transform = image_transform
         # Configurable manifest keys: default to the SegFormer pipeline's names,
         # override (e.g. for a Grounded-SAM manifest that used "image"/"mask")
@@ -92,6 +122,15 @@ class SegJsonDataset(Dataset):
         # Early, loud missing-file check — catch a bad manifest before the
         # dataloader workers surface a confusing deep stack trace mid-training.
         missing_img = missing_seg = 0
+        # resize_mode cross-check (2026-07-20): seg_map_calculations.py always
+        # stamps its output path with the mode used to compute it (folder or
+        # filename, see _detect_seg_map_resize_mode) -- collect what modes are
+        # ACTUALLY present across this manifest's seg_path entries, so a single
+        # loud warning can catch (a) this dataset's resize_mode disagreeing
+        # with what the maps were really computed with, and (b) a manifest
+        # that accidentally mixes maps from two different calc runs.
+        _detected_modes = set()
+        _unstamped = 0
         for item in self.items:
             if not self._seg_resolve(item[self.image_key]).exists():
                 print(f"[SegJsonDataset] WARN image not found: {item[self.image_key]}")
@@ -101,10 +140,44 @@ class SegJsonDataset(Dataset):
             elif not self._seg_resolve(item[self.seg_key]).exists():
                 print(f"[SegJsonDataset] WARN seg not found: {item[self.seg_key]}")
                 missing_seg += 1
+            if item.get(self.seg_key, ""):
+                _mode = _detect_seg_map_resize_mode(item[self.seg_key])
+                if _mode is not None:
+                    _detected_modes.add(_mode)
+                else:
+                    _unstamped += 1
         if missing_seg:
             print(
                 f"[SegJsonDataset] {missing_seg}/{len(self.items)} entries missing "
                 f"'{self.seg_key}'."
+            )
+        if len(_detected_modes) > 1:
+            print(
+                f"[SegJsonDataset] WARN: this manifest MIXES seg maps computed with "
+                f"different resize_mode values: {sorted(_detected_modes)} -- image "
+                f"and map geometry will disagree for whichever entries don't match "
+                f"this dataset's resize_mode={self.resize_mode!r}. Rebuild the "
+                f"manifest from a single seg_map_calculations.py run."
+            )
+        elif _detected_modes and self.resize_mode not in _detected_modes:
+            print(
+                f"[SegJsonDataset] WARN resize_mode mismatch: this dataset is "
+                f"configured with resize_mode={self.resize_mode!r}, but every "
+                f"seg_path in {self.json_file.name} was computed with "
+                f"resize_mode={sorted(_detected_modes)[0]!r} -- the RGB image "
+                f"(squared HERE, live, with this dataset's resize_mode) and its "
+                f"paired seg map (squared PERMANENTLY at calc time with the OTHER "
+                f"mode) will NOT geometrically align. Pass "
+                f"resize_mode={sorted(_detected_modes)[0]!r} to fix, or point "
+                f"data.json_file at a manifest built with resize_mode="
+                f"{self.resize_mode!r}."
+            )
+        if _unstamped and _unstamped < len(self.items):
+            print(
+                f"[SegJsonDataset] NOTE: {_unstamped}/{len(self.items)} seg_path "
+                f"entries have no recognisable resize_mode stamp in their path "
+                f"(hand-placed or pre-2026-07-20 maps) -- not checked against "
+                f"resize_mode={self.resize_mode!r}."
             )
 
     def _seg_resolve(self, p: str) -> Path:
@@ -199,11 +272,13 @@ class SegJsonDataModule:
                                        # 2026-07-20) — built ONCE here from
                                        # build_seg_preprocess so train/val use the
                                        # identical RGB transform. UNLIKE the
-                                       # grounded_sam branch, this does NOT affect
-                                       # the seg map here (already squared at calc
-                                       # time by seg_map_calculations.py) — it MUST
-                                       # match whatever mode that script used to
-                                       # compute the maps this manifest points at.
+                                       # grounded_sam branch, this does NOT re-square
+                                       # the seg map (already squared at calc time by
+                                       # seg_map_calculations.py) — it MUST match
+                                       # whatever mode that script used, and IS cross-
+                                       # checked against each seg_path's own mode
+                                       # stamp in SegJsonDataset (loud warning on
+                                       # mismatch, found by self-review 2026-07-20).
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
@@ -220,7 +295,8 @@ class SegJsonDataModule:
         self.class_names = None
         self.palette = palette
 
-        _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key)
+        _keys = dict(image_key=image_key, seg_key=seg_key, prompt_key=prompt_key,
+                     resize_mode=resize_mode)
 
         self.train_dataset = SegJsonDataset(
             json_file=Path(project_root, json_file),
