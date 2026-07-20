@@ -69,6 +69,7 @@ QUICK COMMANDS (run from repo root with conda loradapter env active):
 import hydra
 import os
 import json
+from datetime import datetime
 import torch
 import numpy as np
 from PIL import Image, ImageDraw
@@ -206,10 +207,16 @@ def main(cfg):
     # explicitly passed. See src/utils.py resolve_device() for why this exists.
     device = resolve_device(cfg.device)
 
-    # Resolve output_dir from the original repo root (not Hydra's run dir).
+    # Resolve output_dir from the original repo root (not Hydra's run dir),
+    # then make it UNIQUE PER RUN (user spec 2026-07-20: every inference run
+    # stores its results in its own folder — two runs can never overwrite or
+    # mix outputs). A timestamped subfolder is appended to the configured
+    # base path; Hydra's own run dir already embeds the same date/time format,
+    # so the two are easy to correlate when debugging a specific run.
     _root = get_original_cwd()
     _out = Path(cfg.inference.output_dir)
-    output_dir = _out if _out.is_absolute() else Path(_root) / _out
+    _out = _out if _out.is_absolute() else Path(_root) / _out
+    output_dir = _out / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
@@ -244,6 +251,9 @@ def main(cfg):
     # ------------------------------------------------------------------ #
     # Build model from Hydra config (SD15 + LoRA structure)               #
     # ------------------------------------------------------------------ #
+    # Capture the resolved model-name STRING before instantiate() replaces
+    # cfg.model with the built SD15 object (run_params.txt needs the string).
+    _base_model_name = str(cfg.model.model_name)
     cfg = hydra.utils.instantiate(cfg)
     model: ModelBase = cfg.model
     model = model.to(device)
@@ -352,6 +362,45 @@ def main(cfg):
               "-- mIoU controllability metric will be skipped for this run.")
     miou_lines = []                                # "stem: 0.6123" per image
     mious      = []                                # values, for the mean
+
+    # ------------------------------------------------------------------ #
+    # run_params.txt — the full recipe of THIS run, saved with its outputs #
+    # (user spec 2026-07-20). Every generation-affecting setting is        #
+    # recorded so any result folder is self-documenting: you can look at   #
+    # an image weeks later and know exactly how it was made, or re-run the #
+    # identical command. Written BEFORE generating, so even a crashed run  #
+    # leaves its recipe behind.                                            #
+    # ------------------------------------------------------------------ #
+    _inf = cfg.inference
+    _params_lines = [
+        "seg_inference.py run parameters (grounded_sam pipeline)",
+        f"timestamp                    : {datetime.now().isoformat(timespec='seconds')}",
+        f"ckpt_path                    : {cfg.ckpt_path}",
+        f"seed                         : {cfg.seed}",
+        f"size                         : {cfg.size}",
+        f"num_inference_steps          : {_inf.get('num_inference_steps', 50)}",
+        f"guidance_scale               : {_inf.get('guidance_scale', 7.5)}",
+        f"n_samples                    : {_inf.get('n_samples', 1)}",
+        f"conditioning_kernel_size     : {_inf.get('conditioning_kernel_size', 0)}  (softening kernel; 0 = off)",
+        f"lora_scale_start             : {_inf.get('lora_scale_start', 1.0)}  (conditioning scale, early steps)",
+        f"lora_scale_end               : {_inf.get('lora_scale_end', 1.0)}  (conditioning scale, late steps)",
+        f"lora_scale_decay_start_frac  : {_inf.get('lora_scale_decay_start_frac', 0.3)}",
+        f"base model                   : {_base_model_name}",
+        f"classes_file                 : {_classes_file or '(none — Cityscapes fallback palette)'}",
+        f"seg_pad_id                   : {cfg.get('seg_pad_id', 0)}  (letterbox fill class for non-square maps)",
+        f"input mode                   : {'json_file: ' + str(_inf.json_file) if _inf.get('json_file') else 'direct seg_maps list'}",
+        f"entries                      : {len(entries)}",
+        "",
+        "inputs (seg_path | raw_image_path | prompt):",
+    ]
+    for e_ in entries:
+        _params_lines.append(
+            f"  {e_['seg_path']} | {e_.get('image_path') or '-'} | {e_.get('prompt', '')!r}"
+        )
+    (output_dir / "run_params.txt").write_text(
+        "\n".join(_params_lines) + "\n", encoding="utf-8"
+    )
+    print(f"[params] wrote {output_dir / 'run_params.txt'}")
 
     # ------------------------------------------------------------------ #
     # Inference loop                                                       #

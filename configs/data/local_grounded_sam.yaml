@@ -33,13 +33,6 @@ prompt_key: prompt
 # uses a different void class.
 pad_id: 0
 
-# --- Non-square map handling -------------------------------------------------- #
-# The real masks are 1280x800 (16-bit PNG, CARLA ids). The loader LETTERBOXES
-# them to a square with this class id as the fill (mirroring SquarePad's
-# geometry on the RGB) before the NEAREST resize — never stretches. 0 = CARLA
-# "Unlabeled". Change only if your taxonomy uses a different void class.
-pad_id: 0
-
 size: ${size}
 batch_size: 4
 val_batch_size: 4
