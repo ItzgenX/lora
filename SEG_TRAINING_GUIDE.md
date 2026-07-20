@@ -316,6 +316,36 @@ The config enforces this: only `train.jsonl` and `val.jsonl` are ever listed her
 
 ---
 
+### 2.2a Getting a manifest without building one by hand — `seg_map_calculations.py`'s ad-hoc modes [ADDED 2026-07-20]
+
+Beyond the `--data_dir`/`--dataset_dir` full-dataset modes described elsewhere in this
+repo, the calc script has two smaller modes for a handful of images — useful when you
+just want to try inference on a new photo, or build a small manifest without hand-editing
+JSONL:
+
+```bash
+# ONE image -> map saved BESIDE it as <stem>_seg_map.png, same folder.
+# Prints a ready-to-paste seg_inference.py command for the pair.
+python seg_map_calculations.py --image path/to/frame.jpg
+
+# ONE manifest (only needs raw_image_path + optional prompt per line) ->
+# maps saved into a SIBLING <images_root>_seg_map/ folder (mirrored
+# structure, <stem>_seg_map.png each) -> writes <stem>_seg.jsonl BESIDE
+# the input, with the project-standard keys, self-verified before you
+# can trust it for training or inference.
+python seg_map_calculations.py --json_file data/my_frames.jsonl
+```
+
+Both modes, and every other mode of this script, now default `--image_path` to
+`raw_image_path` (previously `source`) — the project-standard key used everywhere,
+training and inference, both pipelines. Pass `--image_path target` (or whatever key
+your manifest actually uses) to override.
+
+`--json_file` mode reads with `utf-8-sig`, so a manifest saved by a Windows editor
+(which may prepend a BOM) parses correctly instead of crashing on line 1.
+
+---
+
 ### 2.3 `data.image_root` — images on a different drive (seg version)
 
 ```yaml
@@ -696,3 +726,38 @@ full-capacity scale** (not the local 913-image smoke-test set):
 of this repo — a separate pipeline with a different real dataset, real-world
 photos here vs. CARLA renders there, so its hyperparameters are sized
 separately and shouldn't be reused across the two.)
+
+---
+
+## 11. Running inference — output layout and the run recipe [ADDED 2026-07-20]
+
+`seg_inference.py` never computes a seg map — every call must supply a
+`seg_path` (single-image via `inference.seg_maps=[...]`, or a manifest via
+`inference.json_file=...`; `raw_image_path`/`inference.images` is optional,
+display-only). This is unconditional — there's no live-SegFormer inference
+mode any more (see the file's own module docstring, "CHANGED 2026-07-17").
+
+**Every run gets its own timestamped folder.** `inference.output_dir` is a
+*base* path — the actual outputs land in
+`<output_dir>/<YYYY-MM-DD_HH-MM-SS>/`, a new one each run, so two runs (even
+with the same `output_dir`) can never overwrite or mix each other's files:
+
+```bash
+python seg_inference.py \
+    ckpt_path=outputs/train/seg/runs/2026-01-01/00-00-00/best_model \
+    "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" \
+    "inference.images=[data/raw/000888/raw_image.jpg]" \
+    "inference.prompts=['two windows on a brick building with vines']" \
+    inference.output_dir=outputs/inference/seg/results
+# -> outputs/inference/seg/results/2026-07-20_14-32-05/  (this run's files)
+```
+
+**`run_params.txt`** is written into that folder *before* generation starts
+(so even a crashed run leaves it behind), recording the complete recipe:
+checkpoint path, seed, size, `num_inference_steps`, `guidance_scale`,
+`conditioning_kernel_size` (softening kernel), `lora_scale_start`/`_end`/
+`_decay_start_frac` (conditioning-strength decay — see `model.py`'s
+`sample_easy` docstring), the resolved base model, and every
+`seg_path | raw_image_path | prompt` triplet processed. Any result folder is
+therefore self-documenting weeks later, and the exact command can be
+reconstructed from it without guessing what settings produced a given image.
