@@ -34,6 +34,17 @@ TYPICAL WORKFLOW (data_dir mode — recommended, mirrors depth):
   python seg_training.py experiment=train_seg
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
+  # --- SINGLE IMAGE: one new CARLA/real-world photo -> map saved BESIDE it ---
+  #     (<stem>_seg_map.png in the image's own folder; prints the ready-to-run
+  #      seg_inference.py command for the pair)
+  python seg_map_calculations.py --image path/to/frame.jpg
+
+  # --- SINGLE JSONL: entries with raw_image_path (+ prompt) -> maps in a
+  #     SIBLING <images_root>_seg_map/ folder (mirrored structure) + a new
+  #     <stem>_seg.jsonl beside the input with the STANDARD keys
+  #     raw_image_path / seg_path / prompt (self-verified) ---
+  python seg_map_calculations.py --json_file data/my_frames.jsonl
+
   # --- Dry run: 15 images, verify pipeline before committing to full dataset ---
   python seg_map_calculations.py --data_dir data/ --dry_run_n 15
 
@@ -568,7 +579,8 @@ def _sibling_map_path(
     return sibling_root / rel_dir / (folder_name + suffix + ext)
 
 
-def _verify_scan_seg_training_jsonl(jsonl_path: Path, map_key: str, suffix: str) -> tuple[int, int]:
+def _verify_scan_seg_training_jsonl(jsonl_path: Path, map_key: str, suffix: str,
+                                    name_from: str = "folder") -> tuple[int, int]:
     """
     Verify a scan-mode seg output JSONL — the LAST line of defence before
     training trusts this file. Training reads each line as:
@@ -642,10 +654,16 @@ def _verify_scan_seg_training_jsonl(jsonl_path: Path, map_key: str, suffix: str)
             failed += 1
             continue
 
-        # ---- check 4b: map filename is <folder_name><suffix>.png ----------- #
-        # Named after the FOLDER (unique per image), never after the image
-        # FILENAME (identical 'raw_image' for every image -> collisions).
-        expected = raw_p.parent.name + suffix + ".png"
+        # ---- check 4b: map filename matches the mode's naming rule --------- #
+        # name_from="folder" (scan mode): <folder_name><suffix>.png — named
+        #   after the FOLDER because scan-mode images all share one filename
+        #   ('raw_image.jpg'), so the folder is the only unique identity.
+        # name_from="stem" (json_file mode): <image_stem><suffix>.png — json
+        #   manifests may list many differently-named images per folder, so
+        #   the stem is the identity there (check 5 still catches collisions
+        #   if stems repeat within a folder).
+        base = raw_p.parent.name if name_from == "folder" else raw_p.stem
+        expected = base + suffix + ".png"
         if map_p.name != expected:
             print(f"  [FAIL] entry {i}: map name {map_p.name!r} != expected {expected!r}")
             failed += 1
@@ -860,6 +878,168 @@ def run_seg_directory_mode(args):
     print("\nNext step — build training JSONLs with --data_dir, then seg_training.py")
 
 
+# ============================================================================ #
+#  SINGLE-IMAGE MODE  (--image)                                                #
+#  One image in -> one seg map saved BESIDE it: <dir>/<stem>_seg_map.png       #
+#  This is the "I have one new CARLA/real-world photo, give me its map so I    #
+#  can run seg_inference.py on it" workflow (user spec 2026-07-20).            #
+# ============================================================================ #
+
+def run_single_image_mode(args) -> None:
+    """
+    Compute the seg map for exactly ONE image and save it NEXT TO the image
+    (same folder), named `<image_stem>_seg_map.png`.
+
+    Why beside the image (not an output tree): a single ad-hoc image has no
+    dataset structure to mirror; keeping the map next to its source makes the
+    (image, map) pair self-documenting and directly usable as
+    seg_inference.py's  "inference.seg_maps=[...]" + "inference.images=[...]".
+    The `_seg_map` suffix matches the dataset-scan naming convention, so a
+    file is recognisable as pipeline output wherever it lives.
+    """
+    image_path = Path(args.image).resolve()
+    if not image_path.exists():
+        raise FileNotFoundError(f"--image not found: {image_path}")
+
+    out_path = image_path.parent / (image_path.stem + "_seg_map.png")
+    print(f"\n[single-image mode]")
+    print(f"  image   : {image_path}")
+    print(f"  seg map : {out_path}")
+
+    # out_path_fn overrides ALL path derivation in the core routine — the
+    # single file goes exactly beside its source, nowhere else.
+    results = precompute_segmentation_maps(
+        image_paths=[str(image_path)],
+        output_dir=image_path.parent,          # unused (out_path_fn wins), required arg
+        size=args.size,
+        batch_size=1,
+        model_name=args.model,
+        device=args.device,
+        skip_existing=not args.no_skip,
+        local_files_only=args.local_files_only,
+        out_path_fn=lambda src: out_path,
+    )
+    if str(image_path) in results:
+        print(f"\nDone. Next: run inference with this map, e.g.:")
+        print(f'  python seg_inference.py ckpt_path=<best_model> '
+              f'"inference.seg_maps=[{out_path.as_posix()}]" '
+              f'"inference.images=[{image_path.as_posix()}]" '
+              f'"inference.prompts=[\'your prompt\']"')
+
+
+# ============================================================================ #
+#  SINGLE-JSONL MODE  (--json_file)                                            #
+#  One manifest in -> maps into a SIBLING <images_root>_seg_map/ folder        #
+#  (mirrored structure, like dataset-scan mode) -> updated manifest written    #
+#  beside the input with the STANDARD keys:                                    #
+#      raw_image_path / seg_path / prompt        (user spec 2026-07-20)        #
+# ============================================================================ #
+
+def run_json_file_mode(args) -> None:
+    """
+    Compute seg maps for every entry of ONE JSONL manifest.
+
+    INPUT : a .jsonl where each line has at least the image-path key
+            (--image_path, default 'raw_image_path'; 'prompt' is carried
+            through if present, else saved as "").
+    MAPS  : saved into a SIBLING folder of the images' common root —
+            <root_parent>/<root_name>_seg_map/ — mirroring each image's
+            relative folder structure, named <image_stem>_seg_map.png.
+            The source image tree is never written into (same contract as
+            dataset-scan mode; see _sibling_map_path's docstring).
+    OUTPUT: <input_stem>_seg.jsonl beside the input manifest, each line:
+              {"raw_image_path": ..., "seg_path": ..., "prompt": ...}
+            — the project-standard keys that seg_training.py's dataset and
+            seg_inference.py's json mode both read directly. Paths are
+            written ABSOLUTE with forward slashes (match scan mode).
+    """
+    json_path = Path(args.json_file).resolve()
+    if not json_path.exists():
+        raise FileNotFoundError(f"--json_file not found: {json_path}")
+
+    image_root = Path(args.image_root).resolve() if args.image_root else None
+
+    # ---- read entries + resolve every image path --------------------------- #
+    # utf-8-sig: identical to utf-8 for normal files, but ALSO transparently
+    # strips the BOM that Windows editors/PowerShell prepend — a BOM'd first
+    # line otherwise crashes json.loads (found by execution 2026-07-20).
+    entries, abs_paths = [], []
+    with open(json_path, "r", encoding="utf-8-sig") as f:
+        for ln, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            p = Path(_get_image_path(entry, args.image_path))
+            if not p.is_absolute():
+                p = (image_root / p) if image_root else (Path.cwd() / p)
+            p = p.resolve()
+            if not p.exists():
+                raise FileNotFoundError(f"line {ln}: image not found: {p}")
+            entries.append(entry)
+            abs_paths.append(p)
+
+    if args.dry_run_n:
+        entries, abs_paths = entries[: args.dry_run_n], abs_paths[: args.dry_run_n]
+        print(f"\n[DRY RUN] First {len(entries)} entries only.")
+    if not entries:
+        print("[ERROR] No entries in the JSONL — nothing to do.")
+        return
+
+    # ---- sibling output root, mirroring from the images' common root ------- #
+    # Common root = deepest folder shared by ALL images (no hardcoding),
+    # exactly how --data_dir mode finds its dataset root.
+    images_root  = Path(os.path.commonpath([str(p) for p in abs_paths]))
+    sibling_root = images_root.parent / (images_root.name + "_seg_map")
+    print(f"\n[json_file mode]")
+    print(f"  manifest    : {json_path}")
+    print(f"  images root : {images_root}")
+    print(f"  maps root   : {sibling_root}   (sibling, mirrored structure)")
+
+    def _out_path(src: str) -> Path:
+        src = Path(src)
+        rel = src.parent.relative_to(images_root)
+        return sibling_root / rel / (src.stem + "_seg_map.png")
+
+    # ---- collision guard is inside the core routine; compute all maps ------ #
+    results = precompute_segmentation_maps(
+        image_paths=[str(p) for p in abs_paths],
+        output_dir=sibling_root,               # informational; out_path_fn wins
+        size=args.size,
+        batch_size=args.batch_size,
+        model_name=args.model,
+        device=args.device,
+        skip_existing=not args.no_skip,
+        local_files_only=args.local_files_only,
+        out_path_fn=_out_path,
+    )
+
+    # ---- write the updated manifest with the STANDARD keys ----------------- #
+    out_jsonl = json_path.parent / (json_path.stem + "_seg.jsonl")
+    written = skipped = 0
+    with open(out_jsonl, "w", encoding="utf-8") as f:
+        for entry, p in zip(entries, abs_paths):
+            seg = results.get(str(p))
+            if seg is None:                    # image failed -> excluded, loudly
+                skipped += 1
+                print(f"[WARN] no map for {p} — entry excluded from {out_jsonl.name}")
+                continue
+            f.write(json.dumps({
+                "raw_image_path": p.as_posix(),
+                "seg_path":       Path(seg).as_posix(),
+                "prompt":         entry.get("prompt", ""),
+            }) + "\n")
+            written += 1
+    print(f"\n  Written {written} entries -> {out_jsonl}" +
+          (f"  ({skipped} entries FAILED and were excluded)" if skipped else ""))
+
+    # Same last-line-of-defence verification the scan mode runs: every line's
+    # files exist, keys present, pairing sane — fails loudly before training
+    # or inference ever trusts this manifest. name_from="stem": json-mode maps
+    # are named after the image STEM (see check 4b's docstring for why).
+    _verify_scan_seg_training_jsonl(out_jsonl, "seg_path", "_seg_map",
+                                    name_from="stem")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Pre-compute SegFormer-b5-Cityscapes segmentation label maps.",
@@ -932,10 +1112,12 @@ def main():
         help="Re-compute even if a seg PNG already exists.",
     )
     parser.add_argument(
-        "--image_path", type=str, default="source",
+        "--image_path", type=str, default="raw_image_path",
         help="Key in your input JSONLs that holds the image path. "
-             "Default: 'source'. Change to 'target' (or any other key) "
-             "if your manifests use a different name. "
+             "Default: 'raw_image_path' (the PROJECT-STANDARD key — user "
+             "decision 2026-07-20: raw_image_path / seg_path / prompt "
+             "everywhere, training and inference, both pipelines). Change to "
+             "'target'/'source' only for legacy manifests. "
              "Example: --image_path target",
     )
     parser.add_argument(
@@ -945,6 +1127,26 @@ def main():
              "Example: --image_root /mnt/dataset  (then JSONL path "
              "'images/foo.jpg' resolves to /mnt/dataset/images/foo.jpg). "
              "Absolute paths in the JSONL are always used as-is.",
+    )
+
+    # ---- Single-image mode (map saved BESIDE the input image) -------------- #
+    parser.add_argument(
+        "--image", type=str, default=None,
+        help="SINGLE-IMAGE mode: compute the seg map for exactly this one image "
+             "and save it NEXT TO it as <stem>_seg_map.png (same folder). The "
+             "printed 'Next:' line shows the ready-to-paste seg_inference.py "
+             "command for the pair. Example: --image data/new_frame.jpg",
+    )
+
+    # ---- Single-JSONL mode (sibling _seg_map folder + standard-key manifest) #
+    parser.add_argument(
+        "--json_file", type=str, default=None,
+        help="SINGLE-JSONL mode: compute a seg map for every entry of this one "
+             "manifest. Maps go to a SIBLING folder of the images' common root "
+             "(<root>_seg_map/, mirrored structure, <stem>_seg_map.png) — the "
+             "image tree is never written into. Writes <stem>_seg.jsonl beside "
+             "the input with the standard keys raw_image_path/seg_path/prompt, "
+             "then self-verifies it. Example: --json_file data/my_frames.jsonl",
     )
 
     # ---- Dataset-SCAN mode (find raw_image.jpg by scanning a folder) ------- #
@@ -967,13 +1169,24 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.dataset_dir and not args.data_dir and not args.input_dir:
+    if not any([args.dataset_dir, args.data_dir, args.input_dir,
+                args.image, args.json_file]):
         parser.error(
             "Provide one of:\n"
+            "  --image path/to/frame.jpg   (single image — map saved beside it as <stem>_seg_map.png)\n"
+            "  --json_file path/to/list.jsonl   (one manifest — maps to sibling _seg_map folder + <stem>_seg.jsonl)\n"
             "  --dataset_dir /data/custome_dataset --data_dir data/  (scan mode — saves maps to a sibling folder)\n"
             "  --data_dir data/   (builds data/seg_training/*.json from JSONL paths)\n"
             "  --input_dir data/raw   (directory mode — PNGs only, no JSON)"
         )
+    _n_modes = sum(bool(m) for m in
+                   [args.dataset_dir, args.data_dir, args.input_dir,
+                    args.image, args.json_file])
+    if _n_modes > 1 and not (args.dataset_dir and args.data_dir):
+        # (--dataset_dir legitimately REQUIRES --data_dir; every other pairing
+        # is ambiguous — refuse instead of guessing which mode was meant.)
+        parser.error("Pass only ONE mode flag (--image / --json_file / "
+                     "--dataset_dir / --data_dir / --input_dir).")
     if args.data_dir and args.input_dir:
         parser.error("--data_dir and --input_dir are mutually exclusive.")
     if args.dataset_dir and not args.data_dir:
@@ -1007,7 +1220,15 @@ def main():
     print(f"Model            : {args.model}")
     print(f"local_files_only : {args.local_files_only}")
 
-    if args.dataset_dir:
+    if args.image:
+        # SINGLE-IMAGE mode: one map, saved beside the image.
+        run_single_image_mode(args)
+
+    elif args.json_file:
+        # SINGLE-JSONL mode: sibling _seg_map folder + standard-key manifest.
+        run_json_file_mode(args)
+
+    elif args.dataset_dir:
         # DATASET-SCAN mode: find raw_image.jpg by scanning, save maps to a
         # SIBLING folder (mirrored structure), rebuild
         # seg_training/{train,val,test}.jsonl from the original splits.
