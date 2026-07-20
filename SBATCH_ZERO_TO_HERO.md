@@ -171,6 +171,36 @@ segformer training script — it selects `configs/experiment/train_grounded_sam.
 (29-class CARLA palette, `GroundedSamEncoder` slot-filler) instead of
 `train_seg.yaml`.
 
+### 5a. The block right before that `srun` line — sizing to THIS GPU
+
+`seg_training.py` never auto-scales its batch size — it just reads a static
+`data.batch_size=4` from `configs/experiment/train_grounded_sam.yaml`
+(confirmed: same "4 batch x 4 accum = 16 effective batch" baseline as the
+segformer branch's config, hand-tuned for a ~12GB reference GPU). Left as
+-is on a 16GB V100, that leaves real VRAM unused every step. The script runs
+this BEFORE the `srun` line, on the job's real allocated GPU (no `srun`
+needed for this part — the whole batch script already executes ON the
+compute node, not the login node):
+```bash
+read -r REC_BATCH REC_ACCUM <<< "$(python -c "
+import torch
+from recommend_training_params import recommend_batch_and_accum
+total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+b, a, _, _ = recommend_batch_and_accum(total_gb)
+print(b, a)
+")"
+```
+This reuses `recommend_training_params.py`'s OWN validated formula — nothing
+new invented. `REC_BATCH`/`REC_ACCUM` are then passed as
+`data.batch_size=${REC_BATCH} gradient_accumulation_steps=${REC_ACCUM}` on
+the `srun` line. The formula holds `batch_size * accum` (the "effective
+batch") fixed at 16 — the value `learning_rate=1e-4` was validated at — so
+only how that 16 is SPLIT changes with the GPU, never the learning rate's
+validity. Verified by execution: on a real 12GB GPU this returns `(4, 4)`
+unchanged (confirms it's a no-op on the size it was already tuned for); fed
+JUSUF's documented 16GB V100 spec it returns `(5, 3)` (effective batch 15,
+≈16 — the same real function, not a hand-guessed number).
+
 ## 6. Modules — how software gets loaded
 
 - `module avail` — list what's loadable now.
@@ -278,7 +308,7 @@ steps_per_epoch = ceil(N_train / effective_batch)
 total_steps     = steps_per_epoch * epochs
 ```
 `effective_batch` is `data.batch_size * gradient_accumulation_steps` — as of
-§5's GPU-sizing block, this is `REC_BATCH * REC_ACCUM`, printed by the script itself
+§5a, this is `REC_BATCH * REC_ACCUM`, printed by the script itself
 at the top of your `.out` log (e.g. `effective batch = 15` on a V100).
 `N_train` is your real training-set image count.
 `recommend_training_params.py --data_dir <your_manifests> --epochs <N>`
