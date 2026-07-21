@@ -8,9 +8,12 @@ training the segmentation-conditioned LoRAdapter. The maps are generated OFFLINE
 Two segmentation-specific points, both critical:
 
   1. The saved map is a RAW CLASS-ID PNG (8-bit, values 0..N-1), NOT a colour
-     image. We COLOURISE it at load time with the configured palette (the
-     Grounded-SAM class palette when a classes_file is set, otherwise the
-     Cityscapes SEG_CITYSCAPES_PALETTE fallback from src/encoders/seg_encoder.py),
+     image. We COLOURISE it at load time with the Grounded-SAM/CARLA class
+     palette (configs/grounded_sam_classes.json, loaded via `classes_file` —
+     REQUIRED, no fallback: an earlier Cityscapes fallback was removed
+     2026-07-20, this branch trains on CARLA data only and that fallback
+     could never actually work here — CARLA class ids go up to 28, Cityscapes
+     only has 19 colours, so it would crash on nearly any real mask),
      producing a 3-channel RGB map in [0,1] via the shared seg_colorize_ids.
 
   2. Resizing a class-ID map MUST use NEAREST interpolation. Averaging categorical
@@ -37,7 +40,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
-from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, seg_palette_tensor, seg_colorize_ids
+from src.data.seg_palette import seg_palette_tensor, seg_colorize_ids
 from src.data.transforms import square_id_map, build_seg_preprocess
 
 
@@ -59,7 +62,9 @@ class SegJsonDataset(Dataset):
         image_transform,           # torchvision Compose for the RGB image (-> [-1,1])
         size: int = 512,           # square side for the conditioning colour map
         project_root: Path = None,
-        palette: list = None,      # class-id -> RGB; defaults to Cityscapes SSOT
+        palette: list = None,      # class-id -> RGB; REQUIRED (no fallback —
+                                   # see module docstring), loaded from your
+                                   # real classes_file by SegJsonDataModule
         image_root: Path = None,
         image_key: str = "raw_image_path",   # JSONL key for the source RGB image
         seg_key: str = "seg_path",           # JSONL key for the class-ID seg map
@@ -80,20 +85,26 @@ class SegJsonDataset(Dataset):
         self.image_root   = Path(image_root) if image_root else None
         self.size         = size
         self.image_transform = image_transform
-        # Configurable manifest keys: default to the SegFormer pipeline's names,
-        # override (e.g. for a Grounded-SAM manifest that used "image"/"mask")
-        # via the data config so no JSONL renaming is needed.
+        # Configurable manifest keys: default to the project-standard names
+        # (raw_image_path/seg_path/prompt), override via the data config if a
+        # manifest ever used different key names.
         self.image_key    = image_key
         self.seg_key      = seg_key
         self.prompt_key   = prompt_key
 
-        # Build the palette tensor ONCE here from the shared constant so every
-        # sample colourises identically, and identically to the live encoder.
-        # Using seg_palette_tensor keeps the [0,1] conversion in one function.
-        self.seg_palette  = seg_palette_tensor(
-            palette if palette is not None else SEG_CITYSCAPES_PALETTE
-        )
-        self.num_classes  = self.seg_palette.shape[0]   # 19 for Cityscapes
+        # palette is REQUIRED -- no fallback (see module docstring for why a
+        # Cityscapes fallback here was actively broken for this branch's CARLA
+        # data and was removed 2026-07-20). SegJsonDataModule always loads the
+        # real classes_file and passes it down; fail loudly here rather than
+        # deep inside a DataLoader worker if that ever doesn't happen.
+        if palette is None:
+            raise ValueError(
+                "SegJsonDataset requires a palette (no default/fallback exists "
+                "on this branch) -- pass classes_file to SegJsonDataModule so "
+                "it can load your real Grounded-SAM/CARLA class set."
+            )
+        self.seg_palette  = seg_palette_tensor(palette)
+        self.num_classes  = self.seg_palette.shape[0]   # 29 for the locked CARLA taxonomy
 
         with open(self.json_file, "r", encoding="utf-8") as f:
             self.items = [json.loads(line) for line in f if line.strip()]
@@ -248,7 +259,8 @@ class SegJsonDataModule:
         # PALETTE SOURCE — exactly one wins, in this order:
         #   1. classes_file (Grounded-SAM): load the user's class set -> palette.
         #   2. palette arg (explicit list).
-        #   3. neither -> SegJsonDataset falls back to the Cityscapes SSOT.
+        #   3. neither -> SegJsonDataset raises loudly (no fallback exists on
+        #      this branch — see local_seg.py's module docstring for why).
         # Loading from classes_file here (once) guarantees train and val use the
         # IDENTICAL palette, and lets grounded_sam_training.py resolve the same one.
         if classes_file is not None:

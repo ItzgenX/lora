@@ -15,7 +15,6 @@ cluster) — this file is just the copy checklist.
 ```
 src/data/local_seg.py
 src/data/transforms.py
-src/encoders/seg_encoder.py
 src/utils.py
 configs/train_seg.yaml
 recommend_training_params.py
@@ -26,6 +25,7 @@ recommend_training_params.py
 grounded_sam_training.py
 grounded_sam_inference.py
 src/encoders/grounded_sam_encoder.py
+src/data/seg_palette.py
 configs/experiment/train_grounded_sam.yaml
 configs/data/local_grounded_sam.yaml
 configs/lora/encoder/grounded_sam.yaml
@@ -33,6 +33,12 @@ configs/inference_grounded_sam.yaml
 configs/grounded_sam_classes.json
 slurm/train_grounded_sam_jusuf.sbatch
 ```
+
+**No SegFormer/Cityscapes code remains on this branch as of 2026-07-20** —
+`src/encoders/seg_encoder.py` (the live SegFormer encoder + a Cityscapes
+fallback palette that could never actually work for this branch's CARLA
+data) was deleted entirely. The genuinely shared, taxonomy-agnostic palette
+math it also contained now lives in `src/data/seg_palette.py` above.
 
 **Optional — docs and diagnostics, not needed to *run* training/inference:**
 ```

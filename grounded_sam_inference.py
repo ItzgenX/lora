@@ -91,7 +91,7 @@ from hydra.utils import get_original_cwd
 from src.model import ModelBase
 from src.utils import add_lora_from_config, resolve_device, compute_miou
 from src.data.transforms import build_seg_display_preprocess, square_id_map
-from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap, seg_colorize_ids
+from src.data.seg_palette import seg_palette_tensor, seg_ids_from_colormap, seg_colorize_ids
 
 torch.set_float32_matmul_precision("high")
 
@@ -428,18 +428,23 @@ def main(cfg):
     # PALETTE SOURCE -- must match whatever palette the seg maps were saved
     # with, or _load_seg_map below raises "class id >= palette size" (a real
     # bug found by an actual end-to-end run, not caught by config-only
-    # checks: SEG_CITYSCAPES_PALETTE only has 19 colours, Grounded-SAM's
-    # locked CARLA taxonomy has 29). Mirrors local_seg.py's
-    # SegJsonDataModule: classes_file if configured, else the Cityscapes SSOT.
+    # checks). REQUIRED on this branch -- there is deliberately no fallback
+    # palette (a Cityscapes fallback used to live here and was removed
+    # 2026-07-20: it only has 19 colours, Grounded-SAM's locked CARLA
+    # taxonomy has 29, so it could never actually work for this branch's
+    # own data). Mirrors local_seg.py's SegJsonDataModule.
     _classes_file = cfg.get("classes_file", None)
-    if _classes_file is not None:
-        from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
-        _cf = Path(_root) / _classes_file
-        _class_names, _palette_list = load_grounded_sam_palette(_cf)
-        _palette = seg_palette_tensor(_palette_list).to(device)
-        print(f"[palette] loaded {len(_palette_list)} classes from {_classes_file}")
-    else:
-        _palette = seg_palette_tensor().to(device)   # ID<->colour lookup (SSOT)
+    if _classes_file is None:
+        raise ValueError(
+            "classes_file is required (configs/inference_grounded_sam.yaml "
+            "sets it by default -- did you override it away?). No fallback "
+            "palette exists on this branch."
+        )
+    from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
+    _cf = Path(_root) / _classes_file
+    _class_names, _palette_list = load_grounded_sam_palette(_cf)
+    _palette = seg_palette_tensor(_palette_list).to(device)
+    print(f"[palette] loaded {len(_palette_list)} classes from {_classes_file}")
     _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
     _live_seg_available = getattr(_enc0, "live_available", True)
     if not _live_seg_available:

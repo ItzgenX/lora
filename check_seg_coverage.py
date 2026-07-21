@@ -17,26 +17,32 @@ almost certainly exceeds it).
 
 WHAT YOU PASS IN
 -----------------
---seg_map   : the SINGLE query segmentation map to check (e.g. the seg map
-              you already have for a CARLA frame). Either:
-                (a) a raw class-ID PNG (single-channel, values 0..18) --
-                    exactly what seg_map_calculations.py / seg_path entries
-                    in the training manifest already are, or
-                (b) an RGB colourised seg map (e.g. grounded_sam_inference.py's
-                    visual output, or a palette-coloured PNG) -- pixels are
-                    matched to the nearest SEG_CITYSCAPES_PALETTE colour to
-                    recover class IDs. A JPEG photo of a screen (heavy
-                    compression + moire) will give NOISY nearest-colour
-                    matches -- prefer an actual PNG from the pipeline output
-                    when you can, and treat (b) results as approximate.
---json_file : the TRAINING manifest to compare against (e.g.
-              data/grounded_sam/train.json) -- same file Stage D reads.
---cache_file: OPTIONAL. Precomputing per-class coverage for tens of
-              thousands of training images is the slow part; pass a path
-              (e.g. data/grounded_sam/train_coverage_cache.npz) to save it
-              once and reuse instantly on every later query against the same
-              manifest. Deleted/ignored automatically if the manifest's
-              entry count no longer matches (e.g. you rebuilt the manifest).
+--seg_map     : the SINGLE query segmentation map to check (e.g. the seg map
+                you already have for a CARLA frame). Either:
+                  (a) a raw class-ID PNG (single-channel, values 0..28 for the
+                      locked CARLA taxonomy) -- exactly what seg_path entries
+                      in the training manifest already are, or
+                  (b) an RGB colourised seg map (e.g. grounded_sam_inference.py's
+                      visual output) -- pixels are matched to the nearest
+                      colour in --classes_file's palette to recover class IDs.
+                      A JPEG photo of a screen (heavy compression + moire)
+                      will give NOISY nearest-colour matches -- prefer an
+                      actual PNG from the pipeline output when you can, and
+                      treat (b) results as approximate.
+--json_file   : the TRAINING manifest to compare against (e.g.
+                data/grounded_sam/train.json).
+--classes_file: the CARLA class-definition JSON (id->name/colour). Default
+                configs/grounded_sam_classes.json — this project's LOCKED
+                29-class taxonomy. MUST match whatever classes_file the seg
+                maps were actually saved/coloured with, or class ids and
+                names will disagree.
+--cache_file  : OPTIONAL. Precomputing per-class coverage for tens of
+                thousands of training images is the slow part; pass a path
+                (e.g. data/grounded_sam/train_coverage_cache.npz) to save it
+                once and reuse instantly on every later query against the
+                same manifest. Deleted/ignored automatically if the
+                manifest's entry count no longer matches (e.g. you rebuilt
+                the manifest).
 
 USAGE
 ------
@@ -53,81 +59,73 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# SEG_CITYSCAPES_PALETTE is the project's single source of truth for
-# class-id -> colour (src/encoders/seg_encoder.py). Importing it here (rather
-# than re-typing the table) means this diagnostic can never silently drift
-# out of sync with the real encoder. The import is cheap: seg_encoder.py only
-# imports torch at module level; the heavy `transformers` import lives inside
-# a method and is never triggered just by reading this constant.
-from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE
+# The real, LOCKED CARLA class taxonomy (id->name/colour) lives in a JSON
+# file, not a hardcoded table -- this project's class set is open/configured,
+# not a fixed pretrained taxonomy. Reusing load_grounded_sam_palette (the
+# SAME function training and inference use) means this diagnostic can never
+# silently drift out of sync with the real palette.
+from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
 
-# Class NAMES are diagnostic-only labels, not used by training -- they must
-# stay in the exact order of SEG_CITYSCAPES_PALETTE (index == class id).
-CLASS_NAMES = [
-    "road", "sidewalk", "building", "wall", "fence", "pole",
-    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
-    "person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle",
-]
-NUM_CLASSES = len(SEG_CITYSCAPES_PALETTE)
-assert len(CLASS_NAMES) == NUM_CLASSES, "CLASS_NAMES / SEG_CITYSCAPES_PALETTE length mismatch"
+DEFAULT_CLASSES_FILE = "configs/grounded_sam_classes.json"
 
 
-def _class_fractions_from_ids(ids: np.ndarray) -> np.ndarray:
-    """ids: HxW array of class indices 0..NUM_CLASSES-1 -> per-class pixel fraction."""
-    counts = np.bincount(ids.ravel(), minlength=NUM_CLASSES)[:NUM_CLASSES]
+def _class_fractions_from_ids(ids: np.ndarray, num_classes: int) -> np.ndarray:
+    """ids: HxW array of class indices 0..num_classes-1 -> per-class pixel fraction."""
+    counts = np.bincount(ids.ravel(), minlength=num_classes)[:num_classes]
     return counts / counts.sum()
 
 
-def load_query_seg_map(path: Path) -> np.ndarray:
+def load_query_seg_map(path: Path, palette: np.ndarray, num_classes: int) -> np.ndarray:
     """Load a query seg map (raw ID PNG or RGB colourised PNG/JPEG) -> per-class fractions."""
     img = Image.open(path)
     if img.mode in ("L", "I", "I;16"):
-        ids = np.array(img.convert("L"))
-        if ids.max() >= NUM_CLASSES:
+        ids = np.asarray(img).astype(np.int64)   # raw read -- handles 8-bit "L" and 16-bit "I;16" alike
+        if ids.max() >= num_classes:
             raise ValueError(
                 f"{path}: grayscale image has values up to {ids.max()}, but only "
-                f"{NUM_CLASSES} classes exist (0..{NUM_CLASSES - 1}). This looks like "
+                f"{num_classes} classes exist (0..{num_classes - 1}). This looks like "
                 f"a normal photo, not a class-ID map -- pass a raw seg_path PNG or an "
                 f"RGB colourised seg map instead."
             )
-        return _class_fractions_from_ids(ids)
+        return _class_fractions_from_ids(ids, num_classes)
 
     # RGB path: nearest-palette-colour matching.
     print(f"[check_seg_coverage] '{path.name}' is RGB -> matching pixels to nearest "
-          f"SEG_CITYSCAPES_PALETTE colour (approximate; noisier if this came from a "
+          f"classes_file colour (approximate; noisier if this came from a "
           f"JPEG or a photographed screen).")
     rgb = np.array(img.convert("RGB")).reshape(-1, 3).astype(np.int32)
-    palette = np.array(SEG_CITYSCAPES_PALETTE, dtype=np.int32)  # [19,3]
-    # squared distance from every pixel to every palette colour -> [N,19], argmin -> [N]
+    # squared distance from every pixel to every palette colour -> [N,num_classes], argmin -> [N]
     dists = ((rgb[:, None, :] - palette[None, :, :]) ** 2).sum(axis=2)
     ids = dists.argmin(axis=1)
-    return _class_fractions_from_ids(ids)
+    return _class_fractions_from_ids(ids, num_classes)
 
 
-def build_or_load_training_distribution(json_file: Path, cache_file: Path | None) -> tuple[np.ndarray, int]:
-    """Returns (fractions [N,NUM_CLASSES], N). Uses cache_file if present and matching."""
+def build_or_load_training_distribution(
+    json_file: Path, cache_file: Path | None, num_classes: int
+) -> tuple[np.ndarray, int]:
+    """Returns (fractions [N,num_classes], N). Uses cache_file if present and matching."""
     entries = [json.loads(line) for line in json_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     n = len(entries)
 
     if cache_file is not None and cache_file.exists():
         cached = np.load(cache_file)
-        if int(cached["n"]) == n:
+        if int(cached["n"]) == n and int(cached["fractions"].shape[1]) == num_classes:
             print(f"[check_seg_coverage] Loaded cached distribution ({n} images) from {cache_file}")
             return cached["fractions"], n
-        print(f"[check_seg_coverage] Cache at {cache_file} has {int(cached['n'])} images, "
-              f"manifest now has {n} -- recomputing.")
+        print(f"[check_seg_coverage] Cache at {cache_file} doesn't match (image count or "
+              f"class count changed) -- recomputing.")
 
     print(f"[check_seg_coverage] Computing per-class coverage for {n} training images "
           f"(one-time cost; pass --cache_file to reuse this next time)...")
-    fractions = np.zeros((n, NUM_CLASSES), dtype=np.float32)
+    fractions = np.zeros((n, num_classes), dtype=np.float32)
     missing = 0
     for i, item in enumerate(entries):
         seg_path = Path(item["seg_path"])
         if not seg_path.exists():
             missing += 1
             continue
-        ids = np.array(Image.open(seg_path).convert("L"))
-        fractions[i] = _class_fractions_from_ids(ids)
+        ids = np.asarray(Image.open(seg_path)).astype(np.int64)   # raw read, see load_query_seg_map
+        fractions[i] = _class_fractions_from_ids(ids, num_classes)
         if (i + 1) % 5000 == 0:
             print(f"  ...{i + 1}/{n}")
     if missing:
@@ -145,22 +143,30 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seg_map", required=True, help="query seg map to check (raw ID PNG or RGB colourised)")
     ap.add_argument("--json_file", required=True, help="training manifest, e.g. data/grounded_sam/train.json")
+    ap.add_argument("--classes_file", default=DEFAULT_CLASSES_FILE,
+                     help=f"CARLA class-definition JSON (id->name/colour). Default: {DEFAULT_CLASSES_FILE}. "
+                          f"MUST match whatever classes_file the seg maps were saved/coloured with.")
     ap.add_argument("--cache_file", default=None, help="optional .npz cache path to reuse across queries")
     args = ap.parse_args()
 
-    query_fractions = load_query_seg_map(Path(args.seg_map))
+    class_names, palette_list = load_grounded_sam_palette(Path(args.classes_file))
+    num_classes = len(class_names)
+    palette = np.array(palette_list, dtype=np.int32)   # [num_classes, 3]
+    print(f"[check_seg_coverage] loaded {num_classes} classes from {args.classes_file}")
+
+    query_fractions = load_query_seg_map(Path(args.seg_map), palette, num_classes)
     train_fractions, n = build_or_load_training_distribution(
-        Path(args.json_file), Path(args.cache_file) if args.cache_file else None
+        Path(args.json_file), Path(args.cache_file) if args.cache_file else None, num_classes
     )
 
     print(f"\nComparing '{args.seg_map}' against {n} training images:\n")
-    header = f"{'class':<14}{'query %':>10}{'train mean %':>14}{'train max %':>13}{'images >= query':>18}"
+    header = f"{'class':<16}{'query %':>10}{'train mean %':>14}{'train max %':>13}{'images >= query':>18}"
     print(header)
     print("-" * len(header))
 
     # Only report classes actually present in the query image, largest first --
     # a class the query doesn't have can't be out-of-distribution for this scene.
-    present = [c for c in range(NUM_CLASSES) if query_fractions[c] > 0]
+    present = [c for c in range(num_classes) if query_fractions[c] > 0]
     present.sort(key=lambda c: query_fractions[c], reverse=True)
 
     for c in present:
@@ -171,7 +177,7 @@ def main() -> None:
         # low = rare/out-of-distribution composition, same logic as the car-coverage finding.
         pct_meeting_or_beating = 100 * (train_fractions[:, c] >= query_fractions[c]).mean()
         flag = "  <-- RARE IN TRAINING" if pct_meeting_or_beating < 1.0 else ""
-        print(f"{CLASS_NAMES[c]:<14}{q:>9.2f}%{train_mean:>13.2f}%{train_max:>12.2f}%"
+        print(f"{class_names[c]:<16}{q:>9.2f}%{train_mean:>13.2f}%{train_max:>12.2f}%"
               f"{pct_meeting_or_beating:>17.2f}%{flag}")
 
     print("\n'images >= query' = % of the training set with AT LEAST this much of that "

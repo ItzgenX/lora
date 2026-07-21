@@ -21,27 +21,21 @@ that fraction into a histogram so you can see, at a glance, whether
 "large/close vehicle" frames (e.g. car-pixel fraction > 15%) are rare or
 absent in your real training set — which is exactly the CARLA-truck situation.
 
-CAR CLASS ID DIFFERS BY TAXONOMY — pass --car_class_id, don't trust the
-default: SegFormer/Cityscapes has "car" at id 13 (SEG_CITYSCAPES_PALETTE in
-src/encoders/seg_encoder.py). Grounded-SAM's CARLA taxonomy
-(configs/grounded_sam_classes.json) has "Car" at id 14 (CARLA ids 1-19 are
-Cityscapes shifted +1, since id 0 = Unlabeled sits at the front). Using the
-wrong id silently measures a DIFFERENT class with no error.
+CAR CLASS ID — pass --car_class_id, don't trust a default: this project's
+locked CARLA taxonomy (configs/grounded_sam_classes.json) has "Car" at id
+14. There is deliberately no default to fall back on — using the wrong id
+silently measures a DIFFERENT class with no error, so it's always explicit.
 
 If large-car-fraction frames turn out to be rare: the fix is adding/upsampling
-such examples in training, NOT finetuning SegFormer (the encoder's output was
-already correct) and NOT more epochs on the current data mix (more passes over
-data that lacks the pattern won't teach the model the pattern).
+such examples in training, NOT more epochs on the current data mix (more
+passes over data that lacks the pattern won't teach the model the pattern).
 If large-car-fraction frames turn out to be common: this hypothesis is wrong
 and we look elsewhere (e.g. classifier-free-guidance behavior, LoRA rank/
 capacity for high-frequency vehicle detail, etc.) — report the histogram back
 before concluding anything either way.
 
-USAGE (run on whichever machine holds the real seg_training manifest+PNGs —
+USAGE (run on whichever machine holds the real grounded_sam manifest+PNGs —
 this repo's local 913-image folder is a TEST set, not the real training data):
-    # SegFormer/Cityscapes taxonomy (car id 13):
-    python analyze_car_coverage.py --json_file data/seg_training/train.json --car_class_id 13
-    # Grounded-SAM/CARLA taxonomy (Car id 14):
     python analyze_car_coverage.py --json_file data/grounded_sam/train.json --car_class_id 14
 """
 
@@ -62,12 +56,12 @@ def _resolve(p: str, image_root: str | None) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--json_file", required=True, help="seg_training manifest, e.g. data/seg_training/train.json")
+    ap.add_argument("--json_file", required=True, help="grounded_sam manifest, e.g. data/grounded_sam/train.json")
     ap.add_argument("--image_root", default=None, help="prefix for relative seg_path entries, if any")
     ap.add_argument(
         "--car_class_id", type=int, required=True,
-        help="REQUIRED, no default -- the 'car' class id differs by taxonomy: "
-             "13 for SegFormer/Cityscapes, 14 for Grounded-SAM/CARLA. Passing "
+        help="REQUIRED, no default -- this project's locked CARLA taxonomy "
+             "(configs/grounded_sam_classes.json) has 'Car' at id 14. Passing "
              "the wrong id silently measures a different class, so there is no "
              "safe default to fall back on.",
     )

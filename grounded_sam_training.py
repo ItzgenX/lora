@@ -60,8 +60,10 @@ exactly three categories of change:
 KEY SEG-SPECIFIC POINTS:
   • batch["seg"] is a [B,3,H,W] colour map in [0,1] produced by SegJsonDataset
     (src/data/local_seg.py) from the saved class-ID PNGs.
-  • skip_encode=True bypasses the live SegmentationEncoder during training, exactly
-    as depth bypasses MiDaS. The pre-saved map goes straight to the mapper.
+  • skip_encode=True bypasses the live encoder during training, exactly as
+    depth bypasses MiDaS. The pre-saved map goes straight to the mapper.
+    (GroundedSamEncoder — this branch's encoder-slot filler — has no live
+    path at all: skip_encode=True is the only value that ever works here.)
   • Monitoring panel labels: "SEG MAP" (was "DEPTH MAP"), "RAW SEG GEN" (was "RAW DEPTH GEN").
   • Model loading: cfg.seg_model_name/seg_model_path (was depth_model_name/path).
 """
@@ -88,7 +90,7 @@ from tqdm.auto import tqdm
 
 from src.model import ModelBase
 from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt, compute_psnr_ssim, compute_miou
-from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap
+from src.data.seg_palette import seg_palette_tensor, seg_ids_from_colormap
 
 
 torch.set_float32_matmul_precision("high")
@@ -194,14 +196,14 @@ def _save_checkpoint_segmentation_images(
     prompts, images = [], []
     psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
     mious = []              # controllability metric, FIXED scenes only (see below)
-    # Use the EXACT palette the dataset colourised with (Cityscapes SSOT for the
-    # SegFormer pipeline; the Grounded-SAM class palette when a classes_file is
-    # configured). Taking it from the dataset guarantees it matches the maps.
+    # Use the EXACT palette the dataset colourised with (the Grounded-SAM/
+    # CARLA class palette loaded from classes_file). Taking it from the
+    # dataset guarantees it matches the maps.
     _palette = val_dataset.seg_palette.to(device)   # ID<->colour lookup
     # The mIoU controllability metric segments the GENERATED image live, so it
-    # needs a working live segmenter. The Grounded-SAM Tier-1 encoder is a
-    # training-only slot filler (live_available=False) -> skip mIoU for it.
-    # SegmentationEncoder has no such attr -> defaults True -> mIoU runs as before.
+    # needs a working live segmenter. GroundedSamEncoder is a training-only
+    # slot filler (live_available=False) -> mIoU is always skipped on this
+    # branch (no live segmenter exists here at all).
     _enc0 = getattr(model.encoders[0], "module", model.encoders[0])
     _live_seg = getattr(_enc0, "live_available", True)
 
@@ -703,7 +705,7 @@ def main(cfg):
                 # ── SEG CHANGE: pre-saved colour seg map as conditioning ──────
                 # batch["seg"] is the colourised class-ID map ([B,3,H,W] in [0,1])
                 # produced by SegJsonDataset._load_seg_colormap() at load time.
-                # skip_encode=True -> SegmentationEncoder NOT called; the map goes
+                # skip_encode=True -> the encoder is NOT called; the map goes
                 # straight to the mapper, exactly mirroring depth's batch["depth"].
                 seg_maps = batch["seg"].to(accelerator.device)
                 cs = [seg_maps] * n_loras

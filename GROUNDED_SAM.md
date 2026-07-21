@@ -993,10 +993,12 @@ prompts, none of which are set up yet. Deliberately deferred.
 
 ## 7 · File inventory — what each file is and why it's here
 
-The Grounded-SAM pipeline **reuses the existing segmentation engine** rather than
-duplicating it. That engine keeps its original `seg_*` names (segmentation is
-segmentation, whatever model made the maps). So some `seg_*` files are the shared
-engine we depend on, and others are SegFormer-only.
+The Grounded-SAM pipeline **reuses generic segmentation infrastructure**
+originally built alongside the (now fully separate — see §7.4) SegFormer
+pipeline, keeping `seg_*` names for anything genuinely taxonomy-agnostic.
+As of 2026-07-20, **no SegFormer/Cityscapes-specific code remains on this
+branch at all** — everything reused here is generic math/plumbing that
+never assumed a particular class set.
 
 Every file below is tagged with exactly one **provenance**:
 - 🟦 **ORIGINAL — unchanged**: part of the stock `CompVis/LoRAdapter` repo
@@ -1011,8 +1013,21 @@ Every file below is tagged with exactly one **provenance**:
 | Provenance | Files |
 |---|---|
 | 🟦 ORIGINAL — unchanged | `train.py`, `sample.py`, `src/model.py`, `src/lora.py`, `src/mapper_network.py`, `src/data/local.py`, `configs/train.yaml`, `configs/model/sd15.yaml`, `configs/lora/struct.yaml`, `configs/data/local.yaml` |
-| 🟨 ORIGINAL — MODIFIED | `grounded_sam_training.py` *(renamed from `seg_training.py`)*, `grounded_sam_inference.py` *(renamed from `seg_inference.py`)*, `src/data/local_seg.py`, `src/data/transforms.py`, `src/utils.py`, `src/encoders/seg_encoder.py`, `configs/train_seg.yaml`, `recommend_training_params.py` |
-| 🟩 NEW | `src/encoders/grounded_sam_encoder.py`, `configs/grounded_sam_classes.json`, `configs/experiment/train_grounded_sam.yaml`, `configs/data/local_grounded_sam.yaml`, `configs/lora/encoder/grounded_sam.yaml`, `configs/inference_grounded_sam.yaml`, `GROUNDED_SAM.md`, `LORA_ARCHITECTURE.md`, `GENERATION_QUALITY_GROUNDED_SAM.md`, `slurm/train_grounded_sam_jusuf.sbatch`, `SBATCH_ZERO_TO_HERO.md`, `scan_seg_map_classes.py`, `check_seg_map_format.py`, `analyze_car_coverage.py`, `check_seg_coverage.py` |
+| 🟨 ORIGINAL — MODIFIED | `grounded_sam_training.py` *(renamed from `seg_training.py`)*, `grounded_sam_inference.py` *(renamed from `seg_inference.py`)*, `src/data/local_seg.py`, `src/data/transforms.py`, `src/utils.py`, `configs/train_seg.yaml`, `recommend_training_params.py` |
+| 🟩 NEW | `src/encoders/grounded_sam_encoder.py`, `src/data/seg_palette.py`, `configs/grounded_sam_classes.json`, `configs/experiment/train_grounded_sam.yaml`, `configs/data/local_grounded_sam.yaml`, `configs/lora/encoder/grounded_sam.yaml`, `configs/inference_grounded_sam.yaml`, `GROUNDED_SAM.md`, `GROUNDED_SAM_FILES.md`, `LORA_ARCHITECTURE.md`, `GENERATION_QUALITY_GROUNDED_SAM.md`, `slurm/train_grounded_sam_jusuf.sbatch`, `SBATCH_ZERO_TO_HERO.md`, `scan_seg_map_classes.py`, `check_seg_map_format.py`, `analyze_car_coverage.py`, `check_seg_coverage.py` |
+
+**No SegFormer/Cityscapes code remains on this branch, as of 2026-07-20.**
+`src/encoders/seg_encoder.py` — the live SegFormer-b5 encoder plus a
+Cityscapes fallback palette — was DELETED entirely, not just left unused.
+That fallback was more than irrelevant: Cityscapes has only 19 colours,
+CARLA class ids go up to 28, so it would have crashed the instant it was
+ever actually triggered on this branch's own data (`class id >= palette
+size 19`). The genuinely shared, taxonomy-agnostic colourisation math it
+also contained (`seg_palette_tensor`/`seg_colorize_ids`/
+`seg_ids_from_colormap` — these never assumed any particular palette, they
+always took one in as an argument) now lives in `src/data/seg_palette.py`,
+with `palette` a REQUIRED argument everywhere — no default to silently fall
+back to.
 
 `src/model.py` and `src/lora.py` deserve a special callout: they are 🟦
 **ORIGINAL — unchanged**, yet they are also the single most important files
@@ -1028,6 +1043,7 @@ to `cs`.
 | File | Provenance | Why it's here |
 |---|---|---|
 | [src/encoders/grounded_sam_encoder.py](src/encoders/grounded_sam_encoder.py) | 🟩 NEW | Palette loader, distinct-colour generator, and the training-only `GroundedSamEncoder` slot module. |
+| [src/data/seg_palette.py](src/data/seg_palette.py) | 🟩 NEW *(2026-07-20, replacing the deleted `src/encoders/seg_encoder.py`)* | Taxonomy-agnostic class-ID↔colour math (`seg_palette_tensor`/`seg_colorize_ids`/`seg_ids_from_colormap`) — palette is a required argument, no default. |
 | [configs/grounded_sam_classes.json](configs/grounded_sam_classes.json) | 🟩 NEW | **LOCKED FINAL**: CARLA's official 29-class taxonomy + colours. |
 | [configs/experiment/train_grounded_sam.yaml](configs/experiment/train_grounded_sam.yaml) | 🟩 NEW | The training experiment: wires encoder + data + your manifests. |
 | [configs/data/local_grounded_sam.yaml](configs/data/local_grounded_sam.yaml) | 🟩 NEW | Data config: class file + manifest key names. |
@@ -1040,7 +1056,6 @@ to `cs`.
 |---|---|---|
 | [grounded_sam_training.py](grounded_sam_training.py) | 🟨 MODIFIED *(renamed from `seg_training.py` 2026-07-20; built originally for SegFormer)* | **The training script itself** — run with `experiment=train_grounded_sam`. |
 | [src/data/local_seg.py](src/data/local_seg.py) | 🟨 MODIFIED *(built for SegFormer; extended for `resize_mode`, CARLA palette, letterbox/CenterCrop geometry)* | The dataset loader — reads your maps, colourises with your palette. |
-| [src/encoders/seg_encoder.py](src/encoders/seg_encoder.py) | 🟨 MODIFIED *(rename-only text edits; `SegmentationEncoder` class itself is SegFormer-only dead code on this branch)* | Provides the palette math (`seg_palette_tensor`, `seg_colorize_ids`, `seg_ids_from_colormap`) that local_seg.py + grounded_sam_training.py import. |
 | [configs/train_seg.yaml](configs/train_seg.yaml) | 🟨 MODIFIED *(built for SegFormer; still the shared Hydra base config both pipelines layer onto)* | Base config `grounded_sam_training.py` loads (`config_name`). Experiment layers on top. |
 | [src/data/transforms.py](src/data/transforms.py) | 🟨 MODIFIED *(`SquarePad` predates Grounded-SAM; `build_seg_preprocess`/`build_seg_display_preprocess`/`square_id_map`/`resize_mode` are new, 2026-07-20)* | The `resize_mode` (letterbox/CenterCrop) geometry, shared by all image + seg-map loading (§5.0b). |
 | [src/utils.py](src/utils.py) | 🟨 MODIFIED *(pre-existing training backbone; `resize_mode` line added to `training_params.txt`)* | LoRA build, checkpoint save, GPU diagnostics, metrics — the training backbone. |
@@ -1077,11 +1092,16 @@ branches; only its default *config* differs per branch
 (`inference_grounded_sam.yaml` here, `inference_seg.yaml` there), since
 inference never runs the encoder live on either branch anymore.
 
-Note: `seg_encoder.py` also stays here (§7.2) — the Grounded-SAM path imports
-its palette functions. Its `SegmentationEncoder` class is SegFormer-specific
-and unused on this branch (dead code, harmless, not instantiated by any
-config here) — left in place rather than stripped, since no config on this
-branch references it and removing it has no functional benefit.
+**Update, 2026-07-20**: `seg_encoder.py` no longer stays here. It was
+initially kept on the reasoning "no config references it, removing it has
+no functional benefit" — but on reflection that reasoning missed the actual
+cost: it left a genuinely broken Cityscapes fallback palette reachable from
+this branch's own code (`local_seg.py`'s `palette or SEG_CITYSCAPES_PALETTE`),
+one that would crash the instant it ever actually triggered against CARLA
+data (19 colours vs CARLA's 28 max class id). Deleted entirely; its
+palette math moved to `src/data/seg_palette.py` (§7.1), with the fallback
+removed rather than carried over — `palette` is now a required argument
+everywhere on this branch.
 
 ---
 
