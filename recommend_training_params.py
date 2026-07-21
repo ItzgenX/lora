@@ -8,12 +8,10 @@ configs/experiment/train_grounded_sam.yaml (the Grounded-SAM pipeline).
 This script NEVER writes or modifies any file. You review the recommendation
 and paste the values into the YAML yourself.
 
-WHY THIS EXISTS: grounded_sam_training.py used to auto-scale batch_size /
-gradient_accumulation_steps to the detected GPU at runtime. That was removed
-deliberately -- a fixed, explicit YAML you can read and quote is worth more
-than a value that silently depends on which GPU happened to run it. This
-script gives you the same calculation, but as a one-time, reviewed-by-you
-recommendation instead of hidden runtime behaviour.
+grounded_sam_training.py does not auto-scale batch_size /
+gradient_accumulation_steps to the detected GPU at runtime -- the YAML value
+is fixed and explicit. This script computes the same recommendation for you
+to review and paste in yourself.
 
 --data_dir has NO default and is REQUIRED: point it at your real
 data/grounded_sam directory (train.jsonl/val.jsonl/test.jsonl) -- there is no
@@ -23,9 +21,9 @@ QUICK COMMANDS (run from repo root with conda loradapter env active):
   python recommend_training_params.py --data_dir data/grounded_sam --epochs 10
   python recommend_training_params.py --data_dir data/grounded_sam --device cuda:1
 
-NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
-~12GB GPU is MEASURED (real training runs, this project, 2026-07-02). For any
-other GPU size, the recommendation is a REASONED linear extrapolation of that
+CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
+~12GB GPU is MEASURED (real training runs, this project). For any other GPU
+size, the recommendation is a REASONED linear extrapolation of that
 measurement, NOT independently verified on such hardware -- always sanity
 check with a short real dry run (see grounded_sam_training.py's docstring) before
 committing to a long training run.
@@ -54,10 +52,8 @@ def recommend_batch_and_accum(
     """
     Scale batch_size UP and gradient_accumulation_steps DOWN by the same
     ratio, so the EFFECTIVE batch (batch_size * accum) stays constant and
-    learning_rate stays valid -- same formula validated (and bug-fixed: capped
-    at the baseline effective batch once accum hits 1) in this project's
-    now-removed runtime auto-scaler. Here it's just arithmetic for a printed
-    recommendation, not something applied automatically.
+    learning_rate stays valid. Capped at the baseline effective batch once
+    accum would need to drop below 1.
 
     Returns: (recommended_batch, recommended_accum, uncapped_desired_batch,
               baseline_effective_batch)

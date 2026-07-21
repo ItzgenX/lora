@@ -3,13 +3,11 @@ grounded_sam_inference.py
 ----------------
 Run inference with a trained segmentation-conditioned LoRAdapter.
 
-CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED segmentation
+Inference ALWAYS uses a PROVIDED segmentation
 map — it never computes one live from a raw photo. You must supply `seg_path`
 (a pre-computed class-ID PNG), exactly like training does via skip_encode=True.
-This isn't a restriction added on top of a working live path: GroundedSamEncoder
-(src/encoders/grounded_sam_encoder.py) has no live path at all (Tier 1 only —
-see the module docstring there), so "always use a provided map" is the only
-contract that ever worked for this pipeline.
+GroundedSamEncoder (src/encoders/grounded_sam_encoder.py) has no live encoding
+path (Tier 1 only — see the module docstring there).
 
 This script:
   1. Loads the SD 1.5 base model + trained LoRA/mapper from a checkpoint.
@@ -22,8 +20,6 @@ This script:
   4. mIoU (controllability metric) is scored ONLY if the loaded encoder can
      itself segment the GENERATED image (`encoder.live_available`). Grounded-SAM's
      Tier-1 encoder cannot, so this is skipped automatically — not a crash.
-     This is scoring the OUTPUT after generation, a separate thing from
-     "computing the conditioning map live."
 
 INPUT OPTIONS — SAME SCHEMA training's manifests already use:
   a) JSON manifest file (recommended) — each entry needs "seg_path" (required),
@@ -44,7 +40,7 @@ OUTPUT MODES:
   Batch eval (save_generated_only=true, json_file required):
     Saves ONLY the generated image, mirroring folder structure from the JSON.
 
-RESIZE_MODE (user decision 2026-07-20, GROUNDED_SAM.md §5.0b): pass
+RESIZE_MODE (see GROUNDED_SAM.md §5.0b): pass
   resize_mode=letterbox (default) or resize_mode=CenterCrop -- MUST MATCH
   what the loaded checkpoint was trained with (a mismatch is warned about
   loudly, reading the stamp grounded_sam_training.py writes to best_model/info.txt).
@@ -103,8 +99,6 @@ torch.set_float32_matmul_precision("high")
 def _seg_label_bar(width: int, text: str, bar_h: int = 28) -> np.ndarray:
     """
     Dark banner bar with centered text. Returns [bar_h, width, 3] uint8.
-    The 'seg_' prefix marks this as segmentation-pipeline code.
-    Mirrors depth_inference.py's _label_bar with identical implementation.
     """
     bar  = Image.new("RGB", (width, bar_h), color=(25, 25, 25))
     draw = ImageDraw.Draw(bar)
@@ -135,9 +129,6 @@ def make_seg_inference_grid(
     RAW SEG GEN: same seg conditioning but empty prompt — shows pure
     segmentation adherence with no text influence. Mirrors training val grid.
     Total image: (4*size) wide, (size + 28) tall.
-
-    The 'seg_' prefix marks this as segmentation-pipeline code. Mirrors
-    depth_inference.py's make_inference_grid, with "SEG MAP"/"RAW SEG GEN".
     """
     orig     = orig_pil.resize((size, size)).convert("RGB")
     seg      = seg_pil.resize((size, size)).convert("RGB")
@@ -198,26 +189,20 @@ def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device,
 
 def _find_trained_resize_mode(ckpt_path: Path) -> str | None:
     """
-    Determine which resize_mode the checkpoint at ckpt_path was TRAINED with,
-    checking two sources (in order) because a single one is not reliable:
+    Determine which resize_mode the checkpoint at ckpt_path was TRAINED with.
+    Checks two sources, in order:
 
-      1. <ckpt_path>/info.txt -- written ONLY for best_model/ saves
-         (grounded_sam_training.py's save_seg_ckpt_and_grid writes it only
-         when is_best=True). Absent for every OTHER checkpoint folder
-         (checkpoint-epochN/stepM/, checkpoint-epochN/checkpoint-epochN/) --
-         pointing ckpt_path at one of those is a completely normal thing to
-         do (resuming, or deliberately picking a non-best epoch), so relying
-         on info.txt alone silently loses the safety check for that case.
-      2. training_params.txt, walked up from ckpt_path -- written ONCE per
-         run, at the run's root folder, regardless of which checkpoint you
-         later point at. Covers the non-best-checkpoint case info.txt can't.
+      1. <ckpt_path>/info.txt -- written only for best_model/ saves
+         (grounded_sam_training.py's save_seg_ckpt_and_grid, is_best=True
+         only). Absent for other checkpoint folders (checkpoint-epochN/stepM/,
+         checkpoint-epochN/checkpoint-epochN/).
+      2. training_params.txt, walked up from ckpt_path -- written once per
+         run, at the run's root folder. Covers checkpoints info.txt misses.
 
-    A found file with NO resize_mode line at all (a run from before this
-    feature existed, 2026-07-20) is treated as 'letterbox' -- the only mode
-    that ever existed before today -- rather than silently reporting nothing.
+    A found file with no resize_mode line (a run predating this feature) is
+    treated as 'letterbox' -- the only mode that existed before.
 
-    Returns the mode string, or None only if NEITHER file could be found at
-    all (truly unable to verify -- e.g. a hand-built/relocated ckpt_path).
+    Returns the mode string, or None if neither file could be found.
     """
     candidates = []
     info = ckpt_path / "info.txt"
@@ -255,7 +240,7 @@ def main(cfg):
     device = resolve_device(cfg.device)
 
     # Resolve output_dir from the original repo root (not Hydra's run dir),
-    # then make it UNIQUE PER RUN (user spec 2026-07-20: every inference run
+    # then make it UNIQUE PER RUN (every inference run
     # stores its results in its own folder — two runs can never overwrite or
     # mix outputs). A timestamped subfolder is appended to the configured
     # base path; Hydra's own run dir already embeds the same date/time format,
@@ -273,30 +258,18 @@ def main(cfg):
     print(f"{'='*60}\n")
 
     # ------------------------------------------------------------------ #
-    # resize_mode (user decision 2026-07-20) — "letterbox" or "CenterCrop".  #
-    # MUST match the technique the loaded checkpoint was TRAINED with, or   #
-    # the seg map fed to the model here won't align with what the LoRA/     #
-    # mapper learned. Checked FIRST, before any model loading -- found by   #
-    # self-review 2026-07-20 that this used to run AFTER the full SD1.5     #
-    # base model + LoRA/mapper checkpoint were already loaded onto the GPU,#
-    # defeating its own purpose (catching a mismatch cheaply, before        #
-    # spending time on a run that's about to be wrong). cfg.ckpt_path and   #
-    # cfg.resize_mode are both plain scalars, untouched by instantiate()    #
-    # later, so this needs nothing built yet. Three possible outcomes, and  #
-    # all three print something distinct -- silence must never be one of   #
-    # them (a check that only speaks up on mismatch is indistinguishable    #
-    # from one that never ran).                                            #
+    # resize_mode — "letterbox" or "CenterCrop". MUST match the technique  #
+    # the loaded checkpoint was TRAINED with, or the seg map fed to the    #
+    # model here won't align with what the LoRA/mapper learned. Checked    #
+    # before any model loading. Three outcomes, each prints a distinct     #
+    # message (verified / mismatch / unverified).                          #
     # ------------------------------------------------------------------ #
     size        = cfg.size
     resize_mode = cfg.get("resize_mode", "letterbox")
-    # Resolve ckpt_path against _root (the ORIGINAL repo-root cwd), not the
-    # bare relative string -- hydra: job: chdir: true has already moved the
-    # process cwd to the Hydra run dir by the time this line runs, so a bare
-    # Path(cfg.ckpt_path) would silently look in the WRONG directory for
-    # every relative ckpt_path (which is what every example in this repo's
-    # own docs uses), falsely reporting "could not verify" even when a real
-    # info.txt/training_params.txt exists. Same resolution rule
-    # add_lora_from_config (src/utils.py) already uses for this exact reason.
+    # Resolve ckpt_path against _root (the ORIGINAL repo-root cwd): hydra:
+    # job: chdir: true has already moved the process cwd to the Hydra run
+    # dir by the time this line runs. Same resolution rule
+    # add_lora_from_config (src/utils.py) uses.
     _ckpt_path_resolved = Path(cfg.ckpt_path)
     if not _ckpt_path_resolved.is_absolute():
         _ckpt_path_resolved = Path(_root) / _ckpt_path_resolved
@@ -425,14 +398,10 @@ def main(cfg):
     # slot filler (src/encoders/grounded_sam_encoder.py) cannot do this
     # (live_available=False), so it's skipped automatically -- no crash.
     #
-    # PALETTE SOURCE -- must match whatever palette the seg maps were saved
-    # with, or _load_seg_map below raises "class id >= palette size" (a real
-    # bug found by an actual end-to-end run, not caught by config-only
-    # checks). REQUIRED on this branch -- there is deliberately no fallback
-    # palette (a Cityscapes fallback used to live here and was removed
-    # 2026-07-20: it only has 19 colours, Grounded-SAM's locked CARLA
-    # taxonomy has 29, so it could never actually work for this branch's
-    # own data). Mirrors local_seg.py's SegJsonDataModule.
+    # Palette must match whatever palette the seg maps were saved with, or
+    # _load_seg_map below raises "class id >= palette size". Required on
+    # this branch, no fallback palette (Cityscapes has 19 colours, CARLA
+    # has 29). Mirrors local_seg.py's SegJsonDataModule.
     _classes_file = cfg.get("classes_file", None)
     if _classes_file is None:
         raise ValueError(
@@ -455,7 +424,7 @@ def main(cfg):
 
     # ------------------------------------------------------------------ #
     # run_params.txt — the full recipe of THIS run, saved with its outputs #
-    # (user spec 2026-07-20). Every generation-affecting setting is        #
+    # Every generation-affecting setting is                                #
     # recorded so any result folder is self-documenting: you can look at   #
     # an image weeks later and know exactly how it was made, or re-run the #
     # identical command. Written BEFORE generating, so even a crashed run  #

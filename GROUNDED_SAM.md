@@ -536,7 +536,7 @@ This is everything needed to train the LoRAdapter model on the
     only config and loads **no** heavy models. `live_available = False`.
 
 - **[configs/grounded_sam_classes.json](configs/grounded_sam_classes.json)** —
-  the class-definition file. **LOCKED FINAL (2026-07-16, user decision):** CARLA's
+  the class-definition file. **LOCKED FINAL:** CARLA's
   official 29-class semantic-segmentation taxonomy (IDs 0–28: `Unlabeled` +
   the 19 Cityscapes classes shifted +1 + 9 CARLA extras — Static, Dynamic,
   Other, Water, RoadLine, Ground, Bridge, RailTrack, GuardRail), with CARLA's
@@ -553,9 +553,9 @@ This is everything needed to train the LoRAdapter model on the
   `classes_file` (build palette from your classes) and manifest-key flags
   `image_key` / `seg_key` / `prompt_key` (so your JSONL can use any key names).
 
-### 5.0a The REAL mask format, and how the loader handles it [ADDED 2026-07-20]
+### 5.0a The REAL mask format, and how the loader handles it
 
-The actual masks this pipeline trains on (user-confirmed 2026-07-20 via a
+The actual masks this pipeline trains on (confirmed via a
 `check_seg_map_format.py` scan of a real file) are:
 
 | Property | Value |
@@ -568,7 +568,7 @@ The actual masks this pipeline trains on (user-confirmed 2026-07-20 via a
 Two loader behaviours exist specifically because of this format (both in
 `SegJsonDataset._load_seg_colormap` and mirrored in
 `seg_inference._load_seg_map`, kept byte-identical — verified by execution
-2026-07-20 with the real dataset class, the real CARLA palette, a real
+with the real dataset class, the real CARLA palette, a real
 1280x800 RGB, and a synthetic mask saved in this exact I;16 format):
 
 1. **Raw pixel read, no `.convert("L")`.** `np.asarray(Image.open(path))`
@@ -581,7 +581,7 @@ Two loader behaviours exist specifically because of this format (both in
    ID map was NEAREST-*stretched* to 512x512 — a geometry mismatch that
    misaligned conditioning vs target by up to **96 px (18.8% of the frame)**
    at the top and bottom of the image (0 px only at mid-frame; measured by
-   execution 2026-07-20). Now the map is padded with `pad_id`
+   execution). Now the map is padded with `pad_id`
    (config `pad_id` in `local_grounded_sam.yaml`, `seg_pad_id` in
    `inference_grounded_sam.yaml`; default **0 = CARLA Unlabeled**) using
    SquarePad's exact rounding, so map and image share one square grid.
@@ -594,10 +594,10 @@ consistent mapping (previously the map had hallucination-free content
 stretched over the band while the target showed a flat fill: an impossible
 lesson that degraded everything near the top/bottom edges).
 
-### 5.0b `resize_mode` toggle — letterbox vs CenterCrop [ADDED 2026-07-20]
+### 5.0b `resize_mode` toggle — letterbox vs CenterCrop
 
 §5.0a fixed a BUG (stretch vs letterbox mismatch). This section is a
-DIFFERENT, deliberate CHOICE (user decision 2026-07-20): letterbox isn't
+DIFFERENT, deliberate CHOICE: letterbox isn't
 necessarily the best squaring technique for THIS dataset — it's simply the
 one that was implemented first. Since a matched (image, seg map) pair already
 exists at native 1280x800 for every sample, there are two legitimate ways to
@@ -641,7 +641,7 @@ training runs needs zero recalculation, just a different CLI value.
   `[-1,1]`), used by `SegJsonDataModule`.
 - `build_seg_display_preprocess(size, resize_mode)` — same geometry, stays PIL
   (no tensor conversion), used for the inference grid's ORIGINAL display panel
-  only (fixes a real leftover bug found 2026-07-20: this panel previously used
+  only (fixes a real leftover bug: this panel previously used
   a plain stretch-resize while the SEG MAP panel beside it was letterboxed —
   the two didn't visually align).
 - `square_id_map(ids_pil, size, resize_mode, pad_id)` — the seg-ID map
@@ -652,7 +652,7 @@ training runs needs zero recalculation, just a different CLI value.
   NEAREST interpolation instead of the RGB path's default resize, so class
   ids are never averaged/fabricated.
 
-**Verified by execution (2026-07-20, synthetic data, no real dataset touched):**
+**Verified by execution (synthetic data, no real dataset touched):**
 a marker painted at an identical pixel location in a synthetic 1280x800
 (image, seg-ID) pair was tracked through the FULL `SegJsonDataModule` ->
 `train_dataloader()` -> real batch path. Result: **0.00px drift for
@@ -684,9 +684,8 @@ printed explicitly, never silent:
   3. **Could not verify** — loud `[WARN]`, explicitly says so, rather than
      staying quiet (see below for why this third case matters).
 
-Two real bugs in an earlier version of this exact check were found by
-self-review, not by a report, and fixed the same day (2026-07-20), verified
-against 5 real checkpoint-folder-shape fixtures (never touched real
+Two real bugs in an earlier version of this exact check are fixed here,
+verified against 5 real checkpoint-folder-shape fixtures (never touched real
 checkpoints):
   - **`info.txt` only exists for `best_model/` saves** (written only when
     `is_best=True`) — pointing `ckpt_path` at ANY regular checkpoint
@@ -705,7 +704,7 @@ checkpoints):
     "could not verify" — and it now says so out loud, rather than the old
     behaviour where "no warning" meant either "verified" or "never ran."
 
-A third bug, same self-review, same day: the check originally ran **after**
+Another real bug: the check originally ran **after**
 the full SD1.5 base model and the LoRA/mapper checkpoint were already loaded
 onto the GPU — defeating its own point (catching a mismatch cheaply, before
 spending time on a run that's about to be wrong). Moved to run first, right
@@ -733,8 +732,8 @@ and fixed with two inference-time knobs (`lora_scale_start/end` decay +
 apply identically to Grounded-SAM once its live encoder (Tier 2, below) exists —
 nothing extra to build here when that day comes.
 
-### 5.1b Inference now works TODAY for a Grounded-SAM-produced map [ADDED 2026-07-17]
-Separate change, same day: `grounded_sam_inference.py` was rewritten (user decision) so
+### 5.1b Inference now works TODAY for a Grounded-SAM-produced map
+`grounded_sam_inference.py` was rewritten so
 inference **always uses a provided segmentation map and never computes one
 live** — see `grounded_sam_inference.py`'s own module docstring for the full mechanism
 (this is also the config `configs/inference_grounded_sam.yaml` on this branch
@@ -748,7 +747,7 @@ BRAND-NEW image that has no pre-computed map yet, and (b) the mIoU metric
 auto-skip/require Tier 2 rather than crashing (`encoder.live_available=False`
 is checked before either runs).
 
-### 5.1c The loss, from scratch — what the model is actually learning [ADDED 2026-07-19]
+### 5.1c The loss, from scratch — what the model is actually learning
 
 You cannot tune a hyperparameter sensibly without knowing what number you're
 reacting to. This walks the real training code line by line, then how to
@@ -896,7 +895,7 @@ below requires you to already know the answer:
 6. **If early-stop never fired**, rerun with a higher ceiling, resuming from
    the last checkpoint rather than restarting from scratch.
 
-### 5.1d Real mask format handling, class taxonomy verification, and the inference run recipe [ADDED 2026-07-20]
+### 5.1d Real mask format handling, class taxonomy verification, and the inference run recipe
 
 **Class taxonomy verified against the official CARLA docs.** The user posted
 the full CARLA `instance-segmentation-camera` tag table (0–28, names + RGB)
@@ -909,8 +908,8 @@ masks ever encode *instance* IDs rather than plain semantic tags, that's a
 different question this file doesn't answer — confirm your `class_map.png`
 pixel values are the plain 0–28 semantic tag before trusting this palette.
 
-**Inference run layout — same change as the segformer branch, same day.**
-`grounded_sam_inference.py` now writes every run into its own timestamped subfolder of
+**Inference run layout.**
+`grounded_sam_inference.py` writes every run into its own timestamped subfolder of
 `inference.output_dir` (`<output_dir>/<YYYY-MM-DD_HH-MM-SS>/`), so two runs
 never overwrite each other, and saves a `run_params.txt` into that folder
 *before* generating — checkpoint, seed, size, `num_inference_steps`,
@@ -941,7 +940,7 @@ prompts, none of which are set up yet. Deliberately deferred.
 
 2. **Confirm the map format.** Run
    `python check_seg_map_format.py --seg_map <one_real_map>`. Your real masks
-   (user-confirmed 2026-07-20, `class_map.png`) are mode `I;16` (16-bit), PNG
+   (`class_map.png`) are mode `I;16` (16-bit), PNG
    (lossless — good), **1280x800, non-square**, clean CARLA ids. The loader
    handles this format directly as of `5db3624` (§5.0a) — raw pixel read
    (no lossy conversion) + letterbox to square (not stretch), matching the
@@ -996,7 +995,7 @@ prompts, none of which are set up yet. Deliberately deferred.
 The Grounded-SAM pipeline **reuses generic segmentation infrastructure**
 originally built alongside the (now fully separate — see §7.4) SegFormer
 pipeline, keeping `seg_*` names for anything genuinely taxonomy-agnostic.
-As of 2026-07-20, **no SegFormer/Cityscapes-specific code remains on this
+**No SegFormer/Cityscapes-specific code remains on this
 branch at all** — everything reused here is generic math/plumbing that
 never assumed a particular class set.
 
@@ -1016,7 +1015,7 @@ Every file below is tagged with exactly one **provenance**:
 | 🟨 ORIGINAL — MODIFIED | `grounded_sam_training.py` *(renamed from `seg_training.py`)*, `grounded_sam_inference.py` *(renamed from `seg_inference.py`)*, `src/data/local_seg.py`, `src/data/transforms.py`, `src/utils.py`, `configs/train_seg.yaml`, `recommend_training_params.py` |
 | 🟩 NEW | `src/encoders/grounded_sam_encoder.py`, `src/data/seg_palette.py`, `configs/grounded_sam_classes.json`, `configs/experiment/train_grounded_sam.yaml`, `configs/data/local_grounded_sam.yaml`, `configs/lora/encoder/grounded_sam.yaml`, `configs/inference_grounded_sam.yaml`, `GROUNDED_SAM.md`, `GROUNDED_SAM_FILES.md`, `LORA_ARCHITECTURE.md`, `GENERATION_QUALITY_GROUNDED_SAM.md`, `slurm/train_grounded_sam_jusuf.sbatch`, `SBATCH_ZERO_TO_HERO.md`, `scan_seg_map_classes.py`, `check_seg_map_format.py`, `analyze_car_coverage.py`, `check_seg_coverage.py` |
 
-**No SegFormer/Cityscapes code remains on this branch, as of 2026-07-20.**
+**No SegFormer/Cityscapes code remains on this branch.**
 `src/encoders/seg_encoder.py` — the live SegFormer-b5 encoder plus a
 Cityscapes fallback palette — was DELETED entirely, not just left unused.
 That fallback was more than irrelevant: Cityscapes has only 19 colours,
@@ -1043,7 +1042,7 @@ to `cs`.
 | File | Provenance | Why it's here |
 |---|---|---|
 | [src/encoders/grounded_sam_encoder.py](src/encoders/grounded_sam_encoder.py) | 🟩 NEW | Palette loader, distinct-colour generator, and the training-only `GroundedSamEncoder` slot module. |
-| [src/data/seg_palette.py](src/data/seg_palette.py) | 🟩 NEW *(2026-07-20, replacing the deleted `src/encoders/seg_encoder.py`)* | Taxonomy-agnostic class-ID↔colour math (`seg_palette_tensor`/`seg_colorize_ids`/`seg_ids_from_colormap`) — palette is a required argument, no default. |
+| [src/data/seg_palette.py](src/data/seg_palette.py) | 🟩 NEW *(replaces the deleted `src/encoders/seg_encoder.py`)* | Taxonomy-agnostic class-ID↔colour math (`seg_palette_tensor`/`seg_colorize_ids`/`seg_ids_from_colormap`) — palette is a required argument, no default. |
 | [configs/grounded_sam_classes.json](configs/grounded_sam_classes.json) | 🟩 NEW | **LOCKED FINAL**: CARLA's official 29-class taxonomy + colours. |
 | [configs/experiment/train_grounded_sam.yaml](configs/experiment/train_grounded_sam.yaml) | 🟩 NEW | The training experiment: wires encoder + data + your manifests. |
 | [configs/data/local_grounded_sam.yaml](configs/data/local_grounded_sam.yaml) | 🟩 NEW | Data config: class file + manifest key names. |
@@ -1054,10 +1053,10 @@ to `cs`.
 ### 7.2 Shared segmentation engine — REUSED by Grounded-SAM (must keep)
 | File | Provenance | Why Grounded-SAM needs it |
 |---|---|---|
-| [grounded_sam_training.py](grounded_sam_training.py) | 🟨 MODIFIED *(renamed from `seg_training.py` 2026-07-20; built originally for SegFormer)* | **The training script itself** — run with `experiment=train_grounded_sam`. |
+| [grounded_sam_training.py](grounded_sam_training.py) | 🟨 MODIFIED *(renamed from `seg_training.py`; built originally for SegFormer)* | **The training script itself** — run with `experiment=train_grounded_sam`. |
 | [src/data/local_seg.py](src/data/local_seg.py) | 🟨 MODIFIED *(built for SegFormer; extended for `resize_mode`, CARLA palette, letterbox/CenterCrop geometry)* | The dataset loader — reads your maps, colourises with your palette. |
 | [configs/train_seg.yaml](configs/train_seg.yaml) | 🟨 MODIFIED *(built for SegFormer; still the shared Hydra base config both pipelines layer onto)* | Base config `grounded_sam_training.py` loads (`config_name`). Experiment layers on top. |
-| [src/data/transforms.py](src/data/transforms.py) | 🟨 MODIFIED *(`SquarePad` predates Grounded-SAM; `build_seg_preprocess`/`build_seg_display_preprocess`/`square_id_map`/`resize_mode` are new, 2026-07-20)* | The `resize_mode` (letterbox/CenterCrop) geometry, shared by all image + seg-map loading (§5.0b). |
+| [src/data/transforms.py](src/data/transforms.py) | 🟨 MODIFIED *(`SquarePad` predates Grounded-SAM; `build_seg_preprocess`/`build_seg_display_preprocess`/`square_id_map`/`resize_mode` are new)* | The `resize_mode` (letterbox/CenterCrop) geometry, shared by all image + seg-map loading (§5.0b). |
 | [src/utils.py](src/utils.py) | 🟨 MODIFIED *(pre-existing training backbone; `resize_mode` line added to `training_params.txt`)* | LoRA build, checkpoint save, GPU diagnostics, metrics — the training backbone. |
 | [src/lora.py](src/lora.py) / [src/model.py](src/model.py) | 🟦 **ORIGINAL — unchanged** | The LoRA classes and UNet-wrapping logic itself — identical code path for both pipelines, and for the ORIGINAL depth pipeline too. See §7.0's callout and [LORA_ARCHITECTURE.md](LORA_ARCHITECTURE.md) for the full trace. |
 | [recommend_training_params.py](recommend_training_params.py) | 🟨 MODIFIED | GPU + dataset-sized hyperparameter advisor — run once per pipeline (`--data_dir` required, no shared default). |
@@ -1071,8 +1070,8 @@ to `cs`.
 | [check_seg_coverage.py](check_seg_coverage.py) | Per-image, per-class coverage vs the training distribution. |
 
 ### 7.4 SegFormer-only (removed from this branch — see the `segformer` branch)
-Earlier, both approaches lived side by side on one branch. That changed
-(2026-07-19, user decision): **this repo now has two separate branches**,
+Earlier, both approaches lived side by side on one branch. That changed:
+**this repo now has two separate branches**,
 `segformer` and `grounded_sam`, each keeping only its own pipeline's files on
 top of the shared engine (§7.2). The following were removed from this branch
 because they're SegFormer-only and not imported by any Grounded-SAM code —
@@ -1092,7 +1091,7 @@ branches; only its default *config* differs per branch
 (`inference_grounded_sam.yaml` here, `inference_seg.yaml` there), since
 inference never runs the encoder live on either branch anymore.
 
-**Update, 2026-07-20**: `seg_encoder.py` no longer stays here. It was
+**Update**: `seg_encoder.py` no longer stays here. It was
 initially kept on the reasoning "no config references it, removing it has
 no functional benefit" — but on reflection that reasoning missed the actual
 cost: it left a genuinely broken Cityscapes fallback palette reachable from

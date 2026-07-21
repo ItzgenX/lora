@@ -1,9 +1,9 @@
 """
 STANDALONE DIAGNOSTIC — not part of any of the 4 pipeline stages.
 
-WHY THIS EXISTS
-----------------
-analyze_car_coverage.py answered one fixed question ("how much car-class
+PURPOSE
+--------
+analyze_car_coverage.py answers one fixed question ("how much car-class
 coverage exists across the whole training set?") for one fixed class (car).
 This script generalises that into a per-IMAGE, per-CLASS check: given any
 single seg map (e.g. a CARLA test frame's segmentation output), it reports,
@@ -11,9 +11,7 @@ for every class present in that image, how that image's coverage compares to
 the ENTIRE training set's distribution for that same class. That tells you,
 before you even generate anything, whether a given scene's composition is
 something the model has actually seen examples of, or is likely
-out-of-distribution (the same failure mode diagnosed for the CARLA truck:
-17.8% was the training set's OWN maximum car coverage, and the CARLA frame
-almost certainly exceeds it).
+out-of-distribution.
 
 WHAT YOU PASS IN
 -----------------

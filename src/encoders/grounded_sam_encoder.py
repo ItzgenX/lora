@@ -3,13 +3,12 @@ src/encoders/grounded_sam_encoder.py
 ------------------------------------
 Grounded-SAM conditioning support for the LoRAdapter segmentation pipeline.
 
-WHY THE CLASS SET IS DATA, NOT A HARDCODED TABLE:
-  Grounded-SAM produces maps from an OPEN, user-defined class set (whatever
+CLASS SET IS DATA, NOT A HARDCODED TABLE:
+  Grounded-SAM produces maps from an OPEN, caller-defined class set (whatever
   prompts were given to GroundingDINO when the maps were generated) — there
-  is no fixed taxonomy to hard-code. So both the class COUNT and the COLOUR
-  per class must be DATA, loaded from a class-definition file the user fills
-  in once they know their exact class order (locked to CARLA's own 29-class
-  semantic-segmentation taxonomy on this branch — see
+  is no fixed taxonomy to hard-code. Both the class COUNT and the COLOUR per
+  class are DATA, loaded from a class-definition file (locked to CARLA's own
+  29-class semantic-segmentation taxonomy on this branch — see
   configs/grounded_sam_classes.json).
 
 WHAT IS AND ISN'T BUILT HERE (Tier 1 — training on pre-saved maps):
@@ -76,14 +75,13 @@ def generate_distinct_palette(num_classes: int) -> list[tuple[int, int, int]]:
     """
     Deterministically generate `num_classes` well-separated RGB colours.
 
-    WHY deterministic + well-separated: the LoRA mapper is a Conv2d that reads
-    the colour map as its conditioning signal. Classes that share similar
-    colours are harder for it to tell apart, which is exactly why the Cityscapes
-    palette was hand-picked to spread classes across colour space. We reproduce
-    that property automatically by walking the HUE circle in golden-ratio steps
-    (maximally spreads N hues no matter what N is) at full saturation/value.
-    Deterministic (no RNG) so the same class count always yields the same
-    palette — training and any later inference stay pixel-identical.
+    Deterministic + well-separated: the LoRA mapper is a Conv2d that reads
+    the colour map as its conditioning signal, and classes with similar
+    colours are harder for it to tell apart (the Cityscapes palette was
+    hand-picked for the same reason). Golden-ratio hue steps spread N hues
+    maximally for any N, at full saturation/value. Deterministic (no RNG) so
+    the same class count always yields the same palette — training and any
+    later inference stay pixel-identical.
 
     Returns a list of (R, G, B) ints in 0..255, length == num_classes.
     """

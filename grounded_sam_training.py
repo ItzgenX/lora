@@ -5,7 +5,7 @@ Train the segmentation-conditioned LoRAdapter on PRE-SAVED segmentation colour
 maps. On this branch the maps come from Grounded-SAM (see GROUNDED_SAM.md); the
 class palette + manifests are selected by the experiment config.
 
-RESIZE_MODE (user decision 2026-07-20, GROUNDED_SAM.md §5.0b): pass
+RESIZE_MODE (see GROUNDED_SAM.md §5.0b): pass
   resize_mode=letterbox (default, SquarePad) or resize_mode=CenterCrop
   (original stock LoRAdapter recipe) to pick the squaring technique. It names
   the output folder too: outputs/train/grounded_sam_<mode>/runs/... — so a

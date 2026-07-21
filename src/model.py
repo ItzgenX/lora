@@ -356,18 +356,13 @@ class ModelBase(ABC, nn.Module):
         on the image as denoising proceeds, instead of holding it at full strength
         for all 50 steps.
 
-        WHY THIS EXISTS: a diffusion model decides layout in the EARLY denoising
-        steps and fine detail/texture in the LATE steps. Our structure conditioning
-        (see NewStructLoRAConv.forward in src/lora.py) is a per-pixel FiLM shift/
-        scale applied with FULL force at every single step. Inside a flat-colour
-        segmentation region (e.g. the interior of a car), that signal carries NO
-        information beyond "this class is here" -- so forcing full strength through
-        the late, detail-deciding steps gives the model no room to use its own
-        trained prior for what the object should actually look like, producing the
-        "fits the shape but doesn't know how it looks" artifact. Decaying the scale
-        after the layout is locked in (the early steps) lets the LATE steps lean on
-        SD's own knowledge for appearance while keeping the early-decided layout.
-        This mirrors ControlNet's well-known control_guidance_start/end idea.
+        A diffusion model decides layout in the EARLY denoising steps and fine
+        detail/texture in the LATE steps. Structure conditioning
+        (NewStructLoRAConv.forward, src/lora.py) is a per-pixel FiLM shift/
+        scale applied with FULL force at every step. Decaying the scale after
+        the layout is locked in (the early steps) lets the LATE steps lean on
+        SD's own knowledge for appearance while keeping the early-decided
+        layout. Mirrors ControlNet's control_guidance_start/end.
 
         MECHANISM: every targeted conv layer in the UNet is its OWN
         NewStructLoRAConv instance (self.lora_layers[name] collects all of them —

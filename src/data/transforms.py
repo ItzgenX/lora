@@ -3,11 +3,9 @@ from PIL import Image, ImageFile, ImageStat
 # Tolerate minor JPEG defects (e.g. a missing/odd end-of-image marker) instead
 # of raising "image file is truncated". Pillow is intentionally strict here;
 # most other viewers/decoders (Windows Photo Viewer, browsers, libjpeg-turbo
-# used elsewhere) silently accept these same files. This flag is process-
-# global; it lives here because src/data/transforms.py is imported by the
-# segmentation pipeline entrypoints (seg_map_calculations.py, grounded_sam_inference.py),
-# so setting it once here covers every place an image gets loaded — a single
-# source of truth.
+# used elsewhere) accept these same files. This flag is process-global; it
+# lives here because src/data/transforms.py is imported by every place an
+# image gets loaded on this branch (local_seg.py, grounded_sam_inference.py).
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -30,24 +28,15 @@ class SquarePad:
     remain correct even after the image is later resized to 512 x 512.
     Use them to identify or mask the padded region in generated outputs.
 
-    CHANGED FROM THE PREVIOUS VERSION — WHY:
-      The previous implementation cropped a 1px-wide/tall strip from the
-      image boundary and `.resize()`-ed it to fill the pad region. That
-      resize only changes the strip's HEIGHT (or WIDTH, for left/right
-      padding); the OTHER axis is left unchanged, so every pixel of real
-      horizontal (or vertical) detail in that single boundary row/column —
-      sky-vs-building edges, power lines, antennas, sensor/JPEG noise right
-      at the frame edge — is carried through exactly and simply repeated
-      across the pad region. That is correct edge-replicate padding by
-      definition; it is also exactly why it produced a noisy, multi-colored
-      band once stretched, on real driving-scene frames whose top/bottom
-      boundary row is rarely a flat color. Because this fed real training
-      data, the model learned to reproduce that same banded pattern at
-      generation time too — visible in generated ("PREDICTED") output, not
-      only in the raw conditioning image.
-      A FLAT fill (mean color of a thin edge-adjacent strip, collapsed to
-      one value) has zero internal variation by construction, so it cannot
-      produce that banding regardless of how busy the real edge pixels are.
+    Uses a FLAT fill rather than a stretched copy of the boundary row: a
+    stretched 1px-wide/tall boundary strip only changes one axis' extent, so
+    real edge detail (sky/building edges, power lines, sensor/JPEG noise at
+    the frame edge) repeats across the pad region and produces a noisy,
+    multi-colored band on real driving-scene frames — visible in generated
+    ("PREDICTED") output, not only the raw conditioning image, since it's
+    part of the real training data. A flat fill (mean color of a thin
+    edge-adjacent strip, collapsed to one value) has zero internal variation
+    by construction, so it cannot produce that banding.
 
     Two fill strategies, chosen explicitly via `fill_mode` — no
     auto-detection:
@@ -63,20 +52,15 @@ class SquarePad:
         for anything in this file today (both current uses below are raw
         photos), kept available for that case.
 
-    ORIGINAL rationale for a smooth boundary (still applies — why not solid
-    black/zero):
-      A solid-colour boundary looks like a real depth discontinuity to the
-      DPT model and produces a sharp artefact ring in the depth map at the
-      pad boundary. A locally-averaged flat colour keeps the transition
-      smooth for the same reason, without the banding the stretched-strip
-      approach introduced on busy rows.
+    A solid-colour boundary (e.g. black/zero) looks like a real depth
+    discontinuity to the DPT model and produces a sharp artefact ring in the
+    depth map at the pad boundary; a locally-averaged flat colour keeps the
+    transition smooth without that artefact.
 
-    IMPLEMENTATION NOTE (cross-platform bug fix, still applies): this class
-    performs its fill with plain PIL crop / paste / ImageStat calls only —
-    no torchvision.transforms.functional.pad, no numpy conversion — which
-    avoids the torchvision-version-dependent PIL/numpy conversion path that
-    previously caused a Windows-vs-Linux conda env discrepancy (this pipeline
-    hit that exactly once already; see git history on this file).
+    Fill uses plain PIL crop / paste / ImageStat calls only — no
+    torchvision.transforms.functional.pad, no numpy conversion — avoiding a
+    torchvision-version-dependent PIL/numpy conversion path that differs
+    between Windows and Linux conda environments.
     """
 
     # Height/width (in source pixels) of the strip sampled just inside the
@@ -197,16 +181,10 @@ def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     """
     Build the ONE canonical RGB preprocessing pipeline for the SEGMENTATION pipeline.
 
-    WHY THIS EXISTS (and why it belongs here, not in a seg-specific file):
-      Every stage that reads a raw photo (offline calc, training's dataset,
-      inference) must apply byte-for-byte identical preprocessing so the map the
-      network sees at inference exactly matches what training used. The only
-      way to guarantee that is to import the SAME function everywhere — this is it.
-      (Depth triplicated this preprocessing and references.md flags that as a drift
-      risk; segmentation fixes it with this single source of truth.)
-
-    The "seg" prefix distinguishes it from any hypothetical depth equivalent and
-    satisfies the user's visual-identity rule: segmentation code has "seg" in name.
+    Every stage that reads a raw photo (offline calc, training's dataset,
+    inference) applies this identical preprocessing, imported from this
+    single source, so the map the network sees at inference exactly matches
+    what training used.
 
     INPUT  (of the returned callable): PIL.Image of any size, any aspect ratio.
     OUTPUT (of the returned callable): float tensor [3, size, size] in [-1, 1].
@@ -215,8 +193,7 @@ def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     Args:
         size: final square side in pixels (e.g. 512). Must match cfg.size.
         resize_mode: "letterbox" (default) or "CenterCrop" — see _square_rgb_steps.
-          This is a per-run TRAINING CHOICE (user decision 2026-07-20, superseding
-          the 2026-07-06 "letterbox only" decision): both techniques are now
+          This is a per-run TRAINING CHOICE: both techniques are
           selectable via the `resize_mode` config key so results can be compared
           by training/inferring twice, once per mode, on real data. The seg-ID map
           MUST use the identical mode + geometry (see square_id_map below) or
@@ -289,10 +266,8 @@ def square_id_map(ids_pil, size: int, resize_mode: str = "letterbox", pad_id: in
 
 
 if __name__ == "__main__":
-    # Self-check, meant to be run in this project's real environment (needs
-    # torchvision) so the fix is confirmed by execution here, not just read.
-    # Run: python -m src.data.transforms   (or however this repo's other
-    # entrypoints invoke local modules)
+    # SquarePad self-check. Needs torchvision.
+    # Run: python -m src.data.transforms
     import random
 
     print("=== SquarePad self-check ===")

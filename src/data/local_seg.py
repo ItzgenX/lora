@@ -8,19 +8,15 @@ training the segmentation-conditioned LoRAdapter. The maps are generated OFFLINE
 Two segmentation-specific points, both critical:
 
   1. The saved map is a RAW CLASS-ID PNG (8-bit, values 0..N-1), NOT a colour
-     image. We COLOURISE it at load time with the Grounded-SAM/CARLA class
+     image. Colourised at load time with the Grounded-SAM/CARLA class
      palette (configs/grounded_sam_classes.json, loaded via `classes_file` —
-     REQUIRED, no fallback: an earlier Cityscapes fallback was removed
-     2026-07-20, this branch trains on CARLA data only and that fallback
-     could never actually work here — CARLA class ids go up to 28, Cityscapes
-     only has 19 colours, so it would crash on nearly any real mask),
+     REQUIRED, no fallback: CARLA class ids go up to 28, Cityscapes only has
+     19 colours, so a Cityscapes palette cannot cover this branch's data),
      producing a 3-channel RGB map in [0,1] via the shared seg_colorize_ids.
 
   2. Resizing a class-ID map MUST use NEAREST interpolation. Averaging categorical
      class ids is meaningless: the mean of "road"=0 and "car"=6 is 3, a DIFFERENT
-     class that isn't in the image. NEAREST preserves exact labels. In practice the
-     PNG is already at the right size, so this resize is usually a no-op alignment
-     step — but we still force NEAREST so it never silently corrupts labels.
+     class that isn't in the image. NEAREST preserves exact labels.
 
 Returned by __getitem__:
   {
@@ -92,11 +88,8 @@ class SegJsonDataset(Dataset):
         self.seg_key      = seg_key
         self.prompt_key   = prompt_key
 
-        # palette is REQUIRED -- no fallback (see module docstring for why a
-        # Cityscapes fallback here was actively broken for this branch's CARLA
-        # data and was removed 2026-07-20). SegJsonDataModule always loads the
-        # real classes_file and passes it down; fail loudly here rather than
-        # deep inside a DataLoader worker if that ever doesn't happen.
+        # palette is REQUIRED -- no fallback (see module docstring). Fail
+        # loudly here rather than deep inside a DataLoader worker.
         if palette is None:
             raise ValueError(
                 "SegJsonDataset requires a palette (no default/fallback exists "
@@ -130,9 +123,6 @@ class SegJsonDataset(Dataset):
     def _seg_resolve(self, p: str) -> Path:
         """
         Resolve a path: absolute as-is; else project_root relative; else json_dir.
-
-        The 'seg_' prefix marks this as segmentation-pipeline code (naming rule).
-        Same resolution logic as depth's dataset _resolve.
         """
         p = Path(p)
         if p.is_absolute():
@@ -151,24 +141,19 @@ class SegJsonDataset(Dataset):
         """
         Load a raw class-ID PNG and return a colourised map [3, size, size] in [0,1].
 
-        Steps (the seg-specific points live here):
-          1. Open and read RAW pixel values — they ARE class ids. The real
-             Grounded-SAM/CARLA masks are 16-bit PNGs (PIL mode I;16, dtype
-             uint16, ids 0..28, confirmed from the user's own format scan);
-             the SegFormer pipeline saves 8-bit "L" PNGs. np.asarray on the
-             opened image handles BOTH without a .convert("L") — important
-             because I;16 -> L conversion behaviour differs between Pillow
-             versions (verified exact on THIS env 2026-07-20, but the
-             training machine may run a different Pillow; reading raw is
-             version-proof).
-          2. Square the map (the real masks are 1280x800) using the SAME
+        Steps:
+          1. Read RAW pixel values as class ids. Grounded-SAM/CARLA masks are
+             16-bit PNGs (PIL mode I;16, dtype uint16, ids 0..28); the
+             SegFormer pipeline saves 8-bit "L" PNGs. np.asarray on the
+             opened image handles both without a .convert("L") -- I;16 -> L
+             conversion behaviour is Pillow-version-dependent, reading raw
+             values is not.
+          2. Square the map (real masks are 1280x800) using the SAME
              `resize_mode` ("letterbox" or "CenterCrop") the paired RGB
-             image_transform used — square_id_map() (src/data/transforms.py)
-             is the single shared geometry, so image and map can never drift
-             apart even though this is a per-run config choice now (user
-             decision 2026-07-20). NEAREST-only throughout: a plain bilinear
-             resize/stretch here would misalign conditioning vs target by up
-             to ~19% of the frame (measured 2026-07-20, letterbox mode).
+             image_transform used -- square_id_map() (src/data/transforms.py)
+             is the single shared geometry, so image and map can't drift
+             apart. NEAREST-only: a bilinear resize/stretch here misaligns
+             conditioning vs target by up to ~19% of the frame (letterbox mode).
           3. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
 
         Returns [3, size, size] float tensor in [0, 1].
@@ -239,12 +224,9 @@ class SegJsonDataModule:
         prompt_key: str = "prompt",
         pad_id: int = 0,               # letterbox fill class for non-square maps
                                        # (0 = Unlabeled in the CARLA taxonomy)
-        resize_mode: str = "letterbox",  # "letterbox" or "CenterCrop" (user decision
-                                       # 2026-07-20) — built ONCE here from
-                                       # build_seg_preprocess so train/val use the
-                                       # identical RGB transform, and passed to
-                                       # SegJsonDataset so the seg map uses the SAME
-                                       # geometry (square_id_map). One key drives both.
+        resize_mode: str = "letterbox",  # "letterbox" or "CenterCrop" — drives
+                                       # both the RGB transform (build_seg_preprocess)
+                                       # and the seg map geometry (square_id_map).
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
@@ -256,13 +238,11 @@ class SegJsonDataModule:
         self.workers        = workers
         self.val_workers    = val_workers
 
-        # PALETTE SOURCE — exactly one wins, in this order:
-        #   1. classes_file (Grounded-SAM): load the user's class set -> palette.
+        # Palette source, exactly one wins:
+        #   1. classes_file (Grounded-SAM class set -> palette).
         #   2. palette arg (explicit list).
-        #   3. neither -> SegJsonDataset raises loudly (no fallback exists on
-        #      this branch — see local_seg.py's module docstring for why).
-        # Loading from classes_file here (once) guarantees train and val use the
-        # IDENTICAL palette, and lets grounded_sam_training.py resolve the same one.
+        #   3. neither -> SegJsonDataset raises (no fallback on this branch).
+        # Loaded once here so train and val use the identical palette.
         if classes_file is not None:
             from src.encoders.grounded_sam_encoder import load_grounded_sam_palette
             _cf = Path(project_root, classes_file)

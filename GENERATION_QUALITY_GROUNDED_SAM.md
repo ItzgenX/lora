@@ -1,8 +1,8 @@
-# Generation-Quality Diagnosis — Grounded-SAM pipeline [2026-07-20]
+# Generation-Quality Diagnosis — Grounded-SAM pipeline
 
-Findings scoped to the **grounded_sam branch only**, based on the user's real
+Findings scoped to the **grounded_sam branch only**, based on real
 generated-image samples from a CARLA-domain run (`data/info/test1_carla_image/*`)
-and the actual, user-confirmed real training-mask format. This file does
+and the actual, confirmed real training-mask format. This file does
 **not** carry over any finding from an unused file — every claim below is
 checked against what this pipeline actually trains on today. (See
 `GENERATION_QUALITY_SEGFORMER.md` on the `segformer` branch for that
@@ -11,7 +11,7 @@ and different fixes; do not cross-apply them.)
 
 ---
 
-## 1. What works (confirmed from the user's real output)
+## 1. What works (confirmed from real output)
 
 `test1_carla_image/predicted with prompt.jpeg` shows a CARLA-map-conditioned
 generation that follows the input layout closely — road, buildings, vehicle
@@ -22,7 +22,7 @@ issues below trace to data format and coverage, not the injection code.
 
 ## 2. Bug (fixed) — mask format was not being read correctly
 
-**The real training masks** (user-confirmed 2026-07-20 via a
+**The real training masks** (confirmed via a
 `check_seg_map_format.py` scan of `class_map.png`): PNG (lossless), PIL mode
 **I;16** (16-bit), **1280x800 — non-square**, raw CARLA class ids.
 
@@ -68,7 +68,7 @@ was run against the SegFormer pipeline's own dataset. **This pipeline's real
 training set has not been scanned for class-coverage the same way** — if you
 want that number for your CARLA dataset, `analyze_car_coverage.py` on this
 branch already supports `--car_class_id 14` (CARLA's Car id; confirmed in
-`configs/grounded_sam_classes.json`). Per user decision (2026-07-19), car
+`configs/grounded_sam_classes.json`). Car
 rendering quality is explicitly OUT OF SCOPE for active work regardless of
 what a scan would show.
 

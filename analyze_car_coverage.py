@@ -1,25 +1,19 @@
 """
 STANDALONE DIAGNOSTIC — not part of any of the 4 pipeline stages.
 
-WHY THIS EXISTS
-----------------
-Comparing a CARLA generation (large truck filling the foreground) against a
-real-world generation (only small, distant cars) showed the model producing a
-warped/generic vehicle blob ONLY in the CARLA case, while everything else in
-both scenes (road, buildings, sky, signage) generated cleanly. That pattern
-points at a TRAINING-DATA COVERAGE gap — the model may simply not have seen
-enough training examples where the "car" class fills a large fraction of the
-frame — rather than a segmentation-quality problem (the seg map's car blob in
-the CARLA example was structurally fine) or a checkpoint-quality problem (the
-same checkpoint, best_model @ 5 epochs / 60K images, rendered the real-world
-scene correctly).
+PURPOSE
+--------
+Checks training-data COVERAGE for a given class: a warped/generic object
+blob at generation time, for a class whose seg map region is structurally
+fine, points at a coverage gap rather than a segmentation- or
+checkpoint-quality problem — the model may simply not have seen enough
+training examples where that class fills a large fraction of the frame.
 
-This script turns that HYPOTHESIS into DATA: it walks your seg training
-manifest (the same train.json Stage D reads) and, for every sample, computes
-what fraction of the seg map's pixels are the "car" class. It then buckets
-that fraction into a histogram so you can see, at a glance, whether
-"large/close vehicle" frames (e.g. car-pixel fraction > 15%) are rare or
-absent in your real training set — which is exactly the CARLA-truck situation.
+This script walks your seg training manifest (the same train.json Stage D
+reads) and, for every sample, computes what fraction of the seg map's pixels
+are the target class. It buckets that fraction into a histogram so you can
+see, at a glance, whether "large/close object" frames (e.g. class-pixel
+fraction > 15%) are rare or absent in your real training set.
 
 CAR CLASS ID — pass --car_class_id, don't trust a default: this project's
 locked CARLA taxonomy (configs/grounded_sam_classes.json) has "Car" at id

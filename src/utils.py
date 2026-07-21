@@ -17,16 +17,10 @@ MODE = Literal[
 
 # ============================================================================ #
 #  GPU RESOLUTION — single source of truth for the segmentation pipeline       #
-#  entrypoints (seg_map_calculations.py, grounded_sam_training.py, grounded_sam_inference.py)    #
+#  entrypoints (grounded_sam_training.py, grounded_sam_inference.py)           #
 #                                                                                #
-#  WHY THIS EXISTS: the calc/inference scripts used to pick a device with      #
-#  `"cuda" if torch.cuda.is_available() else "cpu"` and silently run on CPU     #
-#  if CUDA wasn't detected for ANY reason (CPU-only torch build, driver        #
-#  mismatch, wrong conda env, CUDA_VISIBLE_DEVICES unset/empty). Nothing        #
-#  printed a warning — the run just looked "normal" but was extremely slow      #
-#  and never touched the GPU. print_gpu_diagnostics() always prints what's     #
-#  visible; resolve_device() refuses to silently fall back to CPU unless the   #
-#  caller explicitly opts in.                                                  #
+#  print_gpu_diagnostics() always prints what's visible; resolve_device()      #
+#  refuses to silently fall back to CPU unless the caller explicitly opts in.  #
 # ============================================================================ #
 
 def print_gpu_diagnostics() -> int:
@@ -175,14 +169,10 @@ def auto_batch_size(default: int, baseline_gpu_gb: float = 12.0, device: str = "
 def write_training_params_txt(cfg, output_path: Path, device: str, original_cwd: str | Path = None) -> Path:
     """
     Write a plain, human-readable snapshot of the parameters a training run
-    used, into <output_path>/training_params.txt.
-
-    WHY THIS EXISTS (not just relying on Hydra's own .hydra/config.yaml):
-    Hydra's snapshot is a raw config dump (harder to skim) and does NOT
-    include derived facts like the real dataset image counts. This file is a
-    single, human-readable summary of exactly what produced the checkpoints
-    sitting next to it -- GPU used, effective batch, real train/val image
-    counts, schedule, model paths, resume path.
+    used, into <output_path>/training_params.txt -- unlike Hydra's own
+    .hydra/config.yaml, includes derived facts like the real dataset image
+    counts (GPU used, effective batch, real train/val image counts, schedule,
+    model paths, resume path).
 
     Only call this on the main process (checked by the caller via
     accelerator.is_main_process) -- writing a plain text file doesn't need to
@@ -190,11 +180,10 @@ def write_training_params_txt(cfg, output_path: Path, device: str, original_cwd:
 
     original_cwd: pass hydra.utils.get_original_cwd() here. Hydra's chdir=true
     changes the process CWD to the run's OWN output folder before this runs,
-    so a relative manifest path like "data/depth_training/train.jsonl" would
-    silently fail to resolve (caught below, showing "unknown") without this --
-    verified by execution: omitting it produced "unknown images" instead of
-    the real count. If omitted, falls back to the current process CWD, which
-    will be wrong under Hydra's chdir -- always pass it from the caller.
+    so a relative manifest path would fail to resolve (caught below, showing
+    "unknown") without this. If omitted, falls back to the current process
+    CWD, which will be wrong under Hydra's chdir -- always pass it from the
+    caller.
     """
     output_path.mkdir(parents=True, exist_ok=True)
     txt_path = output_path / "training_params.txt"
@@ -203,8 +192,8 @@ def write_training_params_txt(cfg, output_path: Path, device: str, original_cwd:
     # Image counts: read directly from the manifest files (cheap -- just a
     # line count) rather than requiring the dataloaders to already be built.
     # Resolved against _root (the REPO root, not Hydra's run-dir CWD) so
-    # relative paths in the YAML (e.g. "data/depth_training/train.jsonl")
-    # are found regardless of Hydra's chdir=true.
+    # relative paths in the YAML (e.g. "data/grounded_sam/train.jsonl") are
+    # found regardless of Hydra's chdir=true.
     def _count_lines(path):
         try:
             p = Path(path)
@@ -411,8 +400,8 @@ def roll_list(l, n):
 # ============================================================================ #
 #  PER-CHECKPOINT QUANTITATIVE METRIC — used by grounded_sam_training.py                #
 #                                                                               #
-#  WHY THIS EXISTS: eyeballing checkpoint grids alone can't tell you whether    #
-#  a checkpoint is actually improving; a number logged per checkpoint can.     #
+#  Eyeballing checkpoint grids alone can't tell you whether a checkpoint is    #
+#  actually improving; a number logged per checkpoint can.                     #
 #  PSNR + SSIM between each FIXED validation scene's generation and its real   #
 #  image are used because:                                                     #
 #    • the FIXED scenes + the fixed generation seed make the value comparable   #

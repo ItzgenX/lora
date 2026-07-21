@@ -1,5 +1,5 @@
 {
-  "__README__": "LOCKED FINAL (user decision) -- CARLA semantic-segmentation taxonomy (CARLA 0.9.14+), source: https://carla.readthedocs.io/en/latest/ref_sensors/#semantic-segmentation-camera . IDs and RGB colours are CARLA's OFFICIAL values, kept verbatim. CARLA IDs 1-19 are the Cityscapes 19 classes with identical colours, shifted +1 because Unlabeled=0 sits at the front. This 29-class list is FINAL and not to be changed. This key is ignored by the loader (any key starting with '_' is skipped).",
+  "__README__": "LOCKED FINAL -- CARLA semantic-segmentation taxonomy (CARLA 0.9.14+), source: https://carla.readthedocs.io/en/latest/ref_sensors/#semantic-segmentation-camera . IDs and RGB colours are CARLA's OFFICIAL values, kept verbatim. CARLA IDs 1-19 are the Cityscapes 19 classes with identical colours, shifted +1 because Unlabeled=0 sits at the front. This 29-class list is FINAL and not to be changed. This key is ignored by the loader (any key starting with '_' is skipped).",
 
   "0":  { "name": "Unlabeled",   "color": [  0,   0,   0] },
   "1":  { "name": "Roads",       "color": [128,  64, 128] },

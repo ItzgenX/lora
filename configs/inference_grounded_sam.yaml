@@ -18,7 +18,7 @@
 #     the same _enc_has_model guard grounded_sam_training.py already uses and skips
 #     the rewrite + the live-segmenter mIoU metric automatically.
 #
-# RESIZE_MODE (user decision 2026-07-20): pass resize_mode=letterbox (default)
+# RESIZE_MODE: pass resize_mode=letterbox (default)
 # or resize_mode=CenterCrop -- MUST MATCH what ckpt_path was trained with (a
 # mismatch is warned about loudly at runtime). Also names ckpt_path's folder
 # AND this run's output folder (see `resize_mode:` key below).
@@ -67,7 +67,7 @@ classes_file: configs/grounded_sam_classes.json
 # 0 = CARLA "Unlabeled". Only used when resize_mode=letterbox (ignored by CenterCrop).
 seg_pad_id: 0
 
-# ---- Resize technique (user decision 2026-07-20) -----------------------------
+# ---- Resize technique -----------------------------
 # MUST match the technique the loaded checkpoint (ckpt_path) was TRAINED with
 # (grounded_sam_inference.py warns loudly on a mismatch by reading best_model/info.txt).
 #   "letterbox"  : SquarePad geometry (default).
@@ -135,7 +135,7 @@ inference:
   save_generated_only: false   # true → save only predicted image, mirroring folder structure
 
   # Preprocessing: squaring technique is controlled by the top-level
-  # `resize_mode` key above (user decision 2026-07-20) -- NOT fixed anymore.
+  # `resize_mode` key above -- NOT fixed anymore.
   # Kept as one knob (not two) so training and inference can never disagree
   # by accident: this same key drives both.
 

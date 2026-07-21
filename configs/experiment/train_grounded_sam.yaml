@@ -39,7 +39,7 @@ gradient_checkpointing: true
 gradient_accumulation_steps: 4        # 4 batch x 4 accum = 16 effective batch
 size: 512                              # square canvas; must match SD1.5 native resolution
 
-# --- Resize technique (user decision 2026-07-20) -------------------------------- #
+# --- Resize technique -------------------------------- #
 # "letterbox" (default) = SquarePad, keeps full scene, adds a pad band.
 # "CenterCrop"           = original stock LoRAdapter recipe (configs/data/local.yaml),
 #                          no pad band, crops scene edges. Compare the two by training

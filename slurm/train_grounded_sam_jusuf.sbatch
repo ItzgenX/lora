@@ -23,8 +23,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=24:00:00
-#SBATCH --signal=B:USR1@300                    # same graceful-stop mechanism as train_seg (grounded_sam_training.py:90-93,
-                                                # byte-identical on this branch, verified)
+#SBATCH --signal=B:USR1@300                    # graceful-stop mechanism (grounded_sam_training.py:90-93)
 #SBATCH --output=logs/train-%j.out
 #SBATCH --error=logs/train-%j.err
 
@@ -42,14 +41,13 @@ cd $PROJECT/<your_project>/LoRAdapter
 # $DATA is not visible to compute nodes. One-time / per refresh, e.g.:
 #   rsync -a $DATA/<your_project>/grounded_sam/ $SCRATCH/<your_project>/grounded_sam/
 # Each manifest line needs: raw_image_path, seg_path (your class_map.png),
-# prompt — the loader (fixed 2026-07-20, commit 5db3624) reads the real
-# I;16, 1280x800 format directly and letterboxes it correctly; no conversion
-# needed on your part.
+# prompt — the loader (commit 5db3624) reads the real I;16, 1280x800 format
+# directly and letterboxes it correctly; no conversion needed on your part.
 DATA_DIR=$SCRATCH/<your_project>/grounded_sam
 
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-# RESIZE_MODE (user decision 2026-07-20, GROUNDED_SAM.md §5.0b): "letterbox"
+# RESIZE_MODE (see GROUNDED_SAM.md §5.0b): "letterbox"
 # (SquarePad, default) or "CenterCrop" (original stock LoRAdapter recipe).
 # Also names the output folder: outputs/train/grounded_sam_${RESIZE_MODE}/...
 # -- submit this script twice, once per mode, to compare both by trained

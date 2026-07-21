@@ -244,7 +244,7 @@ segformer training script — it selects `configs/experiment/train_grounded_sam.
 `train_seg.yaml`.
 
 **`resize_mode` — pick which squaring technique this job trains with**
-(user decision 2026-07-20, GROUNDED_SAM.md §5.0b): add `resize_mode=letterbox`
+(see GROUNDED_SAM.md §5.0b): add `resize_mode=letterbox`
 or `resize_mode=CenterCrop` to the `srun` line. Say nothing and you get
 `letterbox` (this project's current default — `SquarePad`, keeps 100% of the
 scene, adds a flat pad band). `CenterCrop` is the ORIGINAL stock LoRAdapter
@@ -523,7 +523,7 @@ Same provenance tagging as [GROUNDED_SAM.md §7.0](GROUNDED_SAM.md):
 |---|---|---|
 | [slurm/train_grounded_sam_jusuf.sbatch](slurm/train_grounded_sam_jusuf.sbatch) | 🟩 NEW | The whole guide — §0 explains the mechanism, §5-5a its exact contents |
 | [SBATCH_ZERO_TO_HERO.md](SBATCH_ZERO_TO_HERO.md) | 🟩 NEW | This file |
-| [grounded_sam_training.py](grounded_sam_training.py) | 🟨 MODIFIED *(renamed from `seg_training.py` 2026-07-20; the `srun` line launches it)* | §5, §9, §10 |
+| [grounded_sam_training.py](grounded_sam_training.py) | 🟨 MODIFIED *(renamed from `seg_training.py`; the `srun` line launches it)* | §5, §9, §10 |
 | [configs/train_seg.yaml](configs/train_seg.yaml) | 🟨 MODIFIED *(shared Hydra base config both pipelines layer onto)* | §5 |
 | [recommend_training_params.py](recommend_training_params.py) | 🟨 MODIFIED | §5a's GPU-sizing block, §9's step-count math |
 | [src/encoders/grounded_sam_encoder.py](src/encoders/grounded_sam_encoder.py) | 🟩 NEW | §4 (explains why `forward()` deliberately raises, so no calc job exists) |

@@ -1,14 +1,11 @@
 """
 STANDALONE DIAGNOSTIC — not part of any pipeline stage.
 
-WHY THIS EXISTS
-----------------
-Before wiring up a Grounded-SAM training pipeline, we need to know what
-format your ALREADY-GENERATED seg maps are actually saved in: 8-bit
-grayscale class-ID PNGs (what the SegFormer pipeline uses), 16-bit, RGB
-colourised, or something else entirely. Guessing this wrong silently
-corrupts every class label, so this script just tells you the facts about
-one real file instead.
+PURPOSE
+--------
+Reports the actual on-disk format of one real seg map: 8-bit grayscale
+class-ID PNG (what the SegFormer pipeline uses), 16-bit, RGB colourised, or
+something else. A wrong assumption here corrupts every class label.
 
 USAGE
 ------

@@ -25,7 +25,7 @@ seg_key:    seg_path
 prompt_key: prompt
 
 # --- Non-square map handling --------------------------------------------------- #
-# The REAL masks (user-confirmed format 2026-07-20: 16-bit PNG, mode I;16,
+# The REAL masks (16-bit PNG, mode I;16,
 # 1280x800, CARLA ids) are SQUARED by the loader using the SAME technique
 # (resize_mode, below) as the paired RGB image, then NEAREST-resized. Never
 # stretched independently (stretching misaligned map vs image by up to ~19%
@@ -33,7 +33,7 @@ prompt_key: prompt
 # different void class.
 pad_id: 0
 
-# --- Resize technique (user decision 2026-07-20) -------------------------------- #
+# --- Resize technique -------------------------------- #
 # "letterbox"  : SquarePad (flat-fill pad) then Resize — keeps 100% of the
 #                scene, adds a flat-colour pad band top/bottom. Default.
 # "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)

@@ -6,19 +6,10 @@ reads or writes a segmentation colour map on this branch: local_seg.py
 (training dataset), grounded_sam_training.py (mIoU controllability metric),
 grounded_sam_inference.py (loading + scoring a provided map).
 
-WHY THIS FILE EXISTS (2026-07-20, replacing src/encoders/seg_encoder.py):
-  This branch trains on Grounded-SAM/CARLA maps (29 classes, see
-  configs/grounded_sam_classes.json) and never runs SegFormer or any
-  Cityscapes taxonomy. The functions below never assumed any PARTICULAR
-  palette -- they always took one in as an argument -- so they belong here,
-  not in a file whose name implies a SegFormer-specific live encoder. There
-  is deliberately NO default/fallback palette: every caller on this branch
-  loads the real CARLA classes_file (src/encoders/grounded_sam_encoder.py
-  load_grounded_sam_palette) and must pass it in explicitly. A silent
-  Cityscapes fallback previously lived here and was actively broken for this
-  branch's own data -- Cityscapes only has 19 colours, but CARLA class ids
-  go up to 28, so the fallback would raise "class id >= palette size 19" on
-  nearly any real mask the moment it was ever actually used.
+No default/fallback palette: every caller passes one in explicitly, loaded
+from the real CARLA classes_file via
+src/encoders/grounded_sam_encoder.py load_grounded_sam_palette
+(configs/grounded_sam_classes.json, 29 classes).
 """
 
 import torch
@@ -26,14 +17,9 @@ import torch
 
 def seg_palette_tensor(palette: list[tuple[int, int, int]]) -> torch.Tensor:
     """
-    Convert an integer RGB palette into a lookup tensor in [0, 1].
+    Convert an integer RGB palette into a [num_classes, 3] lookup tensor in [0, 1].
 
-    WHY: colourising a class-ID map is a gather/index operation; having the
-    palette as a [num_classes, 3] float tensor in [0,1] lets us do
-    `palette[ids]` to produce a [..., 3] colour image directly in the output
-    range the mapper expects.
-
-    palette: REQUIRED, no default -- pass the real class-set palette (e.g.
+    palette: required, no default -- pass the real class-set palette (e.g.
       from grounded_sam_encoder.load_grounded_sam_palette).
 
     Returns: FloatTensor [num_classes, 3] in [0, 1].
@@ -48,12 +34,9 @@ def seg_colorize_ids(
     """
     Map a class-ID map to a 3-channel RGB colour image in [0, 1].
 
-    WHY IT EXISTS IN THE PIPELINE:
-      This is the SINGLE colourisation step shared by the training dataset
-      (src/data/local_seg.py colourises the saved raw-ID PNG at load time)
-      and inference visualisation. Sharing it guarantees a class always gets
-      the identical colour everywhere — the parity guarantee that training
-      and inference conditioning match.
+    Shared by the training dataset (src/data/local_seg.py, colourising the
+    saved raw-ID PNG at load time) and inference visualisation, so a class
+    always maps to the identical colour in both places.
 
     Inputs:
       ids     : Long tensor [B, H, W] of class ids in [0, num_classes-1].
@@ -61,8 +44,7 @@ def seg_colorize_ids(
     Output:
       Float tensor [B, 3, H, W] in [0, 1].
 
-    Fails loudly if any id would index outside the palette — a silent
-    out-of-range gather is exactly the kind of quiet corruption to avoid.
+    Raises ValueError if any id would index outside the palette.
     """
     max_id = int(ids.max()) if ids.numel() else 0
     if max_id >= palette.shape[0]:
@@ -82,11 +64,6 @@ def seg_ids_from_colormap(
 ) -> torch.Tensor:              # [H, W] or [B, H, W] long — class IDs
     """
     Inverse of seg_colorize_ids: map an RGB colour seg map back to class IDs.
-
-    WHY IT EXISTS: the conditioning map fed to the model is stored as COLOUR
-    (colourised from IDs via seg_colorize_ids). To score mIoU we need the IDs
-    behind it as the TARGET. Because the map was colourised FROM this exact
-    palette, nearest-colour recovery returns the original IDs exactly.
 
     Each pixel is assigned the class whose palette colour is nearest (L2 in RGB);
     for maps produced by seg_colorize_ids the nearest colour is an exact match.

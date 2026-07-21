@@ -1,9 +1,9 @@
 """
 STANDALONE DIAGNOSTIC — not part of any pipeline stage.
 
-WHY THIS EXISTS
-----------------
-check_seg_map_format.py answered the format question for ONE file. This
+PURPOSE
+--------
+check_seg_map_format.py answers the format question for ONE file. This
 script answers two more questions that need the WHOLE dataset, not a sample:
 
   1. HOW MANY CLASSES are actually in use? A single file only shows the

@@ -34,7 +34,7 @@ configs/grounded_sam_classes.json
 slurm/train_grounded_sam_jusuf.sbatch
 ```
 
-**No SegFormer/Cityscapes code remains on this branch as of 2026-07-20** —
+**No SegFormer/Cityscapes code remains on this branch** —
 `src/encoders/seg_encoder.py` (the live SegFormer encoder + a Cityscapes
 fallback palette that could never actually work for this branch's CARLA
 data) was deleted entirely. The genuinely shared, taxonomy-agnostic palette
@@ -70,7 +70,7 @@ configs/data/local.yaml
 
 ---
 
-## Renamed 2026-07-20 (heads up if you're diffing against an older copy)
+## Renamed (heads up if you're diffing against an older copy)
 
 | Old name | New name |
 |---|---|
