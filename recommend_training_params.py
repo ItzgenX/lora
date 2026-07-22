@@ -13,13 +13,16 @@ gradient_accumulation_steps to the detected GPU at runtime -- the YAML value
 is fixed and explicit. This script computes the same recommendation for you
 to review and paste in yourself.
 
---data_dir has NO default and is REQUIRED: point it at your real
-data/grounded_sam directory (train.jsonl/val.jsonl/test.jsonl) -- there is no
-sensible default across different machines/datasets, so it's always explicit.
+--data_dir has NO default: point it at your real data/grounded_sam directory
+(train.jsonl/val.jsonl/test.jsonl) -- there is no sensible default across
+different machines/datasets. Pass it explicitly for scripted/non-interactive
+use (sbatch scripts, CI); omit it when running by hand and you'll be prompted
+for it interactively instead.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   python recommend_training_params.py --data_dir data/grounded_sam --epochs 10
   python recommend_training_params.py --data_dir data/grounded_sam --device cuda:1
+  python recommend_training_params.py --epochs 10   # prompts for --data_dir interactively
 
 CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
 ~12GB GPU is MEASURED (real training runs, this project). For any other GPU
@@ -76,14 +79,28 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--data_dir", type=str, default=None, required=True,
+        "--data_dir", type=str, default=None,
         help="Folder with train.jsonl/val.jsonl/test.jsonl to count real images from. "
-             "REQUIRED, no default -- there is no sensible default across "
-             "different machines/datasets. Example: --data_dir data/grounded_sam.",
+             "If omitted, you'll be prompted for it interactively (so this script "
+             "also works when you just run it bare, e.g. from a login node). "
+             "Non-interactive callers (sbatch scripts) should always pass this "
+             "explicitly. Example: --data_dir data/grounded_sam.",
     )
     parser.add_argument("--epochs", type=int, default=5, help="Epochs to compute step totals for. Default: 5.")
     parser.add_argument("--device", type=str, default=None, help="cuda / cuda:N / cpu. Default: auto-detect.")
     args = parser.parse_args()
+
+    # ---- 0. Get data_dir: from --data_dir, or ask interactively if omitted - #
+    # No sensible default exists across different machines/datasets, so an
+    # interactive prompt (not a hardcoded fallback) is the right way to fill
+    # this in when it's missing -- keeps --data_dir usable non-interactively
+    # (sbatch scripts, CI) while still being runnable bare from a shell.
+    data_dir_str = args.data_dir
+    if data_dir_str is None:
+        data_dir_str = input(
+            "Path to the folder containing your train.jsonl / val.jsonl / "
+            "test.jsonl (e.g. data/grounded_sam): "
+        ).strip().lstrip("﻿")   # strip a leading BOM some shells inject on piped/redirected stdin
 
     # ---- 1. Detect GPU ----------------------------------------------------- #
     device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -102,7 +119,7 @@ def main():
         print(f"  {props.name}  ({total_gb:.1f} GB)  [{device}]")
 
     # ---- 2. Read real dataset counts --------------------------------------- #
-    data_dir = Path(args.data_dir)
+    data_dir = Path(data_dir_str)
     train_n = _count_images(data_dir / "train.jsonl")
     val_n = _count_images(data_dir / "val.jsonl")
     test_n = _count_images(data_dir / "test.jsonl")

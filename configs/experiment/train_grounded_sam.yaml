@@ -53,17 +53,22 @@ resize_mode: letterbox
 # =============================================================================
 # 1. GENERAL TRAINING PARAMETERS
 # =============================================================================
-# Adjust epochs/val_steps/ckpt_steps to YOUR dataset size (60K train here).
-#   effective batch = batch_size(4) x grad_accum(4) = 16
-#   steps/epoch     = ceil(train_images / 16)
+# Sized for the REAL dataset: 30,000 train / 10,000 val / 10,000 test images.
+#   effective batch = batch_size(4) x grad_accum(4) = 16   (this file's baseline
+#     single-GPU config — a cluster sbatch script overriding data.batch_size/
+#     gradient_accumulation_steps for its own GPU count MUST recompute
+#     val_steps/ckpt_steps/lr_warmup_steps for its own effective batch, since
+#     these are STEP counts and steps/epoch depends on effective batch. See
+#     slurm/train_grounded_sam_jupiter.sbatch for the 4-GPU recomputation.)
+#   steps/epoch     = ceil(30,000 / 16) = 1,875
 learning_rate: 1.0e-4
-lr_warmup_steps: 500
+lr_warmup_steps: 250   # ~13% of epoch 1 (250 / 1875 steps)
 lr_scheduler: cosine
-epochs: 5
+epochs: 10              # 10 x 1,875 = 18,750 optimizer steps (this file's baseline)
 
 # DECOUPLED triggers: validate cheaply often, save weights+images less often.
-val_steps:  500
-ckpt_steps: 1000
+val_steps:  250    # ~7 val/loss checks per epoch  (1875 / 7 ≈ 268, rounded)
+ckpt_steps: 500    # ~3-4 checkpoint saves per epoch (1875 / 3.5 ≈ 536, rounded)
 
 # =============================================================================
 # 2. DATA  (DIFF: Grounded-SAM manifests + class palette)

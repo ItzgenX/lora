@@ -923,6 +923,94 @@ must match training's `pad_id` (`configs/data/local_grounded_sam.yaml`, both
 default 0 = CARLA `Unlabeled`) — see §5.0a for what it controls (letterbox
 fill for non-square maps; unused when `resize_mode=CenterCrop`, see §5.0b).
 
+### 5.1e Continuing training across cluster walltime limits (resume)
+
+**Why you need this.** JUSUF/JUPITER both cap a single job's walltime (JUSUF:
+24h for normal-project jobs; check your own project's limit on JUPITER) — a
+10-epoch run on a real dataset will very likely NOT finish inside one job.
+Both `slurm/train_grounded_sam_jusuf.sbatch` and
+`slurm/train_grounded_sam_jupiter.sbatch` are built to survive this.
+
+**The graceful-stop mechanism (already wired, nothing to configure).**
+`#SBATCH --signal=B:USR1@300` tells Slurm to send `SIGUSR1` 300 seconds
+before the walltime limit hits. `grounded_sam_training.py` registers a handler for it
+at startup (`signal.signal(signal.SIGUSR1, signal_handler)`, line 351) that
+sets a `stop_training` flag (lines 98-103). The training loop checks that
+flag at the next natural break point (end of a step, end of an epoch — lines
+782-825) and exits cleanly, saving one final checkpoint + its monitoring grid
+first (the "Final snapshot on early-stop only" block). So a job killed by the
+walltime limit still leaves you a real, usable checkpoint — never a corrupted
+or missing one.
+
+**Where to find the checkpoint to resume from.** Every run writes to
+`outputs/train/grounded_sam_<resize_mode>/runs/<DATE>/<TIME>/`. Two candidates,
+and they answer different questions:
+- `best_model/` — the checkpoint with the LOWEST val/loss seen so far. Use
+  this if you want the best model regardless of whether it was the most
+  recent step.
+- The latest `checkpoint-epochN/stepM/` or `checkpoint-epochN/checkpoint-epochN/`
+  folder (sort by timestamp, or read the run's `.log` file for the last
+  "[SEG] Epoch..." line) — the actual FURTHEST point training reached. Use
+  this if you want to genuinely continue where the job stopped, best/not.
+
+**How to resume.** Both sbatch scripts already have a `RESUME_CKPT` variable
+wired to `lora.struct.ckpt_path`:
+```bash
+RESUME_CKPT="outputs/train/grounded_sam_letterbox/runs/2026-01-01/00-00-00/checkpoint-epoch3/step9000"
+```
+Fill it in, resubmit the same sbatch script. `add_lora_from_config`
+(`src/utils.py:296-360`) reads `<RESUME_CKPT>/struct/{lora,mapper}-checkpoint.pt`
+(and `encoder-checkpoint.pt` if present) and loads those weights into the
+model before training starts.
+
+**The critical limitation — read this before resuming, it changes what
+number to put in `epochs=`.** Verified by reading `add_lora_from_config`
+(`src/utils.py:296-360`) and `main()` (`grounded_sam_training.py:444-518`)
+directly: resume reloads ONLY the LoRA + mapper WEIGHTS. It does **not**
+restore:
+  - **optimizer state** (`optimizer = torch.optim.AdamW(...)` is freshly
+    constructed every run, line 444 — no momentum carries over)
+  - **the LR schedule position** (`lr_scheduler = get_scheduler(...)`,
+    line 454, always starts its own warmup/cosine curve from ITS step 0)
+  - **`global_step`** (hardcoded `global_step = 0` at line 518, every run)
+
+This is a **weight warm-start, not a full training-state resume**. Concrete
+consequences:
+1. **Size `epochs=` to what's LEFT, not the original total.** If your
+   original job was `epochs=10` and it stopped partway through epoch 4, the
+   resumed job should use `epochs=6` (the remaining budget), not `epochs=10`
+   again — otherwise you'll train 10 MORE epochs on top of the 4 already
+   done, not 10 total.
+2. **The LR schedule restarts its warmup/cosine curve from scratch** on every
+   resume — it does not seamlessly continue the exact curve the original job
+   was on. For a `cosine` schedule this means a small re-warmup blip each
+   time you resume, not a perfectly smooth single curve across jobs. This is
+   a known, accepted limitation (not something this session fixed) — plan
+   epochs per job accordingly rather than assuming perfect continuity.
+3. **Step numbers restart at 0 each resume** — a resumed job's
+   `checkpoint-epoch1/step500/` is the 500th step of THAT job, not step 500
+   of the overall run. Track total progress by SUMMING the `epochs=` used
+   across each job in the chain, not by absolute step count.
+
+**Practical workflow (manual, recommended for your first cluster run):**
+1. Submit the job. When it stops (walltime hit, or finished its `epochs=`
+   budget with room to spare, or crashed), check `logs/train-<jobid>.out`.
+2. Find the latest checkpoint folder under `outputs/train/grounded_sam_<mode>/runs/.../`.
+3. Edit `RESUME_CKPT` in the sbatch script to that path, reduce `EPOCHS` to
+   the remaining budget, resubmit.
+4. Repeat until `early_stop_patience` fires on its own or you reach your
+   total epoch budget.
+
+**Optional: automate the chain with `--dependency`.** Both JUSUF's and
+JUPITER's batch systems support `sbatch --dependency=afterok:<jobid> <script>`
+to queue a follow-up job that only starts once the predecessor finishes
+successfully. This alone does NOT solve the `RESUME_CKPT`/`EPOCHS` problem
+above (those still need the real checkpoint path, which only exists after
+the first job runs) — a fully automatic chain would need a small wrapper
+script that finds the latest checkpoint and computes the remaining epoch
+count before calling `sbatch`. Not built here; flagged as a reasonable
+follow-up if you're running many chained jobs and want less manual editing.
+
 ### 5.2 What was NOT built — "Tier 2": live map generation
 A live `GroundedSamEncoder` that actually runs GroundingDINO + SAM to make a map
 for a brand-new image. Needed for **inference on new frames without a
