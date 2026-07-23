@@ -1,0 +1,1197 @@
+<title>LoRAdapter — Conditional LoRA for T2I Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --ground:#0d131b; --surface:#161f2b; --surface-2:#1d2937;
+    --ink:#e9eef4; --muted:#93a1b3; --faint:#66748a;
+    --line:rgba(255,255,255,.10); --line-strong:rgba(255,255,255,.20);
+    --grid:rgba(126,160,196,.05);
+    --frozen:#7ea0c4; --frozen-soft:rgba(126,160,196,.16);
+    --signal:#f0a838; --signal-soft:rgba(240,168,56,.16); --signal-line:rgba(240,168,56,.42);
+    --good:#5ec08f; --good-soft:rgba(94,192,143,.15);
+    --warn:#e0844a; --warn-soft:rgba(224,132,74,.15);
+    --shadow:0 24px 60px -26px rgba(0,0,0,.75);
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --ground:#eef1f6; --surface:#ffffff; --surface-2:#f5f7fb;
+      --ink:#141d29; --muted:#4f5c70; --faint:#8592a4;
+      --line:rgba(20,29,41,.13); --line-strong:rgba(20,29,41,.26);
+      --grid:rgba(61,97,138,.07);
+      --frozen:#3d618a; --frozen-soft:rgba(61,97,138,.12);
+      --signal:#b06f0d; --signal-soft:rgba(176,111,13,.13); --signal-line:rgba(176,111,13,.45);
+      --good:#2f9268; --good-soft:rgba(47,146,104,.13);
+      --warn:#b5601f; --warn-soft:rgba(181,96,31,.13);
+      --shadow:0 24px 60px -30px rgba(20,29,41,.4);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0d131b; --surface:#161f2b; --surface-2:#1d2937;
+    --ink:#e9eef4; --muted:#93a1b3; --faint:#66748a;
+    --line:rgba(255,255,255,.10); --line-strong:rgba(255,255,255,.20); --grid:rgba(126,160,196,.05);
+    --frozen:#7ea0c4; --frozen-soft:rgba(126,160,196,.16);
+    --signal:#f0a838; --signal-soft:rgba(240,168,56,.16); --signal-line:rgba(240,168,56,.42);
+    --good:#5ec08f; --good-soft:rgba(94,192,143,.15);
+    --warn:#e0844a; --warn-soft:rgba(224,132,74,.15);
+    --shadow:0 24px 60px -26px rgba(0,0,0,.75);
+  }
+  :root[data-theme="light"]{
+    --ground:#eef1f6; --surface:#ffffff; --surface-2:#f5f7fb;
+    --ink:#141d29; --muted:#4f5c70; --faint:#8592a4;
+    --line:rgba(20,29,41,.13); --line-strong:rgba(20,29,41,.26); --grid:rgba(61,97,138,.07);
+    --frozen:#3d618a; --frozen-soft:rgba(61,97,138,.12);
+    --signal:#b06f0d; --signal-soft:rgba(176,111,13,.13); --signal-line:rgba(176,111,13,.45);
+    --good:#2f9268; --good-soft:rgba(47,146,104,.13);
+    --warn:#b5601f; --warn-soft:rgba(181,96,31,.13);
+    --shadow:0 24px 60px -30px rgba(20,29,41,.4);
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background-color:var(--ground); color:var(--ink); font-family:var(--sans);
+    -webkit-font-smoothing:antialiased; overflow:hidden; line-height:1.5;
+    background-image:linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size:46px 46px; background-position:center;
+  }
+
+  .deck{position:fixed; inset:0}
+  .slide{position:absolute; inset:0; display:none; padding:clamp(26px,4.2vw,66px); flex-direction:column; overflow:auto}
+  .slide.active{display:flex}
+  .fill{flex:1; min-height:0; display:flex; flex-direction:column; justify-content:safe center; gap:2px}
+  .center{justify-content:safe center; align-items:flex-start}
+
+  /* staggered reveal — retriggers whenever a slide becomes active */
+  @keyframes revealUp{from{opacity:0; transform:translateY(16px)} to{opacity:1; transform:none}}
+  .slide.active .reveal{animation:revealUp .5s cubic-bezier(.2,.7,.3,1) both; animation-delay:var(--d,0s)}
+  @media (prefers-reduced-motion:reduce){ .slide.active .reveal{animation:none} }
+
+  .progress{position:fixed; top:0; left:0; height:3px; background:var(--signal); z-index:40; transition:width .35s ease}
+  .chrome{position:fixed; bottom:15px; right:20px; z-index:40; display:flex; gap:14px; align-items:center; font-family:var(--mono); font-size:12px; color:var(--faint)}
+  .counter{font-family:var(--mono); font-size:12px; color:var(--muted); letter-spacing:.03em}
+  .brandmark{position:fixed; bottom:15px; left:22px; z-index:40; font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint)}
+
+  .eyebrow{font-family:var(--mono); font-size:clamp(11px,1.1vw,13px); letter-spacing:.22em; text-transform:uppercase; color:var(--signal); margin:0 0 15px; display:flex; align-items:center; gap:12px}
+  .eyebrow::before{content:""; width:26px; height:1px; background:var(--signal-line)}
+  h1{font-size:clamp(30px,4.3vw,58px); line-height:1.04; margin:0; letter-spacing:-.022em; text-wrap:balance; font-weight:700}
+  h2{font-size:clamp(23px,2.9vw,38px); line-height:1.08; margin:0 0 20px; letter-spacing:-.018em; text-wrap:balance; font-weight:650}
+  .lede{font-size:clamp(15px,1.5vw,20px); color:var(--muted); max-width:62ch; margin:14px 0 0}
+  p{margin:0 0 12px}
+  strong{color:var(--ink); font-weight:640}
+  .hi{color:var(--signal); font-weight:600}
+  .hi-frozen{color:var(--frozen); font-weight:600}
+  .hi-good{color:var(--good); font-weight:600}
+  .hi-warn{color:var(--warn); font-weight:600}
+  code,.mono{font-family:var(--mono)}
+  em{font-style:normal; color:var(--ink)}
+  .fileref{font-family:var(--mono); font-size:.82em; color:var(--frozen)}
+
+  .title-wrap{max-width:15ch}
+  .title-sub{font-size:clamp(15px,1.5vw,19px); color:var(--muted); margin-top:20px; max-width:56ch; line-height:1.55}
+  .title-meta{margin-top:32px; display:flex; flex-wrap:wrap; gap:10px 26px; font-family:var(--mono); font-size:13px; color:var(--faint)}
+  .title-meta b{color:var(--muted); font-weight:500}
+  .title-eq{margin-top:28px; font-family:var(--mono); font-size:clamp(13px,1.5vw,18px); color:var(--muted); background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--signal); border-radius:10px; padding:15px 20px; display:inline-block; box-shadow:var(--shadow)}
+  .title-eq .f{color:var(--frozen)} .title-eq .s{color:var(--signal)}
+
+  .divider{justify-content:center; position:relative}
+  .divider .num{font-family:var(--mono); font-size:clamp(64px,13vw,168px); font-weight:700; color:transparent; -webkit-text-stroke:1.6px var(--signal-line); line-height:.85; letter-spacing:-.02em}
+  .divider h1{margin-top:6px; max-width:20ch}
+  .divider .sub{color:var(--muted); font-size:clamp(15px,1.6vw,20px); margin-top:16px; max-width:60ch}
+  .divider.hero-div .num{-webkit-text-stroke-color:var(--signal); color:var(--signal-soft)}
+
+  .agenda{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:2px}
+  @media(max-width:760px){.agenda{grid-template-columns:1fr}}
+  .agenda-item{display:flex; gap:15px; align-items:baseline; padding:15px 18px; background:var(--surface); border:1px solid var(--line); border-radius:12px}
+  .agenda-item.hero{border-color:var(--signal-line); background:linear-gradient(180deg,var(--signal-soft),transparent); box-shadow:var(--shadow)}
+  .agenda-item .n{font-family:var(--mono); color:var(--signal); font-size:14px; font-weight:600; min-width:24px}
+  .agenda-item h3{margin:0 0 3px; font-size:16px; font-weight:600}
+  .agenda-item p{margin:0; color:var(--muted); font-size:13px}
+
+  .cols{display:grid; gap:18px}
+  .cols.two{grid-template-columns:1fr 1fr}
+  .cols.three{grid-template-columns:repeat(3,1fr)}
+  .cols.split{grid-template-columns:1.15fr .85fr}
+  @media(max-width:860px){.cols.two,.cols.three,.cols.split{grid-template-columns:1fr}}
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:19px 21px}
+  .card h3{margin:0 0 9px; font-size:15.5px; font-weight:640; display:flex; align-items:center; gap:9px}
+  .card p{color:var(--muted); font-size:14px; margin:0 0 7px}
+  .card p:last-child{margin-bottom:0}
+  .card.accent{border-color:var(--signal-line); background:linear-gradient(180deg,var(--signal-soft),transparent)}
+  .card.frozen{border-color:rgba(126,160,196,.36); background:linear-gradient(180deg,var(--frozen-soft),transparent)}
+  .card.good{border-color:rgba(94,192,143,.36); background:linear-gradient(180deg,var(--good-soft),transparent)}
+  .card.warn{border-color:rgba(224,132,74,.36); background:linear-gradient(180deg,var(--warn-soft),transparent)}
+
+  ul.clean{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:11px}
+  ul.clean.tight{gap:8px}
+  ul.clean li{position:relative; padding-left:23px; color:var(--muted); font-size:14.5px}
+  ul.clean li::before{content:""; position:absolute; left:3px; top:8px; width:7px; height:7px; border-radius:2px; background:var(--signal); transform:rotate(45deg)}
+  ul.clean li b, ul.clean li strong{color:var(--ink)}
+  ul.clean.good li::before{background:var(--good)}
+  ul.clean.frozen li::before{background:var(--frozen)}
+
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .dot.f{background:var(--frozen)} .dot.s{background:var(--signal)} .dot.g{background:var(--good)} .dot.w{background:var(--warn)}
+
+  .callout{background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--signal); border-radius:10px; padding:13px 17px; color:var(--muted); font-size:13.5px; margin-top:13px}
+  .callout.good{border-left-color:var(--good)} .callout.warn{border-left-color:var(--warn)}
+  .callout b{color:var(--ink)}
+
+  pre{margin:0; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px 18px; overflow-x:auto; font-family:var(--mono); font-size:clamp(11px,1.05vw,13.5px); line-height:1.65; box-shadow:var(--shadow)}
+  pre .c{color:var(--faint)} pre .f{color:var(--frozen); font-weight:600} pre .s{color:var(--signal); font-weight:600} pre .g{color:var(--good)} pre .k{color:var(--ink); font-weight:600}
+
+  .tbl-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:12px}
+  table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:640px}
+  th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{font-family:var(--mono); font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--faint); font-weight:500}
+  tr:last-child td{border-bottom:none}
+  td b{color:var(--ink)}
+
+  .stat-row{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  @media(max-width:860px){.stat-row{grid-template-columns:1fr}}
+  .stat{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:19px 21px}
+  .stat .big{font-size:clamp(26px,3.4vw,40px); font-weight:700; letter-spacing:-.02em; line-height:1}
+  .stat .big.s{color:var(--signal)} .stat .big.g{color:var(--good)} .stat .big.f{color:var(--frozen)}
+  .stat .lbl{color:var(--muted); font-size:13px; margin-top:9px}
+
+  .status{display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:12px; font-weight:600}
+  .status.ok{color:var(--good)} .status.open{color:var(--warn)} .status.pending{color:var(--faint)}
+
+  /* ---------- SVG diagram language ---------- */
+  .diagram{width:100%; height:auto; max-height:40vh; display:block; margin:0 auto; overflow:visible}
+  .diagram text{font-family:var(--sans)}
+  .d-box{fill:var(--surface); stroke:var(--line-strong); stroke-width:1.5}
+  .d-box.frozen{fill:var(--frozen-soft); stroke:var(--frozen)}
+  .d-box.signal{fill:var(--signal-soft); stroke:var(--signal)}
+  .d-box.plain{fill:var(--surface-2)}
+  .d-lbl{fill:var(--ink); font-weight:650; font-size:16px}
+  .d-lbl.sm{font-size:13.5px}
+  .d-sub{fill:var(--faint); font-family:var(--mono); font-size:11px}
+  .d-tag{fill:var(--signal); font-family:var(--mono); font-size:11px; font-weight:600}
+  .d-tag.frozen{fill:var(--frozen)}
+  .d-wire{stroke:var(--faint); stroke-width:1.7; fill:none}
+  .d-wire.frozen{stroke:var(--frozen); stroke-width:2}
+  .d-wire.signal{stroke:var(--signal); stroke-width:2; stroke-dasharray:5 7}
+  .slide.active .d-wire.signal{animation:dashmove 1s linear infinite}
+  @keyframes dashmove{to{stroke-dashoffset:-24}}
+  @media (prefers-reduced-motion:reduce){ .slide.active .d-wire.signal{animation:none; stroke-dasharray:none} }
+  .d-node{fill:var(--surface); stroke:var(--signal); stroke-width:2}
+  .d-red{stroke:var(--warn); stroke-width:2; fill:none}
+  .d-redt{fill:var(--warn); font-family:var(--mono); font-size:12px; font-weight:600}
+  .d-greent{fill:var(--good); font-family:var(--mono); font-size:12px; font-weight:600}
+
+  /* ---------- image slots ---------- */
+  .imgslot{margin:0; display:flex; flex-direction:column; gap:8px}
+  .imgslot-frame{aspect-ratio:var(--ar,16/9); border:1.5px dashed var(--line-strong); border-radius:12px; background:
+      repeating-linear-gradient(45deg, transparent, transparent 11px, var(--surface-2) 11px, var(--surface-2) 22px);
+      background-color:var(--surface); display:flex; align-items:center; justify-content:center; text-align:center; overflow:hidden; position:relative}
+  .imgslot-frame img{width:100%; height:100%; object-fit:cover; display:block}
+  .imgslot-hint{font-family:var(--mono); font-size:12.5px; color:var(--faint); line-height:1.7; padding:14px}
+  .imgslot-hint b{display:block; color:var(--muted); font-size:14px; margin-bottom:4px}
+  .imgslot-hint .ic{font-size:24px; display:block; margin-bottom:8px; color:var(--signal)}
+  .imgslot figcaption{font-size:12.5px; color:var(--muted); text-align:center}
+  .imgslot figcaption b{color:var(--ink)}
+
+  .legend{display:flex; gap:20px; flex-wrap:wrap; margin-top:14px; font-size:12.5px; color:var(--muted); font-family:var(--mono)}
+  .legend span{display:flex; align-items:center; gap:8px}
+
+  .notes-overlay{position:fixed; inset:auto 0 0 0; z-index:50; background:var(--surface); border-top:2px solid var(--signal); box-shadow:0 -20px 50px -20px rgba(0,0,0,.6); padding:20px clamp(24px,4vw,60px) 24px; max-height:48vh; overflow:auto; display:none}
+  .notes-overlay.show{display:block}
+  .notes-overlay h4{margin:0 0 11px; font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--signal); display:flex; gap:12px; align-items:center}
+  .notes-overlay h4 span{color:var(--faint); font-weight:400; letter-spacing:.04em; text-transform:none}
+  .notes-body{font-size:14.5px; color:var(--ink); max-width:90ch}
+  .notes-body ul{margin:0; padding-left:19px; display:flex; flex-direction:column; gap:7px}
+  .notes-body li{color:var(--muted)} .notes-body li b{color:var(--ink)}
+  .notes-desc{font-size:14.5px; color:var(--muted); max-width:92ch; margin-bottom:14px; padding-bottom:13px; border-bottom:1px solid var(--line); line-height:1.6}
+  .notes-desc b{color:var(--ink); font-weight:640}
+  .nlbl{display:block; font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--frozen); margin-bottom:7px}
+  .notes-script{margin-bottom:14px; padding-bottom:13px; border-bottom:1px solid var(--line)}
+  .notes-script .nlbl{color:var(--signal)}
+  .notes-script .say{font-size:15px; color:var(--ink); line-height:1.65; margin:0; padding-left:12px; border-left:2px solid var(--signal-line)}
+  .notes-desc .ref{display:inline-block; margin-top:6px; font-family:var(--mono); font-size:11.5px; color:var(--frozen)}
+  .notes{display:none}
+
+  .hint{position:fixed; top:15px; right:20px; z-index:40; font-family:var(--mono); font-size:11px; color:var(--faint); background:var(--surface); border:1px solid var(--line); border-radius:20px; padding:6px 14px}
+  .hint b{color:var(--signal)}
+  @media(max-width:680px){.chrome .hk{display:none}}
+</style>
+
+<div class="progress" id="progress"></div>
+<div class="hint">Press <b>N</b> for speaker notes · <b>←/→</b> to move</div>
+<div class="brandmark">CTRLorALTer · segmentation extension</div>
+<div class="chrome"><span class="hk">theme follows your system</span>
+  <span class="counter"><span id="cur">1</span> / <span id="tot">25</span></span></div>
+
+<div class="deck" id="deck">
+
+  <!-- 1 · TITLE -->
+  <section class="slide center">
+    <div class="fill">
+      <p class="eyebrow reveal">Built on CTRLorALTer · ECCV 2024 · arXiv 2405.07913</p>
+      <div class="title-wrap reveal" style="--d:.06s"><h1>Segmentation-conditioned image generation with conditional LoRA</h1></div>
+      <p class="title-sub reveal" style="--d:.14s">We took <strong>LoRAdapter</strong> — a depth &amp; style control method — and extended it to <span class="hi">segmentation control</span>, with two interchangeable map sources, without touching the model core.</p>
+      <div class="title-eq reveal" style="--d:.22s">y = <span class="f">W(x)</span> &nbsp;+&nbsp; λ · <span class="s">B( FiLM( A(x), &nbsp;seg map ) )</span></div>
+      <div class="title-meta reveal" style="--d:.3s">
+        <span><b>Base paper:</b> LoRAdapter — CompVis @ LMU + Apple</span>
+        <span><b>Our extension:</b> SegFormer + Grounded-SAM</span>
+        <span><b>Model:</b> frozen Stable Diffusion 1.5</span>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li><b>Opening:</b> "The field knows LoRAdapter — but this talk is about what <i>we</i> built on it: a whole new conditioning modality, segmentation, added cleanly to a repo that only knew depth and style."</li>
+      <li>The equation is the through-line — promise to unpack it and show how the seg map becomes the driving signal.</li>
+    </ul></div>
+  </section>
+
+  <!-- 2 · AGENDA -->
+  <section class="slide">
+    <p class="eyebrow reveal">Roadmap · 30 minutes</p>
+    <h2 class="reveal" style="--d:.05s">Where we're going</h2>
+    <div class="fill">
+      <div class="agenda">
+        <div class="agenda-item reveal" style="--d:.05s"><span class="n">01</span><div><h3>Foundations</h3><p>Diffusion, the UNet, and LoRA — fast, from scratch</p></div></div>
+        <div class="agenda-item reveal" style="--d:.1s"><span class="n">02</span><div><h3>The core idea</h3><p>Conditional LoRA via FiLM · structure vs style</p></div></div>
+        <div class="agenda-item reveal" style="--d:.15s"><span class="n">03</span><div><h3>The architecture</h3><p>Where the block lives and how the signal reaches it</p></div></div>
+        <div class="agenda-item hero reveal" style="--d:.2s"><span class="n">04</span><div><h3>Our work — segmentation ★</h3><p>Extending a depth-native repo: design, real bugs, diagnostics</p></div></div>
+        <div class="agenda-item reveal" style="--d:.25s"><span class="n">05</span><div><h3>Results &amp; limitations</h3><p>What we've verified, what's a known artifact, what's next</p></div></div>
+        <div class="agenda-item reveal" style="--d:.3s; border-style:dashed"><span class="n" style="color:var(--frozen)">→</span><div><h3>Colour code all deck</h3><p><span class="hi-frozen">Blue = frozen</span> pretrained · <span class="hi">Amber = trainable</span> conditioning</p></div></div>
+      </div>
+    </div>
+    <div class="notes"><ul><li>Point at Part 04 — "that's the heart; everything before is the vocabulary to describe what we did."</li><li>Colour code recurs on every diagram: blue frozen, amber trainable/signal.</li></ul></div>
+  </section>
+
+  <!-- 3 · §01 -->
+  <section class="slide divider">
+    <div class="num reveal">01</div>
+    <h1 class="reveal" style="--d:.08s">Foundations, fast</h1>
+    <p class="sub reveal" style="--d:.16s">Three ideas we need before the architecture lands: how diffusion generates, what the UNet is, and what LoRA does.</p>
+    <div class="notes"><ul><li>"Three quick slides, then the interesting part." Experts can coast.</li></ul></div>
+  </section>
+
+  <!-- 4 · THE PROBLEM -->
+  <section class="slide">
+    <p class="eyebrow reveal">The problem</p>
+    <h2 class="reveal" style="--d:.05s">Text alone can't say <em>where</em> or <em>how</em></h2>
+    <div class="fill">
+      <p class="lede reveal" style="--d:.1s; margin-top:0">"A car on a rainy street" gives you <em>a</em> car somewhere — but not <strong>this</strong> layout, <strong>this</strong> pose, or <strong>that</strong> look. Two kinds of control that don't fit in a prompt:</p>
+      <div class="cols two" style="margin-top:18px">
+        <div class="card accent reveal" style="--d:.16s"><h3><span class="dot s"></span>Structure conditioning</h3><p>"Put the shapes <em>here</em>." Driven by a spatial map — depth, <strong>segmentation</strong>, edges. Controls <strong>where &amp; what form</strong>.</p><p style="color:var(--signal); font-size:13px; margin-top:6px">← what our segmentation work drives</p></div>
+        <div class="card frozen reveal" style="--d:.22s"><h3><span class="dot f"></span>Style conditioning</h3><p>"Make it look like <em>this</em>." Driven by a reference image's embedding. Controls <strong>global appearance &amp; texture</strong>.</p></div>
+      </div>
+      <div class="callout reveal" style="--d:.28s"><b>LoRAdapter's promise:</b> both from one mechanism, added to a frozen model, few parameters. <b>Our contribution:</b> make <em>segmentation</em> a first-class structure signal in that mechanism.</div>
+    </div>
+    <div class="notes"><ul><li>Plant <b>structure</b> vs <b>style</b> — the spine of the talk; structure is our lane.</li><li>Prompt = semantics; structure = spatial arrangement; style = artistic look.</li></ul></div>
+  </section>
+
+  <!-- 5 · DIFFUSION + UNET -->
+  <section class="slide">
+    <p class="eyebrow reveal">Crash course · the generator</p>
+    <h2 class="reveal" style="--d:.05s">How Stable Diffusion makes an image</h2>
+    <div class="fill">
+      <div class="reveal" style="--d:.12s">
+      <svg class="diagram" viewBox="0 0 900 250" role="img" aria-label="Latent diffusion pipeline and the multi-resolution UNet">
+        <defs>
+          <marker id="ah" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="var(--faint)" stroke-width="1.5"/></marker>
+          <marker id="ahs" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.6"/></marker>
+        </defs>
+        <!-- pipeline row -->
+        <g>
+          <rect class="d-box plain" x="8" y="30" width="96" height="52" rx="10"/><text class="d-lbl sm" x="56" y="52" text-anchor="middle">Image</text><text class="d-sub" x="56" y="70" text-anchor="middle">512²×3</text>
+          <line class="d-wire" x1="104" y1="56" x2="146" y2="56" marker-end="url(#ah)"/>
+          <rect class="d-box frozen" x="150" y="30" width="92" height="52" rx="10"/><text class="d-lbl sm" x="196" y="52" text-anchor="middle">VAE enc</text><text class="d-tag frozen" x="196" y="70" text-anchor="middle">frozen</text>
+          <line class="d-wire" x1="242" y1="56" x2="284" y2="56" marker-end="url(#ah)"/>
+          <rect class="d-box plain" x="288" y="30" width="96" height="52" rx="10"/><text class="d-lbl sm" x="336" y="52" text-anchor="middle">Latent</text><text class="d-sub" x="336" y="70" text-anchor="middle">64²×4</text>
+          <line class="d-wire signal" x1="384" y1="56" x2="426" y2="56" marker-end="url(#ahs)"/>
+          <rect class="d-box frozen" x="430" y="24" width="118" height="64" rx="11"/><text class="d-lbl sm" x="489" y="49" text-anchor="middle">UNet</text><text class="d-sub" x="489" y="68" text-anchor="middle">denoise ×T</text>
+          <line class="d-wire signal" x1="548" y1="56" x2="590" y2="56" marker-end="url(#ahs)"/>
+          <rect class="d-box frozen" x="594" y="30" width="92" height="52" rx="10"/><text class="d-lbl sm" x="640" y="52" text-anchor="middle">VAE dec</text><text class="d-tag frozen" x="640" y="70" text-anchor="middle">frozen</text>
+          <line class="d-wire" x1="686" y1="56" x2="728" y2="56" marker-end="url(#ah)"/>
+          <rect class="d-box plain" x="732" y="30" width="96" height="52" rx="10"/><text class="d-lbl sm" x="780" y="56" text-anchor="middle">Image</text>
+        </g>
+        <!-- unet expansion -->
+        <line class="d-wire" x1="489" y1="88" x2="489" y2="120" marker-end="url(#ah)"/>
+        <text class="d-sub" x="512" y="110" text-anchor="start">4 resolution depths</text>
+        <g transform="translate(300,132)">
+          <rect class="d-box" x="0"   y="4"  width="150" height="26" rx="7"/><text class="d-sub" x="75" y="21" text-anchor="middle" style="fill:var(--muted)">depth 0 · 64²  (conv1 tapped)</text>
+          <rect class="d-box" x="35"  y="36" width="150" height="26" rx="7"/><text class="d-sub" x="110" y="53" text-anchor="middle" style="fill:var(--muted)">depth 1 · 32²</text>
+          <rect class="d-box" x="70"  y="68" width="150" height="26" rx="7"/><text class="d-sub" x="145" y="85" text-anchor="middle" style="fill:var(--muted)">depth 2 · 16²</text>
+          <rect class="d-box signal" x="105" y="100" width="150" height="26" rx="7"/><text class="d-sub" x="180" y="117" text-anchor="middle" style="fill:var(--signal)">depth 3 · 8²  bottleneck</text>
+          <path class="d-wire frozen" d="M300,17 q40,55 0,109" marker-end="url(#ah)"/>
+          <text class="d-sub" x="330" y="72" style="fill:var(--faint)">decoder</text>
+          <text class="d-sub" x="330" y="88" style="fill:var(--faint)">mirrors ↑</text>
+        </g>
+      </svg>
+      </div>
+      <div class="callout reveal" style="--d:.2s"><b>Two facts we lean on:</b> the whole backbone stays <span class="hi-frozen">frozen</span> (that's the efficiency), and convs decide <em>shape</em> while attention carries <em>text</em> — so structure conditioning targets the <span class="hi">convs</span> and leaves text alone. The map must reach all <strong>4 depths</strong> — the mapper (Part 3) solves that.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Analogy: sculpting from noise; the UNet chips noise each step under the prompt's guidance.</li>
+      <li>Load-bearing facts: (1) backbone frozen → cheap; (2) convs = shape, attention = text → tells us where to inject. Don't over-explain internals.</li>
+      <li>"4 depths + must reach all of them" foreshadows the mapper.</li>
+    </ul></div>
+  </section>
+
+  <!-- 6 · LORA -->
+  <section class="slide">
+    <p class="eyebrow reveal">The building block</p>
+    <h2 class="reveal" style="--d:.05s">LoRA in one slide</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s">
+          <p class="lede" style="margin-top:0">Instead of retraining a big frozen matrix <span class="hi-frozen">W</span>, learn a cheap <em>low-rank</em> correction beside it.</p>
+          <ul class="clean" style="margin-top:16px">
+            <li><span class="hi-frozen">W</span> frozen — all pretrained knowledge preserved.</li>
+            <li><span class="hi">A</span> projects <em>down</em> to a tiny rank; <span class="hi">B</span> projects back <em>up</em>. Only A, B train.</li>
+            <li><span class="hi">B</span> starts at <strong>zero</strong> → training begins as a perfect no-op.</li>
+            <li>A rank-128 pair is a rounding error next to a full matrix.</li>
+          </ul>
+        </div>
+        <div class="reveal" style="--d:.16s">
+        <svg class="diagram" viewBox="0 0 360 230" role="img" aria-label="LoRA: frozen W plus a low-rank B A branch">
+          <defs><marker id="ah2" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="var(--faint)" stroke-width="1.5"/></marker>
+          <marker id="ah2s" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.6"/></marker></defs>
+          <rect class="d-box plain" x="6" y="96" width="52" height="40" rx="9"/><text class="d-lbl" x="32" y="116" text-anchor="middle" dominant-baseline="central">x</text>
+          <line class="d-wire" x1="58" y1="116" x2="92" y2="116"/>
+          <circle cx="98" cy="116" r="3" fill="var(--faint)"/>
+          <!-- frozen path -->
+          <path class="d-wire frozen" d="M98,116 L98,52 L138,52" marker-end="url(#ah2)"/>
+          <rect class="d-box frozen" x="140" y="30" width="92" height="44" rx="10"/><text class="d-lbl sm" x="186" y="46" text-anchor="middle">W</text><text class="d-tag frozen" x="186" y="63" text-anchor="middle">frozen</text>
+          <path class="d-wire frozen" d="M232,52 L286,52 L286,104" marker-end="url(#ah2)"/>
+          <!-- signal path -->
+          <path class="d-wire signal" d="M98,116 L98,180 L134,180" marker-end="url(#ah2s)"/>
+          <rect class="d-box signal" x="136" y="158" width="60" height="44" rx="10"/><text class="d-lbl sm" x="166" y="174" text-anchor="middle">A</text><text class="d-sub" x="166" y="191" text-anchor="middle">↓ r</text>
+          <line class="d-wire signal" x1="196" y1="180" x2="214" y2="180" marker-end="url(#ah2s)"/>
+          <rect class="d-box signal" x="216" y="158" width="60" height="44" rx="10"/><text class="d-lbl sm" x="246" y="174" text-anchor="middle">B</text><text class="d-sub" x="246" y="191" text-anchor="middle">↑ up</text>
+          <path class="d-wire signal" d="M276,180 L286,180 L286,128" marker-end="url(#ah2s)"/>
+          <!-- sum -->
+          <circle class="d-node" cx="286" cy="116" r="15"/><text class="d-lbl" x="286" y="116" text-anchor="middle" dominant-baseline="central" style="font-size:18px">+</text>
+          <line class="d-wire" x1="301" y1="116" x2="326" y2="116" marker-end="url(#ah2)"/>
+          <text class="d-lbl" x="342" y="116" text-anchor="middle" dominant-baseline="central">y</text>
+        </svg>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.24s"><b>The catch:</b> classic LoRA is <em>static</em> — once trained, <span class="hi">B·A</span> does the same thing to every input. The next idea removes exactly that limitation.</div>
+    </div>
+    <div class="notes"><ul><li>Analogy: W is a textbook you can't rewrite; A/B is a thin sticky-note correction on top.</li><li>End on the word <b>static</b> — the setup for the whole contribution.</li></ul></div>
+  </section>
+
+  <!-- 7 · §02 -->
+  <section class="slide divider">
+    <div class="num reveal">02</div>
+    <h1 class="reveal" style="--d:.08s">The core idea: conditional LoRA</h1>
+    <p class="sub reveal" style="--d:.16s">One block whose correction is computed <em>live from an external signal</em> — and the same block handles structure and style.</p>
+    <div class="notes"><ul><li>"The idea the paper is about — and why we could bolt segmentation on so cleanly."</li></ul></div>
+  </section>
+
+  <!-- 8 · FILM -->
+  <section class="slide">
+    <p class="eyebrow reveal">The mechanism · FiLM</p>
+    <h2 class="reveal" style="--d:.05s">Let a signal <em>reshape</em> the LoRA branch</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s">
+          <p style="margin-top:0; color:var(--muted); font-size:15px">Insert a conditioning signal <span class="hi">c</span> that modulates the low-rank branch <strong>every forward pass</strong> — via <strong>FiLM</strong>: a learned <strong>scale γ</strong> and <strong>shift β</strong> derived from <span class="hi">c</span>.</p>
+          <div style="font-family:var(--mono); font-size:clamp(13px,1.5vw,16px); background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--signal); border-radius:10px; padding:15px 17px; margin:16px 0; line-height:1.9; box-shadow:var(--shadow)">
+            <span style="color:var(--signal)">γ</span> = scale(<span style="color:var(--muted)">c</span>)<br>
+            <span style="color:var(--signal)">β</span> = shift(<span style="color:var(--muted)">c</span>)<br>
+            out = <span style="color:var(--signal)">γ</span> · A(x) + <span style="color:var(--signal)">β</span>
+          </div>
+          <p style="color:var(--muted); font-size:14px">The correction is <strong>computed from c, live, every step</strong> — which is what makes control <strong>zero-shot</strong>: hand it a map it's never seen and it obeys.</p>
+        </div>
+        <div class="reveal" style="--d:.16s">
+        <svg class="diagram" viewBox="0 0 340 230" role="img" aria-label="FiLM modulation of the low-rank bottleneck">
+          <defs><marker id="ah3s" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.6"/></marker></defs>
+          <rect class="d-box signal" x="8" y="30" width="86" height="40" rx="10"/><text class="d-lbl sm" x="51" y="50" text-anchor="middle" dominant-baseline="central">signal c</text>
+          <path class="d-wire signal" d="M94,50 L150,50 L150,74" marker-end="url(#ah3s)"/>
+          <path class="d-wire signal" d="M94,50 L230,50 L230,74" marker-end="url(#ah3s)"/>
+          <rect class="d-box signal" x="112" y="76" width="76" height="38" rx="9"/><text class="d-lbl sm" x="150" y="95" text-anchor="middle" dominant-baseline="central">γ scale</text>
+          <rect class="d-box signal" x="192" y="76" width="76" height="38" rx="9"/><text class="d-lbl sm" x="230" y="95" text-anchor="middle" dominant-baseline="central">β shift</text>
+          <rect class="d-box plain" x="20" y="150" width="86" height="40" rx="10"/><text class="d-lbl sm" x="63" y="170" text-anchor="middle" dominant-baseline="central">A(x)</text>
+          <line class="d-wire signal" x1="106" y1="170" x2="150" y2="170" marker-end="url(#ah3s)"/>
+          <rect class="d-box" x="152" y="148" width="150" height="44" rx="10" style="stroke:var(--signal)"/><text class="d-lbl sm" x="227" y="170" text-anchor="middle" dominant-baseline="central">γ·A(x) + β</text>
+          <path class="d-wire signal" d="M150,114 L150,148"/>
+          <path class="d-wire signal" d="M230,114 L230,148"/>
+        </svg>
+        </div>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li>The pivot. "Static LoRA memorises one correction; conditional LoRA takes a fresh instruction each time it runs."</li>
+      <li>FiLM is friendly: "just multiply-and-add, but the numbers come from your signal." γ starts ×1, β at 0 — no-op at init.</li>
+    </ul></div>
+  </section>
+
+  <!-- 9 · HERO BLOCK -->
+  <section class="slide">
+    <p class="eyebrow reveal">The block · src/lora.py — the whole architecture in one picture</p>
+    <h2 class="reveal" style="--d:.05s">The conditional-LoRA block</h2>
+    <div class="fill">
+      <div class="reveal" style="--d:.12s">
+      <svg class="diagram" viewBox="0 0 860 392" role="img" aria-label="Conditional LoRA block: input x splits into frozen W and the amber A to FiLM to B branch, summed to output y">
+        <defs>
+          <marker id="hg" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--frozen)" stroke-width="1.8"/></marker>
+          <marker id="hs" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.8"/></marker>
+          <marker id="hn" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--faint)" stroke-width="1.6"/></marker>
+        </defs>
+        <!-- legend -->
+        <rect x="20" y="16" width="12" height="12" rx="3" fill="var(--frozen-soft)" stroke="var(--frozen)"/><text class="d-sub" x="40" y="26" style="fill:var(--muted)">frozen — base model preserved</text>
+        <rect x="250" y="16" width="12" height="12" rx="3" fill="var(--signal-soft)" stroke="var(--signal)"/><text class="d-sub" x="270" y="26" style="fill:var(--muted)">trainable — the seg map modulates only this branch</text>
+        <!-- input x  (main axis y=190) -->
+        <rect class="d-box plain" x="20" y="166" width="70" height="48" rx="11"/><text class="d-lbl" x="55" y="190" text-anchor="middle" dominant-baseline="central">x</text>
+        <line class="d-wire" x1="90" y1="190" x2="130" y2="190"/>
+        <circle cx="130" cy="190" r="4" fill="var(--faint)"/>
+        <!-- frozen top lane (y=90) -->
+        <path class="d-wire frozen" d="M130,190 L130,90 L246,90" marker-end="url(#hg)"/>
+        <rect class="d-box frozen" x="250" y="62" width="170" height="56" rx="12"/><text class="d-lbl" x="335" y="86" text-anchor="middle">W(x)</text><text class="d-tag frozen" x="335" y="106" text-anchor="middle">frozen conv · untouched</text>
+        <path class="d-wire frozen" d="M420,90 L690,90 L690,164" marker-end="url(#hg)"/>
+        <!-- signal bottom lane (y=290) -->
+        <path class="d-wire signal" d="M130,190 L130,290 L206,290" marker-end="url(#hs)"/>
+        <rect class="d-box signal" x="210" y="262" width="92" height="56" rx="12"/><text class="d-lbl sm" x="256" y="284" text-anchor="middle">A</text><text class="d-sub" x="256" y="302" text-anchor="middle">↓ rank r</text>
+        <line class="d-wire signal" x1="302" y1="290" x2="340" y2="290" marker-end="url(#hs)"/>
+        <rect class="d-box" x="344" y="262" width="150" height="56" rx="12" style="stroke:var(--signal); stroke-width:2.4"/><text class="d-lbl sm" x="419" y="282" text-anchor="middle">FiLM</text><text class="d-sub" x="419" y="301" text-anchor="middle" style="fill:var(--signal)">γ·A(x) + β</text>
+        <line class="d-wire signal" x1="494" y1="290" x2="532" y2="290" marker-end="url(#hs)"/>
+        <rect class="d-box signal" x="536" y="262" width="90" height="56" rx="12"/><text class="d-lbl sm" x="581" y="284" text-anchor="middle">B</text><text class="d-sub" x="581" y="302" text-anchor="middle">↑ up</text>
+        <line class="d-wire signal" x1="626" y1="290" x2="666" y2="290" marker-end="url(#hs)"/>
+        <circle class="d-node" cx="690" cy="290" r="20"/><text class="d-lbl sm" x="690" y="290" text-anchor="middle" dominant-baseline="central" style="fill:var(--signal)">×λ</text>
+        <path class="d-wire signal" d="M690,270 L690,216" marker-end="url(#hs)"/>
+        <!-- conditioning input c (under FiLM, x=419) -->
+        <rect class="d-box signal" x="344" y="336" width="150" height="40" rx="10"/><text class="d-lbl sm" x="419" y="356" text-anchor="middle" dominant-baseline="central">seg map  c</text>
+        <path class="d-wire signal" d="M400,336 L400,318" marker-end="url(#hs)"/>
+        <path class="d-wire signal" d="M438,336 L438,318" marker-end="url(#hs)"/>
+        <text class="d-tag" x="384" y="332" text-anchor="middle">γ</text>
+        <text class="d-tag" x="454" y="332" text-anchor="middle">β</text>
+        <!-- sum (main axis y=190, x=690) -->
+        <circle class="d-node" cx="690" cy="190" r="24" style="stroke-width:2.4"/><text class="d-lbl" x="690" y="190" text-anchor="middle" dominant-baseline="central" style="font-size:22px">+</text>
+        <text class="d-tag" x="672" y="150" text-anchor="end" style="fill:var(--muted)">additive residual</text>
+        <line class="d-wire" x1="714" y1="190" x2="766" y2="190" marker-end="url(#hn)"/>
+        <rect class="d-box plain" x="770" y="166" width="66" height="48" rx="11"/><text class="d-lbl" x="803" y="190" text-anchor="middle" dominant-baseline="central">y</text>
+      </svg>
+      </div>
+      <div class="callout reveal" style="--d:.2s"><b>Read it:</b> <span class="hi-frozen">W(x)</span> runs untouched · the map <span class="hi">c</span> never touches x, it only reshapes the tiny <span class="hi">A→FiLM→B</span> branch · the result is <em>added on top</em>, scaled by a live <code>λ</code> (<code>lora_scale</code>) you can dial <span class="hi">0 → off</span> anytime.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>THE centerpiece. Trace the two paths out loud: blue W is the untouched base; amber is x→A→FiLM(modulated by the seg map)→B→scaled by λ→added to W. The animated amber wires show the signal flowing.</li>
+      <li>Everything else in the talk is "where does this block live and how does c arrive." If they get this diagram, they get the paper.</li>
+      <li><code>λ</code> is read live every forward pass — that's the inference knob in Part 5.</li>
+    </ul></div>
+  </section>
+
+  <!-- 10 · STRUCTURE VS STYLE -->
+  <section class="slide">
+    <p class="eyebrow reveal">One block, two jobs · when to use what</p>
+    <h2 class="reveal" style="--d:.05s">Structure vs style — and how you tune it</h2>
+    <div class="fill">
+      <div class="cols two">
+        <div class="card accent reveal" style="--d:.1s"><h3><span class="dot s"></span>Structure</h3>
+          <p><b>Controls:</b> spatial layout &amp; form — <em>where</em> things go.</p>
+          <p><b>Signal c:</b> a spatial map (depth / <strong>segmentation</strong>), per-pixel.</p>
+          <p><b>γ, β are:</b> 1×1 convs → a different scale/shift at <em>every pixel</em>.</p>
+          <p><b>Use when:</b> you have a mask / layout the image must follow.</p>
+        </div>
+        <div class="card frozen reveal" style="--d:.16s"><h3><span class="dot f"></span>Style</h3>
+          <p><b>Controls:</b> global appearance &amp; texture — <em>how</em> it looks.</p>
+          <p><b>Signal c:</b> a single pooled vector (CLIP embedding of a reference).</p>
+          <p><b>γ, β are:</b> linear layers → one scale/shift for the whole feature.</p>
+          <p><b>Use when:</b> you want to match a reference image's look.</p>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.22s"><b>Tuning — one knob, both modes:</b> <code>lora_scale</code> is read live every step. <span class="hi">1.0</span> = full control · <span class="hi">0</span> = off · <strong>decay it across steps</strong> to lock layout early then hand appearance back to the model. For structure, a <strong>softening kernel</strong> blurs hard silhouette edges. <b>Same equation throughout</b> — only the shape of <code>c</code> changes. That unification is why the parameter count stays tiny.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>The "aha" behind the title — <b>CTRL</b> (structure) <b>or ALT</b> (style), one formulation. Only real code difference: c is a spatial map (convs) or a pooled vector (linears).</li>
+      <li>Tuning payoff: lora_scale = master dial; decay trades rigidity for realism; kernel = structure-only edge softener. All inference-time.</li>
+      <li>Unification = not paying for two control systems, and our new seg source rides the same rails.</li>
+    </ul></div>
+  </section>
+
+  <!-- 11 · §03 -->
+  <section class="slide divider">
+    <div class="num reveal">03</div>
+    <h1 class="reveal" style="--d:.08s">Inside the architecture</h1>
+    <p class="sub reveal" style="--d:.16s">Which layers get adapted, how the block is inserted without touching diffusers, and how one signal reaches all four resolutions.</p>
+    <div class="notes"><ul><li>"The engineering people hand-wave — and the part that made our extension a drop-in."</li></ul></div>
+  </section>
+
+  <!-- 12 · CLASSES + PLACEMENT -->
+  <section class="slide">
+    <p class="eyebrow reveal">Placement · src/lora.py + src/model.py</p>
+    <h2 class="reveal" style="--d:.05s">Same skeleton, wrapping only <code>conv1</code></h2>
+    <div class="fill">
+      <div class="tbl-wrap reveal" style="--d:.1s">
+        <table>
+          <thead><tr><th>Class</th><th>Wraps</th><th>Signal c</th><th>γ / β</th><th>Used for</th></tr></thead>
+          <tbody>
+            <tr><td><b>NewStructLoRAConv</b></td><td>conv2d</td><td>spatial map</td><td>1×1 convs · per-pixel</td><td><span class="hi">structure — depth &amp; our seg</span></td></tr>
+            <tr><td><b>SimpleLoraLinear</b></td><td>attn to_k/to_v</td><td>pooled vector</td><td>linear · global</td><td><span class="hi-frozen">style</span></td></tr>
+            <tr><td><b>LoRAConv</b></td><td>conv2d</td><td>pooled vector</td><td>linear · per-channel</td><td style="color:var(--faint)">available, unused</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="cols split" style="margin-top:16px">
+        <div class="reveal" style="--d:.16s">
+          <ul class="clean tight">
+            <li>All three share the skeleton: frozen <span class="hi-frozen">W</span> + trainable <span class="hi">A/B</span> + FiLM <span class="hi">γ/β</span>. Only the signal shape and conv-vs-linear differ.</li>
+            <li><code>adaption_mode: only_res_conv</code> wraps <strong>only <code>conv1</code></strong> of the first two ResNet blocks per stage.</li>
+            <li><span class="hi-frozen">Not</span> conv2. <span class="hi-frozen">Not</span> attention — the text path is untouched, so prompts still work.</li>
+          </ul>
+        </div>
+        <div class="reveal" style="--d:.22s">
+        <svg class="diagram" viewBox="0 0 320 150" role="img" aria-label="Only conv1 of the ResNet block is adapted">
+          <text class="d-sub" x="160" y="14" text-anchor="middle" style="fill:var(--faint)">one ResNet block</text>
+          <rect class="d-box signal" x="30" y="26" width="260" height="38" rx="9"/><text class="d-lbl sm" x="150" y="41" text-anchor="middle">conv1 → NewStructLoRAConv</text><text class="d-tag" x="150" y="57" text-anchor="middle">✓ adapted</text>
+          <rect class="d-box frozen" x="30" y="74" width="260" height="30" rx="9"/><text class="d-sub" x="150" y="92" text-anchor="middle" style="fill:var(--muted)">conv2 — frozen, untouched</text>
+          <rect class="d-box frozen" x="30" y="112" width="260" height="30" rx="9"/><text class="d-sub" x="150" y="130" text-anchor="middle" style="fill:var(--muted)">attention (to text) — frozen, untouched</text>
+        </svg>
+        </div>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li>Point at the pattern, not the cells: one block, three signal shapes.</li>
+      <li>"Only conv1" = max control per parameter (convs carry local shape); frozen attention keeps text working. That surgical footprint is why it's cheap.</li>
+    </ul></div>
+  </section>
+
+  <!-- 13 · SETATTR -->
+  <section class="slide">
+    <p class="eyebrow reveal">The trick · zero framework changes</p>
+    <h2 class="reveal" style="--d:.05s">Inserted by a single <code>setattr</code></h2>
+    <div class="fill">
+      <div class="cols split" style="align-items:center">
+        <div class="reveal" style="--d:.1s">
+          <ul class="clean">
+            <li>For each matched layer: build a <code>NewStructLoRAConv</code>, <strong>copy the original pretrained weights into its frozen <span class="hi-frozen">W</span></strong>, then swap it in:</li>
+          </ul>
+          <pre style="margin:14px 0"><span class="k">setattr</span>(parent, <span class="s">"conv1"</span>, lora)</pre>
+          <ul class="clean">
+            <li>Diffusers' own code still calls <code>self.conv1(x)</code> — and transparently runs the LoRA math. It has no idea anything swapped.</li>
+            <li><strong>No hooks, no monkeypatch, no forked diffusers.</strong> PyTorch's dynamic attribute lookup does the rest — survives upgrades.</li>
+          </ul>
+        </div>
+        <div class="reveal" style="--d:.18s">
+        <svg class="diagram" viewBox="0 0 340 210" role="img" aria-label="setattr reroutes self.conv1 to the LoRA module">
+          <defs><marker id="ah5s" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.8"/></marker></defs>
+          <text class="d-sub" x="170" y="16" text-anchor="middle" style="fill:var(--faint)">stock diffusers · never edited</text>
+          <rect class="d-box" x="30" y="28" width="280" height="52" rx="11"/><text class="d-lbl sm" x="170" y="48" text-anchor="middle">ResnetBlock.forward()</text><text class="d-sub" x="170" y="66" text-anchor="middle">hidden = self.conv1(hidden)</text>
+          <path class="d-wire signal" d="M170,80 L170,120" marker-end="url(#ah5s)"/>
+          <text class="d-tag" x="196" y="104" text-anchor="start">resolves to</text>
+          <rect class="d-box signal" x="60" y="124" width="220" height="54" rx="11"/><text class="d-lbl sm" x="170" y="145" text-anchor="middle">NewStructLoRAConv</text><text class="d-sub" x="170" y="163" text-anchor="middle" style="fill:var(--signal)">the swapped-in module</text>
+          <text class="d-sub" x="170" y="198" text-anchor="middle" style="fill:var(--faint)">one setattr reroutes the whole computation</text>
+        </svg>
+        </div>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li>Genuinely elegant — dwell. Zero diffusers changes = works with stock pipeline, survives upgrades.</li>
+      <li>Analogy: didn't rewrite the recipe; swapped one ingredient jar for a smarter one that looks identical.</li>
+      <li>This is <i>why our seg extension was clean</i> — we never touched this machinery.</li>
+    </ul></div>
+  </section>
+
+  <!-- 14 · FANOUT -->
+  <section class="slide">
+    <p class="eyebrow reveal">The whole picture · one denoising step</p>
+    <h2 class="reveal" style="--d:.05s">One map → the entire UNet</h2>
+    <div class="fill">
+      <div class="reveal" style="--d:.12s">
+      <svg class="diagram" viewBox="0 0 900 300" role="img" aria-label="One segmentation map, through the mapper into four resolution maps, delivered by depth index across the UNet">
+        <defs><marker id="ah6s" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.8"/></marker>
+        <marker id="ah6" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--faint)" stroke-width="1.6"/></marker></defs>
+        <!-- source + mapper -->
+        <rect class="d-box signal" x="14" y="120" width="110" height="56" rx="12"/><text class="d-lbl sm" x="69" y="142" text-anchor="middle">seg / depth</text><text class="d-sub" x="69" y="160" text-anchor="middle">map</text>
+        <line class="d-wire signal" x1="124" y1="148" x2="160" y2="148" marker-end="url(#ah6s)"/>
+        <rect class="d-box signal" x="164" y="118" width="96" height="60" rx="12"/><text class="d-lbl sm" x="212" y="142" text-anchor="middle">mapper</text><text class="d-sub" x="212" y="160" text-anchor="middle">→ 4 maps</text>
+        <!-- 4 conditioning maps -->
+        <g>
+          <rect class="d-box signal" x="300" y="40"  width="88" height="34" rx="8"/><text class="d-sub" x="344" y="61" text-anchor="middle" style="fill:var(--signal)">out0 · 64²</text>
+          <rect class="d-box signal" x="300" y="110" width="88" height="34" rx="8"/><text class="d-sub" x="344" y="131" text-anchor="middle" style="fill:var(--signal)">out1 · 32²</text>
+          <rect class="d-box signal" x="300" y="180" width="88" height="34" rx="8"/><text class="d-sub" x="344" y="201" text-anchor="middle" style="fill:var(--signal)">out2 · 16²</text>
+          <rect class="d-box signal" x="300" y="250" width="88" height="34" rx="8"/><text class="d-sub" x="344" y="271" text-anchor="middle" style="fill:var(--signal)">out3 · 8²</text>
+          <path class="d-wire signal" d="M260,148 L280,148 L280,57 L300,57" marker-end="url(#ah6s)"/>
+          <path class="d-wire signal" d="M280,148 L280,127 L300,127" marker-end="url(#ah6s)"/>
+          <path class="d-wire signal" d="M280,148 L280,197 L300,197" marker-end="url(#ah6s)"/>
+          <path class="d-wire signal" d="M280,148 L280,267 L300,267" marker-end="url(#ah6s)"/>
+        </g>
+        <!-- UNet U -->
+        <g>
+          <text class="d-sub" x="620" y="24" text-anchor="middle" style="fill:var(--faint)">frozen UNet — each wrapped conv1 pulls cs[depth]</text>
+          <rect class="d-box frozen" x="470" y="40"  width="120" height="34" rx="8"/><text class="d-sub" x="530" y="61" text-anchor="middle" style="fill:var(--muted)">depth 0 · down</text>
+          <rect class="d-box frozen" x="500" y="110" width="120" height="34" rx="8"/><text class="d-sub" x="560" y="131" text-anchor="middle" style="fill:var(--muted)">depth 1</text>
+          <rect class="d-box frozen" x="530" y="180" width="120" height="34" rx="8"/><text class="d-sub" x="590" y="201" text-anchor="middle" style="fill:var(--muted)">depth 2</text>
+          <rect class="d-box frozen" x="560" y="250" width="120" height="34" rx="8"/><text class="d-sub" x="620" y="271" text-anchor="middle" style="fill:var(--muted)">depth 3 · mid</text>
+          <rect class="d-box frozen" x="700" y="180" width="120" height="34" rx="8"/><text class="d-sub" x="760" y="201" text-anchor="middle" style="fill:var(--muted)">depth 2 · up</text>
+          <rect class="d-box frozen" x="730" y="110" width="120" height="34" rx="8"/><text class="d-sub" x="790" y="131" text-anchor="middle" style="fill:var(--muted)">depth 1 · up</text>
+          <rect class="d-box frozen" x="760" y="40"  width="120" height="34" rx="8"/><text class="d-sub" x="820" y="61" text-anchor="middle" style="fill:var(--muted)">depth 0 · up</text>
+          <!-- deliver by depth -->
+          <path class="d-wire signal" d="M388,57 L470,57" marker-end="url(#ah6s)"/>
+          <path class="d-wire signal" d="M388,127 L500,127" marker-end="url(#ah6s)"/>
+          <path class="d-wire signal" d="M388,197 L530,197" marker-end="url(#ah6s)"/>
+          <path class="d-wire signal" d="M388,267 L560,267" marker-end="url(#ah6s)"/>
+          <!-- same-depth up path shares the map -->
+          <path class="d-wire signal" d="M388,57 L430,57 L430,20 L820,20 L820,40" marker-end="url(#ah6s)" opacity=".55"/>
+        </g>
+      </svg>
+      </div>
+      <div class="callout reveal" style="--d:.2s"><b>The efficiency:</b> one mapper pass makes exactly 4 conditioning maps; each wrapped <code>conv1</code> grabs <code>cs[depth]</code> — its own resolution. Down &amp; up paths at one resolution <strong>share</strong> a map. One pass conditions the <em>whole</em> UNet, per step.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Money slide — pause. The mapper fans one map into 4; the depth index routes each to the right layer; mirror paths reuse maps.</li>
+      <li>Answers the "reach all 4 depths" question from Part 1.</li>
+    </ul></div>
+  </section>
+
+  <!-- 15 · §04 OUR WORK -->
+  <section class="slide divider hero-div">
+    <div class="num reveal">04</div>
+    <h1 class="reveal" style="--d:.08s">Our work: segmentation on a depth-native repo</h1>
+    <p class="sub reveal" style="--d:.16s">The design decisions, the real-data bugs we fixed, the two map sources, and the diagnostics we built to prove it works.</p>
+    <div class="notes"><ul><li>"Everything so far was the language. Here's what we built — more than a port."</li></ul></div>
+  </section>
+
+  <!-- 15b · WHAT CHANGED VS ORIGINAL REPO -->
+  <section class="slide">
+    <p class="eyebrow reveal">From the original repo → segmentation</p>
+    <h2 class="reveal" style="--d:.05s">What we changed — and what we didn't</h2>
+    <div class="fill">
+      <div class="reveal" style="--d:.1s; display:flex; flex-direction:column; gap:12px">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <span style="font-family:var(--mono); font-size:11.5px; color:var(--frozen); min-width:118px">STOCK LoRAdapter</span>
+          <div class="node frozen"><span class="t">image + caption</span></div><span class="arrow">→</span>
+          <div class="node"><span class="t">cs = [image]</span></div><span class="arrow">→</span>
+          <div class="node frozen"><span class="t">MiDaS encoder</span><span class="s">LIVE every step</span></div><span class="arrow">→</span>
+          <div class="node" style="border-style:dashed"><span class="t">mapper → LoRA → UNet</span></div>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <span style="font-family:var(--mono); font-size:11.5px; color:var(--signal); min-width:118px">OUR SEG EXTENSION</span>
+          <div class="node signal"><span class="t">image + SAVED seg map + prompt</span></div><span class="arrow s">→</span>
+          <div class="node signal"><span class="t">cs = seg map</span><span class="s">skip_encode=True</span></div><span class="arrow s">→</span>
+          <div class="node"><span class="t">(no encoder run)</span></div><span class="arrow s">→</span>
+          <div class="node" style="border-style:dashed"><span class="t">mapper → LoRA → UNet</span><span class="s">IDENTICAL, unmodified</span></div>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.2s"><b>We only changed the FRONT of the pipeline</b> — how the conditioning map is produced. Stock computes depth <em>live</em> from the photo (<code>cs = [imgs]</code>); we feed a <em>pre-saved</em> segmentation map with <code>skip_encode=True</code>. The <span class="hi">back half — mapper, FiLM LoRA, UNet injection — is byte-identical stock code.</span></div>
+      <div class="cols two reveal" style="--d:.26s">
+        <div class="card frozen"><h3><span class="dot f"></span>Unchanged (stock)</h3><p style="font-family:var(--mono); font-size:12px; margin:0"><code>train.py</code> · <code>src/lora.py</code> · <code>src/mapper_network.py</code> · <code>configs/lora/struct.yaml</code> — the LoRA block, mapper &amp; training loop are untouched.</p></div>
+        <div class="card accent"><h3><span class="dot s"></span>New / added by us</h3><p style="font-family:var(--mono); font-size:12px; margin:0"><code>local_seg.py</code> (dataset) · <code>seg_palette.py</code> (colourise) · SegFormer + Grounded-SAM encoders · offline calc · configs · diagnostics</p></div>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li><b>This is the slide that shows how we extended the repo.</b> Say it plainly: stock LoRAdapter's key line is <code>cs = [imgs]</code> — it hands the raw photo to a LIVE MiDaS encoder that computes depth on the fly, every training step. Dataset needs only (image, caption).</li>
+      <li>Our two departures: (1) feed a <b>pre-saved</b> seg map instead, with <code>skip_encode=True</code> so the live encoder never runs; (2) a dataset that reads (image, seg_map, prompt). Verified against GROUNDED_SAM.md §A.7–A.10.</li>
+      <li>The punchline: the entire generative core — mapper, FiLM LoRA, UNet injection — is <b>unmodified stock code</b>. We changed how the map is made, not how it's used. That's why it was clean.</li>
+    </ul></div>
+  </section>
+
+  <!-- 16 · CHALLENGE + APPROACH -->
+  <section class="slide">
+    <p class="eyebrow reveal">Our contribution · the approach</p>
+    <h2 class="reveal" style="--d:.05s">Add a new modality without touching the core</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s">
+          <ul class="clean">
+            <li><b>Starting point:</b> LoRAdapter ships <em>depth</em> (via MiDaS) and <em>style</em>. Segmentation is <strong>not in the paper</strong> — no stock seg encoder exists.</li>
+            <li><b>Goal:</b> make segmentation a first-class structure signal, and compare depth- vs seg-conditioned generation head-to-head.</li>
+            <li><b>Principle:</b> <strong>mirror the depth pipeline exactly.</strong> Build our seg encoder to satisfy the <em>same encoder-slot contract</em> → it drops into the same chain with <span class="hi-good">zero changes to model.py or the mapper.</span></li>
+          </ul>
+        </div>
+        <div class="reveal" style="--d:.16s">
+        <svg class="diagram" viewBox="0 0 340 210" role="img" aria-label="Our seg encoder matches the depth encoder-slot contract">
+          <defs><marker id="ah7s" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="var(--signal)" stroke-width="1.8"/></marker></defs>
+          <text class="d-sub" x="170" y="16" text-anchor="middle" style="fill:var(--faint)">the encoder-slot contract we matched</text>
+          <rect class="d-box" x="40" y="28" width="260" height="48" rx="11"/><text class="d-lbl sm" x="170" y="47" text-anchor="middle">IN · [B,3,H,W] in [−1,1]</text><text class="d-sub" x="170" y="64" text-anchor="middle">raw image tensor</text>
+          <path class="d-wire signal" d="M170,76 L170,110" marker-end="url(#ah7s)"/>
+          <text class="d-tag" x="196" y="98" text-anchor="start">our seg encoder</text>
+          <rect class="d-box signal" x="40" y="114" width="260" height="48" rx="11"/><text class="d-lbl sm" x="170" y="133" text-anchor="middle">OUT · [B,3,size,size] in [0,1]</text><text class="d-sub" x="170" y="150" text-anchor="middle" style="fill:var(--signal)">colour seg map</text>
+          <text class="d-sub" x="170" y="192" text-anchor="middle" style="fill:var(--muted)">identical shape/range to depth → the mapper never knows the difference</text>
+        </svg>
+        </div>
+      </div>
+      <div class="callout good reveal" style="--d:.24s"><b>Discipline that kept it comparable:</b> four strictly separated stages — depth-calc, depth-train, seg-calc, seg-train. Calculation never mixes with training; depth and seg never share code paths. That's what makes a depth-vs-seg comparison scientifically valid.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Core engineering flex: <b>added a whole modality with zero model-core changes</b> — by respecting the contract instead of hacking around it.</li>
+      <li>"Mirror depth exactly" is deliberate — the end goal is a fair depth-vs-seg comparison, valid only if pipelines are identical except the signal.</li>
+    </ul></div>
+  </section>
+
+  <!-- 17 · PALETTE DECISION -->
+  <section class="slide">
+    <p class="eyebrow reveal">The key design decision</p>
+    <h2 class="reveal" style="--d:.05s">Colour, not raw class-IDs</h2>
+    <div class="fill">
+      <div class="reveal" style="--d:.1s">
+      <svg class="diagram" viewBox="0 0 900 220" role="img" aria-label="A grayscale id ramp imposes false ordering; distinct colours keep classes separable">
+        <defs>
+          <linearGradient id="ramp" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#2b2b2b"/><stop offset="1" stop-color="#dcdcdc"/>
+          </linearGradient>
+        </defs>
+        <!-- LEFT: naive ramp -->
+        <text class="d-redt" x="30" y="26">✗ naive — feed id / N as a grayscale ramp</text>
+        <rect x="30" y="40" width="360" height="46" rx="8" fill="url(#ramp)" stroke="var(--line-strong)"/>
+        <g font-family="var(--mono)" font-size="11">
+          <line x1="150" y1="40" x2="150" y2="98" stroke="var(--warn)" stroke-width="1.4"/><text class="d-sub" x="150" y="112" text-anchor="middle">fence(4)</text>
+          <line x1="185" y1="40" x2="185" y2="98" stroke="var(--warn)" stroke-width="1.4"/><text class="d-sub" x="185" y="126" text-anchor="middle">pole(5)</text>
+          <line x1="220" y1="40" x2="220" y2="98" stroke="var(--warn)" stroke-width="1.4"/><text class="d-sub" x="220" y="112" text-anchor="middle">light(6)</text>
+        </g>
+        <text class="d-redt" x="30" y="160">≈ equidistant neighbours — a false order the model learns as truth</text>
+        <text class="d-sub" x="30" y="182" style="fill:var(--muted)">"pole" is not between "fence" and "traffic light" — but the ramp says it is</text>
+        <!-- divider -->
+        <line x1="450" y1="20" x2="450" y2="196" stroke="var(--line)" stroke-width="1.5"/>
+        <!-- RIGHT: distinct colours -->
+        <text class="d-greent" x="480" y="26">✓ ours — distinct, well-separated RGB per class</text>
+        <g stroke="var(--line-strong)">
+          <rect x="480" y="40" width="46" height="46" rx="7" fill="rgb(128,64,128)"/>
+          <rect x="532" y="40" width="46" height="46" rx="7" fill="rgb(244,35,232)"/>
+          <rect x="584" y="40" width="46" height="46" rx="7" fill="rgb(70,70,70)"/>
+          <rect x="636" y="40" width="46" height="46" rx="7" fill="rgb(107,142,35)"/>
+          <rect x="688" y="40" width="46" height="46" rx="7" fill="rgb(70,130,180)"/>
+          <rect x="740" y="40" width="46" height="46" rx="7" fill="rgb(220,20,60)"/>
+          <rect x="792" y="40" width="46" height="46" rx="7" fill="rgb(0,0,142)"/>
+        </g>
+        <text class="d-sub" x="480" y="112" style="fill:var(--muted)">road · sidewalk · building · veg · sky · person · car …</text>
+        <text class="d-greent" x="480" y="160">each class unique &amp; separable — the seg analogue of depth's smooth signal</text>
+        <text class="d-sub" x="480" y="182" style="fill:var(--muted)">exactly what ControlNet-Seg does · NEAREST-only resize (averaging IDs invents classes)</text>
+      </svg>
+      </div>
+      <div class="callout reveal" style="--d:.2s"><b>Why it's the crux:</b> the mapper is a conv built for depth's <em>continuous</em> gradient. Colourising turns categorical labels into a signal it can actually read — and a <strong>fixed palette</strong> guarantees train/inference parity (same class → same colour, always). We save raw IDs and colourise <em>at load</em>, so a palette change never re-runs the segmenter.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Shows we <i>understood</i> the architecture, not just wired it. The categorical-vs-continuous insight is why colourisation is non-negotiable.</li>
+      <li>NEAREST-only is subtle but critical — bilinear would fabricate class labels at boundaries.</li>
+      <li>Save-IDs-colourise-at-load: palette is a free, re-runnable choice, and it enforces parity.</li>
+    </ul></div>
+  </section>
+
+  <!-- 18 · REAL DATA ENGINEERING -->
+  <section class="slide">
+    <p class="eyebrow reveal">Making it survive real data</p>
+    <h2 class="reveal" style="--d:.05s">Bugs we found &amp; fixed on real maps</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s; display:flex; flex-direction:column; gap:14px">
+          <div class="cols two" style="gap:14px">
+            <div class="card"><h3><span class="dot g"></span>16-bit format</h3><p>Real CARLA masks are <strong>I;16 PNGs</strong>, not 8-bit. We read <strong>raw pixels</strong> (no <code>.convert("L")</code>) — labels survive <em>any</em> Pillow version.</p></div>
+            <div class="card good"><h3><span class="dot g"></span>Parity rule</h3><p>Train &amp; inference maps must use the <strong>same model + preprocessing + value range</strong>, or distributions diverge.</p></div>
+          </div>
+          <div class="card"><h3>resize_mode toggle</h3><p><strong>letterbox</strong> (keep whole scene + pad band) vs <strong>CenterCrop</strong> (crop edges) — the mask uses the <em>same</em> geometry as its RGB, so they can't drift apart.</p></div>
+        </div>
+        <div class="card warn reveal" style="--d:.18s">
+          <h3><span class="dot w"></span>The alignment bug — fixed <span class="fileref" style="margin-left:auto">5db3624</span></h3>
+          <svg class="diagram" viewBox="0 0 300 150" role="img" aria-label="Stretched mask misaligns with letterboxed RGB by about 19 percent" style="margin:6px 0">
+            <!-- RGB letterboxed -->
+            <text class="d-sub" x="70" y="14" text-anchor="middle" style="fill:var(--muted)">RGB · letterboxed</text>
+            <rect x="20" y="20" width="100" height="110" rx="6" class="d-box"/>
+            <rect x="20" y="20" width="100" height="20" fill="var(--surface-2)"/>
+            <rect x="20" y="110" width="100" height="20" fill="var(--surface-2)"/>
+            <line x1="20" y1="75" x2="120" y2="75" stroke="var(--good)" stroke-width="2.5"/>
+            <text class="d-greent" x="124" y="78" style="font-size:10px">horizon</text>
+            <!-- mask stretched -->
+            <text class="d-sub" x="230" y="14" text-anchor="middle" style="fill:var(--muted)">mask · stretched (old)</text>
+            <rect x="180" y="20" width="100" height="110" rx="6" class="d-box"/>
+            <line x1="180" y1="52" x2="280" y2="52" stroke="var(--warn)" stroke-width="2.5"/>
+            <!-- offset bracket -->
+            <line x1="150" y1="52" x2="150" y2="75" stroke="var(--warn)" stroke-width="1.6"/>
+            <path d="M146,52 L150,52 M146,75 L150,75" stroke="var(--warn)" stroke-width="1.6"/>
+            <text class="d-redt" x="156" y="66" style="font-size:10px">~19%</text>
+          </svg>
+          <p style="margin:0">Non-square 1280×800 masks were NEAREST-<em>stretched</em> to square while the RGB was <em>letterboxed</em> → up to <strong>96px / ~19%</strong> misalignment at frame edges. Conditioning and target disagreed on <em>where</em> content sits. Fix: letterbox the mask with matching geometry.</p>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.26s">These aren't a port — this is the unglamorous, load-bearing work of making a research pipeline hold up on <em>real</em> simulator data.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Frame as "what breaks leaving the paper's clean setup for real CARLA data." Each was a genuine bug with a real fix.</li>
+      <li>The alignment bug is the strongest story — a ~19% spatial mismatch between conditioning and supervision, invisible until you inspect real output. Cite the commit.</li>
+      <li>Parity rule = the single most important reproduction lesson. Say it slowly.</li>
+    </ul></div>
+  </section>
+
+  <!-- 19 · TWO MAP SOURCES -->
+  <section class="slide">
+    <p class="eyebrow reveal">One contract, two front-ends</p>
+    <h2 class="reveal" style="--d:.05s">Two ways to make the map: SegFormer &amp; Grounded-SAM</h2>
+    <div class="fill">
+      <p class="reveal" style="--d:.1s; margin-top:0; color:var(--muted); font-size:14.5px">Both satisfy the <em>same</em> encoder-slot contract, so they're interchangeable — the generative core never changes. Only the <strong>front end</strong> differs:</p>
+      <div class="tbl-wrap reveal" style="--d:.16s; margin-top:12px">
+        <table>
+          <thead><tr><th></th><th><span class="dot s"></span> SegFormer</th><th><span class="dot f"></span> Grounded-SAM</th></tr></thead>
+          <tbody>
+            <tr><td><b>Where the map comes from</b></td><td>A real segmenter (SegFormer-b5, ~82M) run offline on photos</td><td>CARLA's segmentation camera — labelled at capture, no model runs</td></tr>
+            <tr><td><b>Taxonomy</b></td><td>19 Cityscapes classes, fixed</td><td>29 CARLA classes, open / configurable</td></tr>
+            <tr><td><b>Saved format</b></td><td>8-bit class-ID PNG</td><td>16-bit I;16 PNG, 1280×800</td></tr>
+            <tr><td><b>Encoder in repo</b></td><td>Full <b>live</b> encoder — can segment new photos</td><td><b>Tier-1</b> training-only slot filler — no live path</td></tr>
+            <tr><td><b>mIoU controllability metric</b></td><td><span class="hi-good">Available</span> — re-segments the generated image</td><td>Skipped automatically (no live segmenter)</td></tr>
+            <tr><td><b>Conditioning core</b></td><td colspan="2" style="text-align:center; color:var(--good); font-weight:600">identical — same NewStructLoRAConv · mapper · struct LoRA · skip_encode · frozen SD1.5</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout reveal" style="--d:.22s"><b>The point isn't the table — it's the design.</b> One contract absorbs a real-world segmenter <em>and</em> a simulator's native labels with no core change. SegFormer = general + self-scoring (mIoU) but 19 fixed classes; Grounded-SAM = 29-class richness + free sim labels, but no live inference.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Lead with the last row: "everything below the front end is identical." The rest are front-end trade-offs our contract absorbs.</li>
+      <li>mIoU asymmetry is the interesting one: SegFormer grades its own output; Grounded-SAM can't, so we skip rather than fake it.</li>
+      <li>Separate branches keep taxonomy/format assumptions from leaking between pipelines.</li>
+    </ul></div>
+  </section>
+
+  <!-- 20 · DIAGNOSTICS -->
+  <section class="slide">
+    <p class="eyebrow reveal">Proving it works · our harness</p>
+    <h2 class="reveal" style="--d:.05s">What we built to watch it learn</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s">
+          <figure class="imgslot" style="--ar:16/6">
+            <div class="imgslot-frame">
+              <!-- To use a real screenshot: replace this hint div with  <img src="data:image/png;base64,...."> -->
+              <span class="imgslot-hint"><span class="ic">▦</span><b>Drop your checkpoint grid here</b>ORIGINAL · SEG MAP · GEN +prompt · GEN −prompt</span>
+            </div>
+            <figcaption><b>Checkpoint monitoring grid</b> — fixed val scenes, rendered at every save</figcaption>
+          </figure>
+          <p style="margin:12px 0 0; color:var(--muted); font-size:13.5px">The empty-prompt panel isolates <em>pure</em> structure adherence — did it follow the map, or did the prompt do the work?</p>
+        </div>
+        <div class="reveal" style="--d:.18s">
+          <ul class="clean tight">
+            <li><b>PSNR + SSIM</b> per checkpoint vs the real image — a comparable quality <em>trend</em> across a run.</li>
+            <li><b>mIoU controllability</b> (SegFormer): re-segment the output, measure "did it follow the structure?"</li>
+            <li><b>Dataset diagnostics</b>: class-coverage scans catch training-data gaps <em>before</em> we blame the model.</li>
+            <li><b>TensorBoard</b> curves, structured logs, a <code>training_params.txt</code> snapshot per run.</li>
+          </ul>
+          <div class="callout good" style="margin-top:14px"><b>Why it matters:</b> generation quality is subjective — we built the instruments to make it <em>measurable and reproducible</em>.</div>
+        </div>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li>Real flex — rigorous ML engineering. The 4-panel grid (esp. empty-prompt) separates "followed the structure" from "the prompt did it."</li>
+      <li>Coverage-scan = maturity: when a class renders badly, first ask "was it even in the training data?" — answerable quantitatively.</li>
+      <li>If you have a real grid screenshot, drop it into the slot — it lands far harder than the placeholder.</li>
+    </ul></div>
+  </section>
+
+  <!-- 21 · §05 -->
+  <section class="slide divider">
+    <div class="num reveal">05</div>
+    <h1 class="reveal" style="--d:.08s">Results &amp; limitations</h1>
+    <p class="sub reveal" style="--d:.16s">The paper's numbers, then our segmentation observations — kept separate, and honest about what's verified vs pending.</p>
+    <div class="notes"><ul><li>Be scrupulous: paper's results are depth/style; ours are seg observations at small scale. Don't blur them.</li></ul></div>
+  </section>
+
+  <!-- 22 · RESULTS -->
+  <section class="slide">
+    <p class="eyebrow reveal">Where results stand</p>
+    <h2 class="reveal" style="--d:.05s">Two claims, kept separate</h2>
+    <div class="fill">
+      <div class="cols two">
+        <div class="card frozen reveal" style="--d:.1s"><h3><span class="dot f"></span>Upstream paper — depth &amp; style</h3>
+          <ul class="clean frozen tight" style="margin-top:6px">
+            <li><b>Fewest trainable parameters</b> among compared conditioning methods.</li>
+            <li><b>SOTA structure control</b> — best cycle-consistency (MSE-d), FID, LPIPS.</li>
+            <li>Structure <em>and</em> style from one block, zero-shot.</li>
+          </ul>
+          <p style="color:var(--faint); font-size:12px; font-family:var(--mono); margin-top:10px">for depth &amp; style · CTRLorALTer, ECCV 2024</p>
+        </div>
+        <div class="card accent reveal" style="--d:.16s"><h3><span class="dot s"></span>Our segmentation — verified so far</h3>
+          <ul class="clean tight" style="margin-top:6px">
+            <li><span class="status ok">✓ works</span> &nbsp;A CARLA-conditioned sample <b>follows the input layout</b> — road, buildings, vehicle placement track the seg map.</li>
+            <li><span class="status ok">✓ fixed</span> &nbsp;The format / alignment bug — <b>verified by execution</b>.</li>
+            <li><span class="status open">⚠ open</span> &nbsp;Two known artifacts — <b>generic fill</b> inside flat class regions, and a <b>flat band</b> from letterbox padding (both explained next).</li>
+            <li><span class="status pending">◷ pending</span> &nbsp;Full-scale metrics — harness ready; numbers come from the real cluster run.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="cols two reveal" style="--d:.22s; margin-top:16px">
+        <figure class="imgslot" style="--ar:16/9"><div class="imgslot-frame"><span class="imgslot-hint"><span class="ic">◪</span><b>Seg map → generated (+prompt)</b>your CARLA sample</span></div><figcaption>Structure followed — <b>with</b> text</figcaption></figure>
+        <figure class="imgslot" style="--ar:16/9"><div class="imgslot-frame"><span class="imgslot-hint"><span class="ic">◨</span><b>Generated (−prompt)</b>pure structure adherence</span></div><figcaption>Structure followed — <b>without</b> text</figcaption></figure>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li>Explicitly separate the two cards out loud: "left = paper's, depth &amp; style; right = ours, segmentation." Answers the earlier confusion.</li>
+      <li>Verified win: structure adherence transfers to segmentation — the core result we stand behind now.</li>
+      <li>"Pending" is a strength — instruments ready, awaiting the cluster run. Never invent numbers. Drop real sample images into the two slots.</li>
+    </ul></div>
+  </section>
+
+  <!-- 23 · LIMITATION -->
+  <section class="slide">
+    <p class="eyebrow reveal">The seg pipeline's limitation · our diagnosis</p>
+    <h2 class="reveal" style="--d:.05s">"Fits the shape, but not the look"</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s">
+          <p style="margin-top:0; color:var(--muted); font-size:14.5px">γ and β are <strong>1×1 convolutions</strong> — a one-pixel receptive field. Inside a flat, single-class region (a car's interior), every pixel gets the <em>same</em> scale/shift.</p>
+          <ul class="clean tight" style="margin-top:12px">
+            <li>The signal there says only <em>"this class is here"</em> — <strong>zero appearance information</strong>.</li>
+            <li>Depth dodges this (varies continuously inside an object); a <em>categorical</em> seg map doesn't — <strong>a segmentation-specific limitation.</strong></li>
+            <li>Full-strength conditioning runs through <em>every</em> denoising step — even the late ones that decide texture.</li>
+          </ul>
+        </div>
+        <div class="card good reveal" style="--d:.18s"><h3 style="margin:0 0 10px"><span class="dot g"></span>Two fixes — no retraining</h3>
+          <p><b>lora_scale decay:</b> hold conditioning strong early (lock layout), fade it late so SD's own prior fills in appearance.</p>
+          <p><b>conditioning kernel:</b> soften hard silhouette edges before the mapper — smooths cut-out boundaries.</p>
+          <p style="color:var(--muted); font-size:12.5px; font-family:var(--mono); margin-top:8px">both operate purely on the mechanism from Part 3</p>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.24s"><b>The payoff of understanding the architecture:</b> knowing <em>where</em> the block sits told us <em>why</em> segmentation looks generic in flat regions — and that both fixes are cheap, inference-time, retraining-free.</div>
+    </div>
+    <div class="notes"><ul>
+      <li>Our value-add insight, from reading code. Chain it: 1×1 conv → one-pixel receptive field → flat region carries no appearance → late steps starved → fix by decaying late + softening edges.</li>
+      <li>Stress it's <b>seg-specific</b> — depth doesn't suffer this. Answers "SegFormer or Grounded-SAM?" — it's about categorical segmentation, common to both.</li>
+    </ul></div>
+  </section>
+
+  <!-- 23b · PAD-BAND EXPLAINED -->
+  <section class="slide">
+    <p class="eyebrow reveal">The second artifact · the letterbox pad-band</p>
+    <h2 class="reveal" style="--d:.05s">Why the padding shows up in the output</h2>
+    <div class="fill">
+      <div class="cols split">
+        <div class="reveal" style="--d:.1s">
+          <p style="margin-top:0; color:var(--muted); font-size:14.5px">We letterbox non-square frames to 512² by adding flat <strong>bands top &amp; bottom</strong> (<code>SquarePad</code>). Intuition: "that's just padding — it should stay inert." It doesn't. Three reasons, in code:</p>
+          <ul class="clean tight" style="margin-top:12px">
+            <li><b>Padding is real pixels, not a mask.</b> The letterboxed 512² <em>is</em> the training target — <code>get_input</code> VAE-encodes the whole image, band included, into the latent the model learns to reconstruct.</li>
+            <li><b>The seg map's band is a real conditioning colour</b> (Unlabeled). It FiLM-modulates the LoRA in that region — actively steering it, not ignoring it.</li>
+            <li><b>Every pair has the same band, same place</b> → the model reliably <em>learns</em> "band here → flat pad colour" and dutifully renders it.</li>
+          </ul>
+        </div>
+        <div class="reveal" style="--d:.18s">
+          <div class="card warn"><h3><span class="dot w"></span>"Shouldn't it be static noise?"</h3><p style="margin:0">No — we add a <strong>definite flat colour</strong>, not noise. And diffusion denoises the <em>entire</em> latent to a plausible image; there's <strong>no per-pixel "ignore" mask</strong> in the loss. The pad is supervised exactly like real content.</p></div>
+          <div class="card good" style="margin-top:12px"><h3><span class="dot g"></span>The real fix</h3><p style="margin:0">Don't pad at all — train at <strong>native aspect ratio</strong> (e.g. 512×320), so there's no band to learn. (Or mask the loss in the pad region — not done here.)</p></div>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.26s"><b>Root cause in one line:</b> letterbox padding is treated as real, supervised image content on <em>both</em> the seg-map input and the RGB target — so the model faithfully reproduces it. <span class="fileref">src/data/transforms.py · src/data/local_seg.py · src/model.py get_input</span></div>
+    </div>
+    <div class="notes"><ul>
+      <li>This directly answers "why does the padding get rendered — shouldn't it be inert noise?" The answer is code-grounded: the pad is real pixels on both the conditioning map and the target, and there's no loss-masking to tell the model to ignore it.</li>
+      <li>Key correction to the intuition: padding ≠ noise. We add a flat colour, and diffusion has no notion of "ignore this region" — it denoises the whole 512² to a plausible image.</li>
+      <li>The genuine fix is native aspect ratio (512×320) — no band exists to learn. That's a design change, not yet implemented.</li>
+    </ul></div>
+  </section>
+
+  <!-- 24 · TAKEAWAYS -->
+  <section class="slide">
+    <p class="eyebrow reveal">If you remember five things</p>
+    <h2 class="reveal" style="--d:.05s">Key takeaways</h2>
+    <div class="fill">
+      <div class="agenda">
+        <div class="agenda-item reveal" style="--d:.05s"><span class="n">01</span><div><h3>Freeze the giant, train a whisper</h3><p>The ~860M UNet stays frozen; only tiny low-rank + FiLM params learn.</p></div></div>
+        <div class="agenda-item reveal" style="--d:.1s"><span class="n">02</span><div><h3>Conditional, not static</h3><p>FiLM lets a signal reshape the LoRA branch live — structure &amp; style, one block.</p></div></div>
+        <div class="agenda-item hero reveal" style="--d:.15s"><span class="n">03</span><div><h3>We added a whole new modality — cleanly</h3><p>Segmentation dropped into a depth-native repo with zero model-core changes, by honouring the encoder contract.</p></div></div>
+        <div class="agenda-item hero reveal" style="--d:.2s"><span class="n">04</span><div><h3>The hard part was real data</h3><p>Colour-not-IDs, the 16-bit format, the ~19% alignment bug, the parity rule.</p></div></div>
+        <div class="agenda-item reveal" style="--d:.25s; grid-column:1/-1"><span class="n">05</span><div><h3>Architecture explains behaviour</h3><p>1×1-conv FiLM is why flat seg regions look generic — and why a cheap, retraining-free fix exists. We built the harness to measure all of it.</p></div></div>
+      </div>
+    </div>
+    <div class="notes"><ul><li>Rapid recap — one breath each. #3 and #4 are <i>your</i> story; defend those in Q&A.</li><li>Must-say lines: "zero model-core changes" and "the real work was making it survive real data."</li></ul></div>
+  </section>
+
+  <!-- 24b · REFERENCES -->
+  <section class="slide">
+    <p class="eyebrow reveal">References · all arXiv IDs verified</p>
+    <h2 class="reveal" style="--d:.05s">Papers this work builds on</h2>
+    <div class="fill">
+      <div class="cols two">
+        <div class="reveal" style="--d:.1s; display:flex; flex-direction:column; gap:15px">
+          <div>
+            <span class="nlbl" style="color:var(--signal)">Base method</span>
+            <p style="font-size:13.5px; color:var(--muted); margin:0">Stracke, Baumann, Susskind, Bautista, Ommer. <b>CTRLorALTer: Conditional LoRAdapter for Efficient 0-Shot Control &amp; Altering of T2I Models.</b> ECCV 2024. <span class="mono" style="color:var(--frozen)">arXiv:2405.07913</span></p>
+          </div>
+          <div>
+            <span class="nlbl">Foundations</span>
+            <p style="font-size:13px; color:var(--muted); margin:0 0 7px">Rombach et al. <b>High-Resolution Image Synthesis with Latent Diffusion Models.</b> CVPR 2022. <span class="mono" style="color:var(--frozen)">arXiv:2112.10752</span></p>
+            <p style="font-size:13px; color:var(--muted); margin:0 0 7px">Hu et al. <b>LoRA: Low-Rank Adaptation of Large Language Models.</b> 2021. <span class="mono" style="color:var(--frozen)">arXiv:2106.09685</span></p>
+            <p style="font-size:13px; color:var(--muted); margin:0">Perez et al. <b>FiLM: Visual Reasoning with a General Conditioning Layer.</b> AAAI 2018. <span class="mono" style="color:var(--frozen)">arXiv:1709.07871</span></p>
+          </div>
+        </div>
+        <div class="reveal" style="--d:.16s; display:flex; flex-direction:column; gap:15px">
+          <div>
+            <span class="nlbl">Control &amp; conditioning</span>
+            <p style="font-size:13px; color:var(--muted); margin:0">Zhang, Rao, Agrawala. <b>Adding Conditional Control to Text-to-Image Diffusion Models</b> (ControlNet). ICCV 2023. <span class="mono" style="color:var(--frozen)">arXiv:2302.05543</span></p>
+          </div>
+          <div>
+            <span class="nlbl">Segmentation map sources</span>
+            <p style="font-size:13px; color:var(--muted); margin:0 0 7px">Xie et al. <b>SegFormer.</b> NeurIPS 2021. <span class="mono" style="color:var(--frozen)">arXiv:2105.15203</span></p>
+            <p style="font-size:13px; color:var(--muted); margin:0 0 7px">Kirillov et al. <b>Segment Anything</b> (SAM). ICCV 2023. <span class="mono" style="color:var(--frozen)">arXiv:2304.02643</span></p>
+            <p style="font-size:13px; color:var(--muted); margin:0 0 7px">Liu et al. <b>Grounding DINO.</b> ECCV 2024. <span class="mono" style="color:var(--frozen)">arXiv:2303.05499</span></p>
+            <p style="font-size:13px; color:var(--muted); margin:0">Dosovitskiy et al. <b>CARLA: An Open Urban Driving Simulator.</b> CoRL 2017. <span class="mono" style="color:var(--frozen)">arXiv:1711.03938</span></p>
+          </div>
+        </div>
+      </div>
+      <div class="callout reveal" style="--d:.24s"><b>Grounded-SAM</b> = Grounding DINO (open-set detection) + SAM (segmentation). Our maps come from the <b>CARLA</b> simulator's segmentation camera; SegFormer produces maps from real photos.</div>
+    </div>
+    <div class="notes"><ul><li>Leave this up during Q&amp;A. All arXiv IDs verified this session.</li><li>If asked "is it peer-reviewed?": yes — base paper ECCV 2024; components are NeurIPS / CVPR / ICCV / AAAI / CoRL.</li></ul></div>
+  </section>
+
+  <!-- 25 · THANK YOU -->
+  <section class="slide center">
+    <div class="fill">
+      <p class="eyebrow reveal">Thank you</p>
+      <h1 class="reveal" style="--d:.06s; max-width:20ch">Questions?</h1>
+      <p class="title-sub reveal" style="--d:.14s">One frozen model. One tiny conditional block. We taught it a new way to see structure — <span class="hi">segmentation</span> — for the cost of a rounding error in parameters.</p>
+      <div class="title-eq reveal" style="--d:.22s">y = <span class="f">W(x)</span> &nbsp;+&nbsp; λ · <span class="s">B( FiLM( A(x), seg map ) )</span></div>
+      <div class="title-meta reveal" style="--d:.3s">
+        <span><b>Base paper:</b> arXiv 2405.07913 · ECCV 2024</span>
+        <span><b>In this repo:</b> LORA_ARCHITECTURE.md · GROUNDED_SAM.md · SEGMENTATION.md</span>
+      </div>
+    </div>
+    <div class="notes"><ul>
+      <li>Close on the equation with "seg map" — the whole talk in one line.</li>
+      <li>Q&A ready: why colour-not-IDs; the encoder-slot contract; SegFormer vs Grounded-SAM trade-offs; the parity rule; why full-scale numbers are pending; keeping depth-vs-seg fair.</li>
+    </ul></div>
+  </section>
+
+</div>
+
+<div class="notes-overlay" id="notesOverlay">
+  <h4>Speaker notes <span id="notesMeta"></span></h4>
+  <div class="notes-desc" id="notesDesc"></div>
+  <div class="notes-script" id="notesScript"></div>
+  <div class="notes-body" id="notesBody"></div>
+</div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var i = 0, total = slides.length;
+  var progress = document.getElementById('progress');
+  var cur = document.getElementById('cur');
+  var overlay = document.getElementById('notesOverlay');
+  var notesBody = document.getElementById('notesBody');
+  var notesMeta = document.getElementById('notesMeta');
+  var notesOpen = false;
+  document.getElementById('tot').textContent = total;
+
+  // "Understand it" — VERBATIM from LoRAdapter_Speaker_Guide.md, index 0..total-1
+  var descriptions = [
+    "Start by knowing what LoRAdapter <i>is</i> and what <i>you</i> added. LoRAdapter (paper name: CTRLorALTer, ECCV 2024) is a technique for <b>controlling</b> a text-to-image model — steering <i>where</i> things go (structure) and <i>how</i> they look (style) — cheaply, without retraining the big model. Out of the box it supports <b>depth</b> maps (for structure) and <b>style</b> references. It does <i>not</i> support segmentation. Your project adds exactly that: <b>segmentation-map conditioning</b>, with two different ways of producing those maps (SegFormer and Grounded-SAM), and — importantly — without modifying the model's core code.<br><br>The equation <code>y = W(x) + λ·B(FiLM(A(x), seg map))</code> is the entire method compressed into one line. <code>W(x)</code> is the frozen original layer; the rest is the small trainable add-on, and <code>seg map</code> is your new driving signal. You don't need to explain it yet — just promise you'll unpack it. Say the word &quot;frozen&quot; with weight; it's the whole efficiency story.<br><span class='ref'>📄 Stracke et al., CTRLorALTer, ECCV 2024 — arXiv:2405.07913</span>",
+    "This just sets expectations and reduces anxiety for anyone who isn't a diffusion expert. Five parts: foundations (background), the core idea, the architecture, <i>your work</i>, and results. The single most important thing to plant here is the <b>colour code</b>, because it recurs on literally every diagram: <b>blue = frozen</b> (pretrained weights we never touch) and <b>amber = trainable</b> (the small part we add, and the conditioning signal that flows through it). If the audience internalises that colour code now, they can read every later diagram at a glance.",
+    "A divider slide — its only job is to signal &quot;we're starting background now.&quot; Setting the pace verbally (&quot;three quick slides&quot;) tells experts they can relax and beginners that help is coming.",
+    "The motivation. A text prompt controls <i>semantics</i> — the &quot;what&quot; (a car, a street) — but it has no way to specify <i>spatial arrangement</i> (which lane, what pose, foreground vs background) or a <i>precise visual style</i>. So people want two extra kinds of control that don't fit in words:<br>• <b>Structure conditioning</b> — &quot;put the shapes <i>here</i>.&quot; The control signal is a <b>spatial map</b>: a depth map, an edge map, or — your case — a <b>segmentation mask</b> (a per-pixel class label: this pixel is road, that one is car). It governs <i>where things are and what form they take</i>.<br>• <b>Style conditioning</b> — &quot;make it look like <i>this</i>.&quot; The control signal is a compact summary (an embedding) of a <b>reference image</b>. It governs <i>global appearance and texture</i>.<br>These two words — structure and style — are the backbone of the entire talk. Everything you present is one or the other, and <i>your</i> work is squarely on the structure side. Make sure the audience leaves this slide able to say which is which.",
+    "This is the &quot;what is a diffusion model&quot; crash course, and you need two ideas from it.<br><br><i>First, the generation pipeline.</i> Working directly on 512×512×3 pixels is expensive, so Stable Diffusion first uses a <b>VAE</b> (a pre-trained compressor) to shrink the image into a small <b>latent</b> — a 64×64×4 grid. All the heavy work happens on that small latent. Generation starts from <b>pure random noise</b> in latent space, and the <b>UNet</b> — the core neural network — looks at the noisy latent and predicts <i>what noise to remove</i>. Do that repeatedly (about 30–50 steps) and the noise gradually resolves into a coherent image. A final VAE step decompresses the finished latent back to pixels. The mental image: sculpting a statue out of a block of static, one careful pass at a time, guided by the text prompt.<br><br><i>Second, the shape of the UNet.</i> The UNet is <b>multi-resolution</b>. It has an encoder that shrinks the latent through <b>4 depth stages</b>, a bottleneck, and a decoder that mirrors back up — that's the &quot;U.&quot; Each stage is made of two kinds of layers: <b>convolutions</b> (ResNet blocks), which handle <i>local shape and texture</i>, and <b>attention</b> blocks, which is where the <i>text prompt</i> is injected (via cross-attention).<br><br>The two facts you must land: (1) the entire backbone — VAE, UNet, text encoder — stays <b>frozen</b> in this method, and that's where all the efficiency comes from; (2) convolutions decide <i>shape</i> while attention carries <i>text</i>, which is precisely why structure conditioning will target the <b>convolutions</b> and leave the text path untouched. Also plant the number <b>4</b> (resolution depths) and the fact that the conditioning signal will have to reach <i>all four</i> — that's a real problem the mapper solves later.<br><span class='ref'>📄 Rombach et al., Latent Diffusion Models, CVPR 2022 — arXiv:2112.10752</span>",
+    "LoRA (Low-Rank Adaptation) is the cheap-adaptation trick everything is built on. A big pretrained network is full of enormous weight matrices <code>W</code>. Retraining them is slow and huge to store. LoRA's insight: <b>freeze <code>W</code> entirely</b>, and add a small parallel detour of two tiny matrices — <code>A</code> <b>down-projects</b> the input into a small &quot;rank&quot; (say 128 dimensions), and <code>B</code> <b>up-projects</b> it back. You train <i>only</i> <code>A</code> and <code>B</code>. The layer's output becomes <code>W(x) + B(A(x))</code>. Because <code>A</code> and <code>B</code> are tiny compared to <code>W</code>, training is fast and the extra weights are a rounding error. One important detail: <code>B</code> is initialised to <b>zero</b>, so at the start the detour outputs nothing — training begins as a perfect no-op and can only improve from there, which makes it very stable.<br><br>The catch to emphasise: plain LoRA is <b>static</b>. Once trained, <code>B(A(x))</code> applies the <i>same</i> correction to every input forever. That's fine for &quot;always paint in this style,&quot; but useless for &quot;match <i>this specific</i> segmentation map, which is different every time.&quot; That limitation is the entire setup for the next slide — say the word &quot;static&quot; deliberately.<br><span class='ref'>📄 Hu et al., LoRA, 2021 — arXiv:2106.09685</span>",
+    "Divider. Transition line — everything before was setup; now comes the actual invention.",
+    "This is the mechanism that turns <i>static</i> LoRA into <i>conditional</i> LoRA. <b>FiLM</b> stands for Feature-wise Linear Modulation, and it's a simple, general idea: let an external signal <i>scale and shift</i> a set of features. Concretely, you take the conditioning signal <code>c</code> (for us, the segmentation map), and pass it through two small learned functions to produce a <b>scale, γ (gamma)</b> and a <b>shift, β (beta)</b>. Then you apply them to the middle of the LoRA branch: <code>γ · A(x) + β</code>. That's it — a multiply and an add, but the numbers come from your conditioning signal instead of being fixed.<br><br>Why this is powerful: the correction the LoRA makes is no longer baked in at training time — it's <b>recomputed from <code>c</code>, live, on every forward pass</b>. Feed a different map, get a different correction. That is exactly what makes the control <b>zero-shot</b>: at generation time you can hand the model a segmentation map it has never seen in training, and it will follow it, with no per-image finetuning. One reassuring detail if asked: γ is set up to start around ×1 (the code adds 1) and β around 0, so — like LoRA's zero-init B — FiLM starts as a gentle no-op and learns from there.<br><span class='ref'>📄 Perez et al., FiLM, AAAI 2018 — arXiv:1709.07871</span>",
+    "This diagram is the whole method in one picture — if the audience gets this, they get the paper. Trace the flow. The input <code>x</code> (the features flowing through the UNet at this layer) reaches a split point.<br>• The <b>blue (frozen) path</b> is the original convolution, <code>W(x)</code> — completely unchanged. This is why the base model's knowledge is fully preserved.<br>• The <b>amber (trainable) path</b> is the adapter: <code>A</code> shrinks the features to the small rank; <b>FiLM</b> then reshapes them using γ and β <i>derived from the segmentation map <code>c</code></i> (shown feeding in at the bottom); <code>B</code> expands back to full size; and the result is scaled by <b>λ (lora_scale)</b>.<br>• Finally, the two paths are <b>added</b>: <code>y = W(x) + λ · B(FiLM(A(x), c))</code>. It's an <i>additive residual</i> — a correction laid on top of the frozen output, not a replacement of it.<br>Two things to point out explicitly because they're the crux: (1) the segmentation map <b>never touches <code>x</code></b> — it only steers the tiny amber branch, so the base computation is untouched; (2) <b>λ is a live knob</b> read every step — set it to 0 and the whole block vanishes, leaving exactly the original model. This slide's amber wires are animated in the deck to show the signal &quot;flowing,&quot; so let that do some work while you talk.<br><span class='ref'>📄 Stracke et al., CTRLorALTer, ECCV 2024 — arXiv:2405.07913</span>",
+    "This is the paper's headline claim — <i>one block, two jobs</i> — and understanding it makes everything downstream (including your extension) feel inevitable. The exact same conditional-LoRA block does structure <b>and</b> style; the <i>only</i> difference is the <b>shape of the conditioning signal <code>c</code></b> and, correspondingly, whether γ/β are convolutions or linear layers:<br>• <b>Structure:</b> <code>c</code> is a <b>spatial map</b> (depth or segmentation), the same resolution as the layer. γ and β are <b>1×1 convolutions</b>, so you get a <i>different</i> scale/shift at <i>every pixel</i>. That per-pixel control is exactly what &quot;where things go&quot; requires.<br>• <b>Style:</b> <code>c</code> is a <b>single pooled vector</b> (a summary embedding of a reference image). γ and β are <b>linear layers</b>, so there's <i>one</i> scale/shift for the whole feature map — one global instruction, appropriate for &quot;overall look.&quot;<br>Then the practical part — <b>tuning</b> — because you'll get asked &quot;how do you control the strength?&quot; The master dial is <b><code>lora_scale</code></b>, read live every denoising step: 0 = off, 1 = full. You can <b>decay</b> it across the steps — strong early to lock the layout in, then weaker late so the model's own prior fills in realistic texture. And for structure specifically there's a <b>softening kernel</b> that blurs hard silhouette edges. The big message: because it's all one formulation, adding a <i>new</i> structure signal — your segmentation — rides the exact same rails, which is why it stayed small and clean.",
+    "Divider into the engineering. Frame it as &quot;the part people usually skip — and the reason our extension was a clean drop-in.&quot;",
+    "Two facts: which <i>class</i> is used, and which <i>layers</i> get touched.<br><br>The code has <b>three</b> flavours of the block. They share the same skeleton (frozen <code>W</code> + trainable <code>A</code>/<code>B</code> + FiLM γ/β) and differ only in signal shape: <code>NewStructLoRAConv</code> (spatial map, per-pixel — <b>used for structure, including your segmentation</b>), <code>SimpleLoraLinear</code> (pooled vector — used for style), and <code>LoRAConv</code> (present but unused). Don't dwell on the table; point at the <i>pattern</i> — one idea, three signal shapes.<br><br>The placement is controlled by one config switch — <code>adaption_mode: only_res_conv</code> — which wraps <b>only the first convolution (<code>conv1</code>)</b> of the first two ResNet blocks in each resolution stage. It deliberately does <b>not</b> touch the second convolution and does <b>not</b> touch attention. Why this matters: convolutions carry <i>local shape</i>, which is exactly what structure conditioning wants to steer, so wrapping just those gives maximum control per trainable parameter; and leaving attention frozen means the <b>text prompt still behaves normally</b>. This small, surgical footprint is <i>the</i> reason the method is parameter-cheap.",
+    "This explains <i>how the block is physically inserted</i>, and it's genuinely elegant — worth a beat. It is <b>not</b> a monkeypatch, not a forward hook, not a forked copy of the diffusers library. For each target layer, the code builds a <code>NewStructLoRAConv</code>, <b>copies the original pretrained weights into its frozen <code>W</code></b> (so nothing is lost), and then does exactly one thing: <code>setattr(parent, &quot;conv1&quot;, lora)</code> — it reassigns the <code>conv1</code> attribute so it now points at our module. The magic is that diffusers' own, <i>completely unmodified</i> code still calls <code>self.conv1(x)</code> — but because that attribute now points at our object, that same untouched line transparently runs the LoRA math instead of a plain convolution. PyTorch's attribute lookup is dynamic, so one reassignment reroutes the whole computation. The payoff: <b>zero changes to the underlying library</b> — it works with the stock pipeline, survives version upgrades, and (say this) is exactly <i>why our segmentation extension never had to touch this machinery at all</i>.",
+    "This resolves the &quot;reach all 4 depths&quot; puzzle from Slide 5. The wrapped <code>conv1</code> layers operate at four <i>different</i> spatial resolutions, but the segmentation map is a single image. The solution runs <i>once per resolution</i>, not once per layer:<br>• A small <b>mapper</b> network takes the one conditioning map and, in a <b>single pass</b>, produces exactly <b>4 feature maps</b> — one at each UNet depth (e.g. 64², 32², 16², 8²).<br>• Each wrapped LoRA layer was stamped with its <b>depth index</b> when it was created, and simply grabs <i>its</i> matching map from a shared holder (the <code>DataProvider</code>).<br>• Because the UNet is symmetric, the layers going <i>down</i> and the layers coming back <i>up</i> at the same resolution have the same depth, so they <b>share</b> the same conditioning map — for free.<br>The efficiency point to make explicit: one encoder pass + one mapper pass conditions the <b>entire</b> UNet — every wrapped convolution, across all stages — per denoising step. There's no expensive per-layer recomputation. This is also the last piece of the <i>original</i> architecture; after this, everything is your extension.",
+    "The pivotal divider. Everything before was shared vocabulary; this is <i>your</i> contribution. Deliver it with a slight change of energy — this is the part you own.",
+    "This is the single most important slide for &quot;what did <i>you</i> do,&quot; so know it cold. In the <b>original repo</b>, the key training line is <code>cs = [imgs]</code> — the conditioning handed to the adapter is literally the <i>same raw photo</i> you're trying to reconstruct. Combined with <code>skip_encode=False</code>, this means a <b>live encoder (MiDaS)</b> runs <i>inside the training loop every single step</i>, computing a fresh depth map from that photo on the fly. So the stock dataset only ever needs <code>(image, caption)</code> — the depth is derived live, nothing is pre-saved.<br><br>Your extension makes <b>two deliberate departures</b>: (1) instead of computing a map live, you feed a <b>pre-saved segmentation map</b> and set <b><code>skip_encode=True</code></b>, so the live-encoder branch is never taken — the saved map is used as the conditioning directly; (2) a new dataset that reads <code>(image, seg_map, prompt)</code> triples. Everything <i>downstream</i> of that — the FiLM math, the UNet wrapping, the mapper fan-out — is <b>byte-identical, unmodified stock code</b> (verified: <code>src/lora.py</code>, <code>src/mapper_network.py</code>, <code>train.py</code> never change). The one-sentence version to land: <b>we changed how the conditioning map is <i>produced</i>, not how it's <i>used</i>.</b> That's why it was clean, and why a fair depth-vs-segmentation comparison is even possible.",
+    "This explains <i>why</i> the extension slotted in without core changes. Every encoder in this system obeys a strict <b>interface contract</b>: it must accept an input tensor of shape <code>[B, 3, H, W]</code> with values in <code>[-1, 1]</code> (a batch of RGB images), and return <code>[B, 3, size, size]</code> with values in <code>[0, 1]</code> (a colour conditioning map). The original depth encoder (MiDaS) obeys this; the mapper downstream expects exactly this. You built your <b>segmentation encoder to satisfy the identical contract</b> — same input shape and range, same output shape and range — so it drops straight into the same slot and the mapper genuinely cannot tell it's segmentation rather than depth. That's the whole reason <code>model.py</code> and the mapper needed zero edits.<br><br>The second half is a <b>discipline</b> that protects the science: you kept <b>four strictly separated stages</b> — (A) compute depth, (B) train depth, (C) compute segmentation, (D) train segmentation — that never share code paths. This is what makes a later depth-vs-segmentation comparison <i>valid</i>: the pipelines are identical except for the conditioning signal, so any difference in output is attributable to the signal, not to some incidental code difference.",
+    "This is the design decision that proves you <i>understood</i> the architecture rather than just wiring things together. A segmentation map is <b>categorical</b> — each pixel holds a discrete class <i>number</i> (road = 0, car = 14, and so on). The tempting shortcut is to feed those numbers straight in as a grayscale ramp (<code>id / N</code>). That's a trap, and here's the precise reason: the mapper is a convolutional network originally built for <b>depth</b>, which is a <i>continuous</i> signal where nearby values mean &quot;nearby distances.&quot; Feeding class numbers as a ramp imposes a <b>false ordering</b> — it tells the network that class 5 (&quot;pole&quot;) sits <i>between</i> class 4 (&quot;fence&quot;) and class 6 (&quot;traffic light&quot;), as if they were on a spectrum. They're not; they're unrelated categories. The network would learn a lie.<br><br>Your fix: <b>colourise</b> each class into a <b>distinct, well-separated RGB colour</b>, so categories become a signal the conv can actually read — the segmentation analogue of depth's smooth gradient, and exactly what ControlNet's segmentation variant does. Two supporting correctness details worth mentioning: you always resize with <b>nearest-neighbour</b> (averaging class numbers would invent a class that doesn't exist at boundaries), and you use a <b>fixed palette</b> so the same class is always the same colour — which is what guarantees <b>train/inference parity</b>. A neat engineering touch: you save the raw IDs and colourise <i>at load time</i>, so changing the palette never requires re-running the segmenter.<br><span class='ref'>📄 Zhang et al., ControlNet, ICCV 2023 — arXiv:2302.05543</span>",
+    "This is where most of the real engineering lived — the gap between the paper's clean setup and messy real simulator data. Four concrete items:<br>1. <b>16-bit format.</b> The real CARLA masks are saved as 16-bit PNGs (<code>I;16</code> mode), not the 8-bit you'd assume. If you convert them naively, different versions of the imaging library (Pillow) handle it differently and can silently corrupt the labels. Your fix: read the <b>raw pixel values</b> directly, which is version-proof.<br>2. <b>The alignment bug (fixed, commit 5db3624).</b> The masks are non-square (1280×800). The old code <b>stretched</b> the mask to a square while the paired RGB was <b>letterboxed</b> (padded to square). The result: they disagreed about <i>where</i> content was, by up to <b>96 pixels — about 19%</b> of the frame height at the top and bottom. That means the model was told &quot;road here&quot; while the actual road in the target was somewhere else — a silent, damaging mismatch between conditioning and supervision. The fix: letterbox the mask with the <i>same</i> geometry as the image.<br>3. <b>resize_mode toggle.</b> A single switch (letterbox vs centre-crop) that drives <i>both</i> the image and its mask through the <i>same</i> geometry, so they can never drift apart again.<br>4. <b>The parity rule.</b> The maps used at training and the maps used at inference must come from the same model, same preprocessing, same value range — or the two data distributions diverge and quality quietly collapses. This is the single most important rule for anyone reproducing the work.<br>The framing to land: none of this is in the paper. This is the unglamorous, load-bearing work that makes a research pipeline actually hold up.<br><span class='ref'>📄 CARLA: Dosovitskiy et al., CoRL 2017 — arXiv:1711.03938</span>",
+    "Because both encoders satisfy the same contract (Slide 17), the <i>front end</i> is swappable — and you built two, with genuinely different trade-offs:<br>• <b>SegFormer.</b> A real neural segmentation network (SegFormer-b5, ~82M-param backbone) run <b>offline</b> on photos to produce 19-class Cityscapes maps. Crucially, its encoder has a <b>live path</b> — it can segment a brand-new image — which means it can even <b>re-segment the generated image</b> and score how faithfully the layout was reproduced. That controllability score is called <b>mIoU</b>.<br>• <b>Grounded-SAM.</b> Here the maps come straight from <b>CARLA's own segmentation camera</b> — 29 classes, and <i>no model has to run</i> to produce them; they exist at capture time. The trade-off: its encoder is a <b>training-only placeholder</b> (a &quot;Tier-1 slot filler&quot;) with no live path, so the mIoU self-scoring is automatically <b>skipped</b> rather than faked.<br>The point to hammer is <i>not</i> the feature table — it's the <b>design</b>: one clean contract absorbs a real-world segmenter <i>and</i> a simulator's native labels, with no change to the generative core. The bottom row of the table says it all — the core is identical for both. And the honest one-liner on the trade-off: SegFormer is general and self-scoring but capped at 19 classes; Grounded-SAM is richer (29 classes) with free labels but no live inference.<br><span class='ref'>📄 SegFormer: Xie et al., NeurIPS 2021 — arXiv:2105.15203 · SAM: Kirillov et al. — arXiv:2304.02643 · Grounding DINO: Liu et al., ECCV 2024 — arXiv:2303.05499</span>",
+    "This is a maturity signal — you didn't just train and hope, you built the <i>instruments</i> to measure quality objectively. Four tools:<br>• <b>Checkpoint monitoring grids.</b> Every time a checkpoint is saved, it renders a fixed set of validation scenes as <b>four panels</b>: the original photo, the segmentation map, the generation <i>with</i> the prompt, and the generation <i>without</i> the prompt. Using <i>fixed</i> scenes means checkpoint-3000 and checkpoint-6000 are directly comparable. The <b>empty-prompt panel</b> is the clever bit — it isolates <i>pure structure adherence</i>, so you can tell whether the model followed the <i>map</i> or whether the <i>text prompt</i> did the heavy lifting.<br>• <b>PSNR + SSIM</b> per checkpoint against the real image — numeric quality <i>trends</i> you can watch across a run.<br>• <b>mIoU controllability</b> (SegFormer only) — re-segment the output and measure &quot;did it follow the structure I asked for?&quot;<br>• <b>Dataset coverage scans</b> — before blaming the model for rendering a class badly, you can quantitatively check whether that class was even well-represented in the training data.<br>Plus TensorBoard curves and a per-run parameter snapshot. The message: generation quality is subjective, and we made it <i>measurable and reproducible</i>.",
+    "Divider. The important mindset here is honesty — you're about to separate the paper's proven results from your own, still-in-progress results, and not overclaim.",
+    "The key discipline on this slide is <i>not blurring two different things</i>. The left card is the <b>paper's</b> results, and they are for <b>depth and style</b>: fewest trainable parameters of any compared method, and state-of-the-art structure control on the standard metrics (cycle-consistency / MSE-d, FID, LPIPS). Those are <i>their</i> numbers for <i>their</i> signals — cite them as such.<br>The right card is <b>your segmentation</b> work, with honest status tags:<br>• <b>✓ works</b> — the core mechanism <i>transfers</i>: a real CARLA-conditioned sample follows the input layout (roads, buildings, vehicle placement all track the map). This is your solid, standable result <i>today</i>.<br>• <b>✓ fixed</b> — the alignment bug, confirmed by actually running the code.<br>• <b>⚠ open</b> — two known artifacts (the next two slides).<br>• <b>◷ pending</b> — full-scale quality <i>numbers</i> await the real training run on the cluster; the measurement harness is built and waiting, but you will <i>not</i> quote a metric you haven't earned at scale.<br>The honesty is the point, and it's actually a strength: the mechanism is proven to transfer, the pipeline is correct, the instruments are ready. If you have real generated images, this is the slide to point at the two image slots.",
+    "The first artifact — and a great example of <i>architecture explaining behaviour</i>, diagnosed from the design rather than guessed. Recall from Slide 10 that for structure, γ and β are <b>1×1 convolutions</b> — a 1×1 conv has a receptive field of exactly <b>one pixel</b>. Now consider a large flat region of a single class — the whole interior of a car, which is one uniform colour in the segmentation map. At every pixel in that region, the 1×1 conv sees the <i>same</i> colour, so it produces the <i>same</i> scale/shift everywhere. The signal there carries only <i>&quot;this class is here&quot;</i> — <b>zero information about appearance</b>. That's why generations can nail the <i>silhouette</i> of an object but fill it with a generic, texture-less blob.<br><br>Why it's <b>specific to segmentation</b>: a depth map varies <i>continuously</i> even inside one object (near edge vs far edge), so its per-pixel signal still carries shape/appearance cues; a categorical segmentation map is flat inside a class, so it doesn't. Then the two <b>fixes, both without retraining</b>: (1) <b>decay <code>lora_scale</code></b> in the late denoising steps, so once the layout is locked the model's own prior is free to invent realistic appearance; (2) a <b>softening kernel</b> on the hard silhouette edges. The takeaway line: understanding <i>where</i> the block sits told us exactly <i>why</i> this happens and pointed straight at cheap fixes.",
+    "The second artifact — and the direct answer to the natural question &quot;if we padded it, shouldn't that band just be ignored?&quot; When a frame isn't square, we <b>letterbox</b> it — add flat bands top and bottom to make it 512×512. Intuition says those bands are inert filler. They are not, and here's exactly why, in code:<br>1. <b>Padding is real pixels, not a mask.</b> The letterboxed 512×512 image <i>is</i> the training target — the code VAE-encodes the <i>whole</i> image, band included, into the latent the model is trained to reconstruct. So the model is literally supervised to produce that band.<br>2. <b>The seg map's band is a real conditioning colour.</b> The mask's pad region is filled with the &quot;Unlabeled&quot; class, which colourises to a specific colour and, through FiLM, <i>actively steers</i> the adapter in that region — it's not a null signal.<br>3. <b>Every training pair has the same band in the same place</b>, so the model very reliably <i>learns</i> the mapping &quot;band here → flat pad colour&quot; and dutifully reproduces it at generation time.<br>Why it isn't &quot;static noise&quot;: we never add noise — we add a <b>definite flat colour</b> — and diffusion has <b>no per-pixel 'ignore this region' mask</b> in its loss; the pad is supervised exactly like real content. The real fix is to <b>not pad at all</b> — train at the native aspect ratio (e.g. 512×320) so there's no band to learn. That's a design change you've scoped but not yet implemented. The one-line root cause: <i>letterbox padding is treated as real, supervised content on both the input map and the target, so the model faithfully reproduces it.</i>",
+    "The five one-line memories you want the audience to leave with. Two are general (freeze the giant + train a whisper; conditional not static), and three are <i>yours</i> (added a modality with zero core changes; the hard part was real data; architecture explains behaviour). Deliver these fast, one breath each — it's a recap, not new material. If you're short on time elsewhere, protect #3 and #4, because those are your story.",
+    "The papers this work builds on and compares against — all IDs verified. Base method: CTRLorALTer. Foundations: Stable Diffusion / LDM, LoRA, FiLM. Prior control work: ControlNet. Map sources: SegFormer, Segment Anything + Grounding DINO (= Grounded-SAM), and the CARLA simulator. Leave this up during Q&amp;A.",
+    "Close by returning to the equation — now with &quot;seg map&quot; in it — so the last thing they see is the whole talk in one line. Then open for questions. Keep the cheat-sheet below in your head.<br><span class='ref'>📄 Base paper: Stracke et al., CTRLorALTer, ECCV 2024 — arXiv:2405.07913</span>"
+  ];
+
+  // "Say it" — the delivery script per slide, index 0..total-1
+  var scripts = [
+    "Text-to-image models are incredible, but text alone can't tell them exactly where things should go. This paper — LoRAdapter — solves that with a tiny, cheap add-on that steers a frozen model using an extra signal. It already does depth and style. What we did is extend it to a new signal — segmentation maps — with two different ways of producing those maps, and without changing the model's core. That one equation up there is the entire idea; by the end of this talk every symbol in it will make sense.",
+    "Here's the plan. First, quick foundations — diffusion, the network, and LoRA — so we share a vocabulary. Then the core idea. Then the architecture. Then the part this talk is really about: our segmentation work. And finally, results and honest limitations. One thing to keep in your eye the whole time: blue means frozen — untouched pretrained weights; amber means trainable — the part we add and the signal that drives it.",
+    "Three quick foundation slides — if you already know diffusion, feel free to coast.",
+    "If I prompt 'a car on a rainy street,' I get a car somewhere — but I can't say this exact layout, or make it look like that painting. Those are two different kinds of control. Structure — where the shapes go — which you drive with a spatial map like a depth map or a segmentation mask. And style — the overall look — which you drive with a reference image. LoRAdapter's promise is to do both with one mechanism, cheaply, on a frozen model. Our contribution lives on the structure side: we make segmentation a first-class way to control the layout.",
+    "Very quickly, how the generator works. The image is compressed into a small grid called a latent. Then a network called the UNet starts from noise and, over about 30 to 50 steps, repeatedly predicts what noise to remove — sculpting an image out of static. A final step decodes it back to pixels. Two facts matter for us. First, that whole backbone stays frozen — we never retrain it, and that's where the efficiency comes from. Second, the UNet works at four different resolutions, and it's built from convolutions, which decide local shape, and attention, which carries the text. So structure conditioning targets the convolutions and leaves text alone — and whatever signal we inject has to reach all four resolution levels. Hold that thought.",
+    "The building block is LoRA. Imagine a giant pretrained weight matrix — call it W. Retraining it is expensive. LoRA freezes W completely and adds a tiny detour beside it: a matrix A that squeezes the input down to a small size, and B that expands it back. You train only A and B — a rounding error in size compared to W — and W's knowledge is never disturbed. B starts at zero, so at the beginning it does nothing and can only help. But here's the limitation: plain LoRA is static. Once trained, it applies the exact same correction to every single image. That's the thing the next idea fixes.",
+    "That limitation — 'static' — is the setup for the actual contribution.",
+    "The fix is a small, well-known trick called FiLM — feature-wise linear modulation. Take your conditioning signal — for us, the segmentation map — and from it compute two things: a scale, gamma, and a shift, beta. Then apply them right in the middle of the LoRA branch: multiply by gamma, add beta. Now the correction isn't fixed anymore — it's computed from the map, live, every step. That's the whole magic. Because it's computed on the fly, you can hand the model a segmentation map it has never seen and it will follow it — no retraining. That's what 'zero-shot control' means.",
+    "This is the single most important picture in the talk — the whole method in one diagram. Follow the input, x. It splits two ways. The blue path is the original frozen convolution — completely untouched, so the base model is fully preserved. The amber path is our small trainable branch: A shrinks the signal, then FiLM — driven by the segmentation map at the bottom — reshapes it, then B expands it back, and lambda scales how strong it is. Finally, the two paths are simply added. Notice what the segmentation map does and doesn't touch: it never touches x directly — it only steers that tiny amber branch. And lambda is a live knob — set it to zero and the whole block vanishes, leaving the original model. If you take one image away from today, take this one.",
+    "Here's the elegant part — the same block handles structure and style. The only thing that changes is what you feed as the signal. For structure, the signal is a spatial map, and the modulators are 1×1 convolutions — so you get a different nudge at every pixel, which is exactly what 'where things go' needs. For style, the signal is a single summary vector of a reference image, and the modulators are simple linear layers — one nudge for the whole picture. Same equation, different signal shape. And you tune it with one knob, lora_scale: zero turns it off, one is full strength, and you can even fade it across the denoising steps — hold the layout firmly early, then relax so the model fills in realistic detail. That unification — one block, both jobs — is exactly why the whole thing stays so small, and it's why we could add a new structure signal without inventing new machinery.",
+    "Now the engineering — the part people usually gloss over, and the reason our extension dropped in so cleanly.",
+    "In the code there are three flavours of this block — they all share the same skeleton and differ only in the signal shape. Structure uses the convolutional one. And there's a single switch that decides which layers get the treatment: it wraps only the first convolution of the ResNet blocks — not the second convolution, and crucially not the attention, which is where the text lives. So the footprint is deliberately tiny and surgical: convolutions carry local shape, which is what we want to steer, and leaving attention frozen means your prompt still behaves normally. That's the trick to getting strong control from very few trainable parameters.",
+    "How does the block actually get in there? This is genuinely clever. It's not a monkeypatch or a hook. For each target layer, the code builds our module, copies the original pretrained weights into its frozen part, and then does exactly one thing — it reassigns the layer: 'this conv1 is now our module.' The diffusers library's own, completely unmodified code still just calls self-dot-conv1, and transparently runs our math instead. So there are zero changes to the underlying library — it survives version upgrades, and it's the reason our segmentation work never had to touch this machinery at all.",
+    "Remember the UNet has four resolution levels, and the conditioning has to reach all of them. That's what this mapper solves. It takes the one segmentation map and, in a single pass, produces four versions of it — one at each resolution. Every wrapped layer knows its own depth and just grabs the matching one. And because the network is symmetric, the layers going down and the layers coming back up at the same resolution share the same map. So a single pass through the mapper conditions the entire UNet, every step — not one expensive recomputation per layer. That's the efficiency story, visualised.",
+    "Everything so far was the shared language. This next part is what we built — and it's more than just a port.",
+    "This is the slide that answers 'what did you actually do.' In the original repo, the key line hands the raw photo straight to a live depth model that computes a depth map on the fly, every single training step — so the dataset only needs images and captions. We made two deliberate changes. One: instead of computing a map live, we feed a pre-saved segmentation map and flip a flag, skip_encode, so that live encoder never runs. Two: a dataset that reads image, seg-map, and prompt together. And here's the punchline — look at the two rows. The entire back half — the mapper, the FiLM LoRA, the injection into the UNet — is byte-identical, unmodified original code. We changed how the conditioning map is produced, not how it's used. That discipline is exactly why the extension was clean, and why a depth-versus-segmentation comparison stays fair.",
+    "Why was it so clean? Because the original depth encoder follows a strict contract: a specific input shape and range in, a specific output shape and range out. We built our segmentation encoder to satisfy that exact same contract — same shapes, same ranges — so it slots straight in and the rest of the pipeline literally can't tell it's segmentation instead of depth. We also kept a hard discipline: four separated stages — compute depth, train depth, compute segmentation, train segmentation — that never share code paths. That's what lets us later put depth and segmentation side by side and trust the comparison, because the only thing that differs is the signal.",
+    "Here's a design decision that really matters. Segmentation gives you a class number per pixel — road is 0, car is 14, and so on. The tempting shortcut is to feed those numbers in as a grayscale ramp. But that's a trap: it invents a false ordering. 'Pole' isn't between 'fence' and 'traffic light' just because its number is — but a grayscale ramp says they're neighbours, and the mapper, which was built for depth's smooth gradient, would believe it. So instead we colourise every class into a distinct, well-separated colour — which turns categories into a signal the network can actually read, and it's exactly what ControlNet's segmentation model does too. Two supporting details: we only ever resize with nearest-neighbour, because averaging class numbers would invent classes that don't exist; and we keep a fixed palette, so the same class is always the same colour in training and inference. That decision is really the crux of making segmentation work on machinery built for depth.",
+    "This is the unglamorous part, and honestly where most of the real work was — making it survive actual data. Four things. First, the real masks are 16-bit images, not the 8-bit you'd assume, so we read the raw pixels directly, which keeps the labels correct across any library version. Second — and this is a genuine bug we caught and fixed — the non-square masks were being stretched to square while the photo was letterboxed, which misaligned them by up to nineteen percent at the top and bottom. That means the model was being told 'the road is here' while the actual road was somewhere else — a silent, damaging mismatch. We fixed it so the mask uses the exact same geometry as its image. Third, a toggle for how we square things. And fourth, a strict parity rule: the maps at training and inference must come from the same model, same preprocessing, same value range — or the whole thing quietly degrades. None of this is in the paper; it's what it takes to make it real.",
+    "Because both obey the same contract, we can swap the entire front end — and we built two. SegFormer: a real segmentation network we run offline on photos. It's capped at nineteen classes, but it has a live path, which means it can even re-segment the generated image and score how faithfully the layout was followed. Grounded-SAM: here the maps come straight out of the CARLA simulator's segmentation camera — twenty-nine classes, and no model has to run to produce them, they're free at capture time. The trade-off is that its encoder is a training-only placeholder with no live path, so that self-scoring metric is simply skipped rather than faked. But look at the bottom row — the generative core is identical for both. The real point isn't the feature table; it's that one clean contract absorbs both a real-world segmenter and a simulator's native labels without touching the core.",
+    "Generation quality is subjective, so we built instruments to make it measurable. Every time a checkpoint is saved, it renders a set of fixed scenes as four panels: the original photo, the segmentation map, the generation with the prompt, and the generation without the prompt. That last panel is important — it isolates pure structure adherence, so you can tell whether the model followed the map or whether the prompt did the work. On top of that we log image-quality trends per checkpoint, a controllability score where the encoder supports it, and dataset coverage scans — so when a class renders badly, we can first ask 'was it even in the training data?' rather than blaming the model. In short, we made it reproducible and measurable, not a vibe check.",
+    "Last stretch — results, and I'll be honest about what's proven and what isn't.",
+    "I want to keep two things separate and be honest about both. On the left, the paper's results — for depth and style: it uses the fewest trainable parameters of any method compared, and it's state-of-the-art at structure control. Those are their numbers, for their signals. On the right is our segmentation work, and here's exactly where we stand. What's verified: the core mechanism transfers — a real CARLA-conditioned sample follows the input layout, roads and buildings and vehicles all land where the map says. We also found and fixed that alignment bug, confirmed by actually running it. Two artifacts are still open — I'll explain both next. And full-scale quality numbers are pending the real training run on the cluster. The measurement harness is built and waiting; I'm deliberately not going to quote a metric we haven't earned at scale. That honesty is the point.",
+    "Here's a limitation we diagnosed straight from the architecture — and it's specific to segmentation. Those modulators, gamma and beta, are one-by-one convolutions — they see exactly one pixel. So inside a big flat region of a single class — say the whole interior of a car, all one colour — every pixel gets the identical nudge. The signal literally only says 'this class is here' and carries nothing about what it should look like. Depth doesn't have this problem, because depth varies smoothly even inside an object. The nice thing is, understanding where the block sits tells us exactly why this happens — and both fixes are cheap and need no retraining: fade the conditioning strength in the late denoising steps so the model's own imagination fills in appearance, and soften the hard silhouette edges. Architecture explaining behaviour, and pointing straight at the fix.",
+    "The second artifact — and this answers a question I got: why does the padding actually get rendered? When a frame isn't square, we pad it with flat bands top and bottom. You'd think that band is just filler and should stay inert. It doesn't, for three reasons — and they're all in the code. First, that padding is real pixels — the padded image is what the model is trained to reproduce, band included. Second, the segmentation map's band is a real colour — 'Unlabeled' — which actively steers the block in that region. And third, every training image has the same band in the same place, so the model very reliably learns to paint it. It's not random noise, because we never add noise — we add a definite flat colour, and diffusion has no notion of 'ignore this area.' The real fix is to stop padding altogether — train at the native aspect ratio so there's no band to learn. That's a design change we've scoped but not yet made.",
+    "Five things to walk out with. One: freeze the giant, train a whisper — the backbone never moves. Two: the block is conditional, not static — a signal reshapes it live. Three, and this is ours: we added a whole new modality — segmentation — with zero changes to the model core, by respecting the existing contract. Four: the real work was making it survive real data — colour instead of raw IDs, the 16-bit format, that nineteen-percent alignment bug, the parity rule. And five: understanding the architecture is what let us explain the artifacts and find cheap fixes. That's the talk.",
+    "These are the papers we build on and compare against — the base method is CTRLorALTer, published at ECCV 2024, with the foundations being Stable Diffusion, LoRA and FiLM. Our two map sources are SegFormer, and Grounded-SAM — which is Grounding DINO plus Segment Anything — on data from the CARLA simulator. Happy to point you to any of them.",
+    "So — one frozen model, one tiny conditional block, and we taught it a new way to see structure, for the cost of a rounding error in parameters. Thank you — I'm happy to take questions."
+  ];
+
+  // "What this slide means" — one-line summary per slide
+  var summaries = [
+    "The whole talk in one line: a frozen generator + a tiny trainable block steered by a segmentation map.",
+    "Roadmap; Part 4 (our work) is the heart. Blue = frozen, amber = trainable.",
+    "Divider — foundations begin.",
+    "Text can't control layout or exact style — that's what structure &amp; style conditioning add.",
+    "Diffusion = VAE compress → UNet denoise → decode; the UNet is frozen and multi-resolution.",
+    "LoRA = freeze W, train tiny A/B. But plain LoRA is static.",
+    "Divider — the core idea.",
+    "FiLM makes LoRA conditional: the signal computes a live scale γ and shift β.",
+    "The whole method: frozen W(x) + an amber A→FiLM(seg map)→B branch, added together.",
+    "One block, two jobs — structure (spatial map) vs style (pooled vector).",
+    "Divider — inside the architecture.",
+    "It wraps only conv1 of the ResNet blocks — not attention, so text still works.",
+    "Inserted by one setattr — zero changes to the diffusers library.",
+    "A mapper fans one map into 4 resolutions; each layer grabs its own.",
+    "Divider — our contribution starts.",
+    "We feed a pre-saved seg map (skip_encode) instead of computing depth live — the core is unchanged.",
+    "Our seg encoder matches the exact same contract as the depth encoder.",
+    "Colourise classes to distinct RGB — a grayscale ID ramp would fake an ordering.",
+    "The real work: 16-bit format, a ~19% alignment bug, and the parity rule.",
+    "Two swappable map sources: SegFormer (real segmenter) vs Grounded-SAM (CARLA sim).",
+    "We built the harness to measure quality — grids, PSNR/SSIM, mIoU, coverage.",
+    "Divider — results, honestly.",
+    "The paper's depth/style results vs our segmentation results — kept separate and honest.",
+    "1×1-conv FiLM = flat regions carry no appearance info; fixed at inference.",
+    "The pad band renders because padding is real, supervised content — not inert noise.",
+    "Five takeaways; #3 and #4 are your story.",
+    "The papers we build on — all arXiv IDs verified.",
+    "Close on the equation; open Q&amp;A."
+  ];
+
+  function render(){
+    slides.forEach(function(s,n){ s.classList.toggle('active', n===i); });
+    cur.textContent = i+1;
+    progress.style.width = ((i+1)/total*100) + '%';
+    if(notesOpen) fillNotes();
+    if(slides[i]) slides[i].scrollTop = 0;
+  }
+  function fillNotes(){
+    var n = slides[i].querySelector('.notes');
+    document.getElementById('notesDesc').innerHTML =
+      '<span class="nlbl">What this slide means</span><p style="margin:0 0 13px; color:var(--ink)">' + (summaries[i] || '—') + '</p>' +
+      '<span class="nlbl">Understand it</span>' + (descriptions[i] || '<span style="color:var(--faint)">—</span>');
+    document.getElementById('notesScript').innerHTML = scripts[i]
+      ? '<span class="nlbl">Say it</span><p class="say">' + scripts[i] + '</p>'
+      : '';
+    notesBody.innerHTML =
+      '<span class="nlbl">Quick cues</span>' + (n ? n.innerHTML : '<p style="color:var(--faint)">—</p>');
+    notesMeta.textContent = 'slide ' + (i+1) + ' / ' + total;
+  }
+  function go(d){ i = Math.max(0, Math.min(total-1, i+d)); render(); }
+  function toggleNotes(){ notesOpen = !notesOpen; overlay.classList.toggle('show', notesOpen); if(notesOpen) fillNotes(); }
+
+  document.addEventListener('keydown', function(e){
+    if(e.key==='ArrowRight' || e.key==='PageDown'){ e.preventDefault(); go(1); }
+    else if(e.key==='ArrowLeft' || e.key==='PageUp'){ e.preventDefault(); go(-1); }
+    else if(e.key===' '){ e.preventDefault(); go(e.shiftKey?-1:1); }
+    else if(e.key==='Home'){ e.preventDefault(); i=0; render(); }
+    else if(e.key==='End'){ e.preventDefault(); i=total-1; render(); }
+    else if(e.key==='n' || e.key==='N'){ e.preventDefault(); toggleNotes(); }
+  });
+  document.getElementById('deck').addEventListener('click', function(e){
+    if(e.target.closest('a')) return;
+    var x = e.clientX, w = window.innerWidth;
+    if(x > w*0.62) go(1); else if(x < w*0.38) go(-1);
+  });
+  render();
+})();
+</script>
