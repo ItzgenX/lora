@@ -5,3 +5,9 @@ _target_: src.model.SD15
 pipeline_type: diffusers.StableDiffusionPipeline
 model_name: runwayml/stable-diffusion-v1-5
 local_files_only: ${local_files_only}
+# Set when base_model swaps to a checkpoint published WITHOUT its own VAE
+# (e.g. Realistic Vision's "noVAE" variant) -- point this at a separate VAE
+# folder/hub id (standard pairing: stabilityai/sd-vae-ft-mse, a.k.a.
+# vae-ft-mse-840000-ema-pruned). null (default) = use whatever VAE ships
+# inside model_name, unchanged behaviour.
+vae_path: null

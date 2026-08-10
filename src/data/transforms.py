@@ -153,31 +153,64 @@ class SquarePad:
 from torchvision import transforms as _tv   # local alias: avoids shadowing outer scope
 
 
-RESIZE_MODES = ("letterbox", "CenterCrop")
+RESIZE_MODES = ("letterbox", "CenterCrop", "aspect")
 
 
-def _square_rgb_steps(size: int, resize_mode: str) -> list:
+def normalize_size(size) -> tuple:
     """
-    The GEOMETRIC steps (no ToTensor/Normalize) that square a PIL RGB image,
+    Normalize a config `size` value to an explicit (width, height) pair.
+
+    Accepts a single int (square, original behaviour) or a (width, height)
+    list/tuple. "letterbox"/"CenterCrop" always PRODUCE a square, so they only
+    ever accept an int; "aspect" (see below) targets an explicit
+    (width, height) that need not be square, so it accepts either.
+    """
+    if isinstance(size, int):
+        return (size, size)
+    w, h = size
+    return (int(w), int(h))
+
+
+def _square_rgb_steps(size, resize_mode: str) -> list:
+    """
+    The GEOMETRIC steps (no ToTensor/Normalize) that resize a PIL RGB image,
     for the chosen resize_mode. Shared by build_seg_preprocess (adds tensor
     conversion, for the model) and build_seg_display_preprocess (stays PIL,
     for on-screen panels) so the two can never geometrically disagree.
 
       "letterbox"  : SquarePad (flat-fill pad, current default) then Resize.
                      Keeps 100% of the scene; adds a flat-colour pad band.
+                     `size` must be an int (letterbox always produces a square).
       "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
                      — torchvision Resize(size) [shorter edge -> size, aspect kept]
                      then CenterCrop(size). No pad band, but crops the longer
                      edge's overhang (~37% of width for this project's 1280x800
-                     frames) off the left/right.
+                     frames) off the left/right. `size` must be an int.
+      "aspect"     : NO pad, NO crop — a direct resize to an explicit
+                     (width, height) target chosen close to the source aspect
+                     ratio (e.g. 512x320 for a 1280x800 source: 1280/800 = 1.6
+                     = 512/320 exactly, both divisible by 64). Eliminates the
+                     letterbox pad band entirely (confirmed learned into
+                     generated output on the segformer branch — same
+                     SquarePad code, same mechanism applies here) instead of
+                     managing it. `size` may be an int or a (width, height) pair.
     """
     assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
     if resize_mode == "letterbox":
+        assert isinstance(size, int), "letterbox requires a square int size"
         return [SquarePad(), _tv.Resize((size, size))]
-    return [_tv.Resize(size), _tv.CenterCrop(size)]
+    if resize_mode == "CenterCrop":
+        assert isinstance(size, int), "CenterCrop requires a square int size"
+        return [_tv.Resize(size), _tv.CenterCrop(size)]
+    # "aspect": direct resize to (width, height). torchvision.Resize's tuple
+    # form is (height, width) -- the OPPOSITE axis order from PIL's
+    # (width, height) used in square_id_map below; spelled out explicitly to
+    # avoid silently swapping width/height for a non-square target.
+    w, h = normalize_size(size)
+    return [_tv.Resize((h, w))]
 
 
-def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
+def build_seg_preprocess(size, resize_mode: str = "letterbox"):
     """
     Build the ONE canonical RGB preprocessing pipeline for the SEGMENTATION pipeline.
 
@@ -191,9 +224,12 @@ def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
       This is the range every encoder slot in src/model.py expects.
 
     Args:
-        size: final square side in pixels (e.g. 512). Must match cfg.size.
-        resize_mode: "letterbox" (default) or "CenterCrop" — see _square_rgb_steps.
-          This is a per-run TRAINING CHOICE: both techniques are
+        size: an int (square side, e.g. 512) or a (width, height) pair
+          (e.g. (512, 320), only valid with resize_mode="aspect"). Must match
+          cfg.size.
+        resize_mode: "letterbox" (square, default) / "CenterCrop" (square) /
+          "aspect" (non-square, no pad no crop) — see _square_rgb_steps.
+          This is a per-run TRAINING CHOICE: all techniques are
           selectable via the `resize_mode` config key so results can be compared
           by training/inferring twice, once per mode, on real data. The seg-ID map
           MUST use the identical mode + geometry (see square_id_map below) or
@@ -206,20 +242,20 @@ def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     ])
 
 
-def build_seg_display_preprocess(size: int, resize_mode: str = "letterbox"):
+def build_seg_display_preprocess(size, resize_mode: str = "letterbox"):
     """
-    Same geometry as build_seg_preprocess, but stops after squaring — returns a
-    PIL.Image, not a tensor. For DISPLAY-ONLY panels (e.g. the inference grid's
-    ORIGINAL panel) that must visually match what the model actually saw,
-    without needing the [-1,1] tensor conversion.
+    Same geometry as build_seg_preprocess, but stops after resizing — returns
+    a PIL.Image, not a tensor. For DISPLAY-ONLY panels (e.g. the inference
+    grid's ORIGINAL panel) that must visually match what the model actually
+    saw, without needing the [-1,1] tensor conversion.
     """
     return _tv.Compose(_square_rgb_steps(size, resize_mode))
 
 
-def square_id_map(ids_pil, size: int, resize_mode: str = "letterbox", pad_id: int = 0):
+def square_id_map(ids_pil, size, resize_mode: str = "letterbox", pad_id: int = 0):
     """
-    Square a raw class-ID PIL image (mode "L", one integer id per pixel) to
-    (size, size), using the SAME geometric technique as build_seg_preprocess
+    Resize a raw class-ID PIL image (mode "L", one integer id per pixel) to
+    the target size, using the SAME geometric technique as build_seg_preprocess
     applies to the paired RGB image — so image and map stay pixel-aligned
     regardless of which resize_mode a run picked. NEAREST-only: averaging or
     blending class ids fabricates classes that don't exist.
@@ -230,14 +266,27 @@ def square_id_map(ids_pil, size: int, resize_mode: str = "letterbox", pad_id: in
 
       "letterbox"  : pad the shorter side with `pad_id` (mirrors SquarePad's
                      exact pad-before/pad-after split), then NEAREST resize to
-                     (size, size).
+                     (size, size). `size` must be an int.
       "CenterCrop" : replicate torchvision's Resize(size) + CenterCrop(size)
                      geometry exactly (same shorter-edge-to-size scale, same
                      round-half crop offsets) but with NEAREST interpolation
                      instead of the RGB path's default bilinear resize.
+                     `size` must be an int.
+      "aspect"     : NO pad, NO crop — direct NEAREST resize to an explicit
+                     (width, height) target (see _square_rgb_steps for the
+                     rationale). `pad_id` is unused in this mode (nothing is
+                     padded). `size` may be an int or a (width, height) pair.
     """
     assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
     w, h = ids_pil.size
+
+    if resize_mode == "aspect":
+        target_wh = normalize_size(size)   # PIL order: (width, height)
+        if ids_pil.size != target_wh:
+            ids_pil = ids_pil.resize(target_wh, Image.NEAREST)
+        return ids_pil
+
+    assert isinstance(size, int), f"{resize_mode!r} requires a square int size"
 
     if resize_mode == "letterbox":
         if w != h:

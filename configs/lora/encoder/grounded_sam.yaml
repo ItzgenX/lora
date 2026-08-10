@@ -1,18 +1,34 @@
 defaults:
   - _self_
 
-# Grounded-SAM encoder slot (Tier 1 — training on pre-saved maps).
+# Grounded-SAM encoder slot.
 #
-# This is a LIGHTWEIGHT slot filler, NOT a live segmenter. Training feeds
+# TIER 1 (default, live=false): a LIGHTWEIGHT slot filler. Training feeds
 # pre-computed Grounded-SAM colour maps straight to the mapper via
 # skip_encode=True, so the encoder's forward() is never called and no
-# GroundingDINO/SAM weights are loaded. It only needs to exist as an nn.Module
-# for accelerate to .prepare().
+# GroundingDINO/SAM weights are loaded even if live=true is set here -- they
+# load LAZILY, only on the first real forward()/label_ids() call.
 #
-# Deliberately has NO `model` key (unlike segformer.yaml): there is no HF
-# checkpoint to load. grounded_sam_training.py detects the absence and skips the
-# encoder.model rewrite + the live-segmenter mIoU metric automatically.
+# TIER 2 (live=true, added 2026-08): a REAL encoder -- runs GroundingDINO +
+# SAM via transformers (AutoModelForZeroShotObjectDetection + SamModel), your
+# 29 CARLA class names as the detection prompt. Needed for inference on a
+# brand-new image with no pre-computed mask, and for the mIoU controllability
+# metric. VERIFIED BY EXECUTION 2026-08 (real GPU, real downloaded weights,
+# a synthetic test image) -- see src/encoders/grounded_sam_encoder.py's class
+# docstring for exactly what was and wasn't verified.
 #
-# Live map generation for inference on NEW images is Tier 2 (not built here).
+# `model` key intentionally absent even in live mode: there is no SINGLE HF
+# checkpoint for this encoder (it uses TWO: grounding_dino_model + sam_model,
+# below) -- grounded_sam_training.py's `model` in cfg.lora.struct.encoder`
+# guard already handles this (checks for the `model` key's absence).
 _target_: src.encoders.grounded_sam_encoder.GroundedSamEncoder
 size: ${size}
+
+# ---- Tier 2 (live) settings -- ignored entirely when live: false ---------- #
+live: false
+classes_file: configs/grounded_sam_classes.json   # loaded internally, see class docstring
+grounding_dino_model: IDEA-Research/grounding-dino-base   # largest non-giant HF variant
+sam_model: facebook/sam-vit-huge                          # largest/most accurate SAM
+box_threshold: 0.3     # GroundingDINO detection confidence cutoff
+text_threshold: 0.25   # GroundingDINO per-token text-match cutoff
+local_files_only: ${local_files_only}

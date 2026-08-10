@@ -91,6 +91,7 @@ from tqdm.auto import tqdm
 from src.model import ModelBase
 from src.utils import add_lora_from_config, save_checkpoint, print_gpu_diagnostics, write_training_params_txt, compute_psnr_ssim, compute_miou
 from src.data.seg_palette import seg_palette_tensor, seg_ids_from_colormap
+from src.data.transforms import normalize_size
 
 
 torch.set_float32_matmul_precision("high")
@@ -129,7 +130,7 @@ def _seg_scene_image(
     orig_11:  torch.Tensor,    # [3,H,W] in [-1,1]  — raw validation image
     seg_01:   torch.Tensor,    # [3,H,W] in [0,1]   — pre-computed seg colour map
     pred_pil: Image.Image,     # PIL — generation WITH the text prompt
-    size:     int,
+    size,
     raw_pil:  Image.Image | None = None,  # PIL or None — generation WITHOUT prompt
 ) -> Image.Image:
     """
@@ -143,28 +144,30 @@ def _seg_scene_image(
         orig_11 : [3,H,W] tensor in [-1,1]   (raw validation image from dataset)
         seg_01  : [3,H,W] tensor in [0,1]    (pre-computed seg conditioning colour map)
         pred_pil: PIL                         (generation WITH the text prompt)
-        size    : square side for each panel in pixels
+        size    : int (square) or (width, height) pair for each panel in pixels
         raw_pil : PIL or None                 (generation WITHOUT a prompt; only
                                                when grid_include_empty_prompt=true)
     """
+    size_w, size_h = normalize_size(size)
+    target = (size_w, size_h)   # PIL .resize() order: (width, height)
     orig_np = np.asarray(
         TF.to_pil_image(((orig_11.float() + 1) / 2).clamp(0, 1).cpu())
-        .resize((size, size)).convert("RGB")
+        .resize(target).convert("RGB")
     )
     seg_np  = np.asarray(
         TF.to_pil_image(seg_01.float().clamp(0, 1).cpu())
-        .resize((size, size)).convert("RGB")
+        .resize(target).convert("RGB")
     )
-    pred_np = np.asarray(pred_pil.resize((size, size)).convert("RGB"))
+    pred_np = np.asarray(pred_pil.resize(target).convert("RGB"))
 
     texts   = ["ORIGINAL", "SEG MAP", "PREDICTED"]
     columns = [orig_np, seg_np, pred_np]
 
     if raw_pil is not None:
         texts.append("RAW SEG GEN")
-        columns.append(np.asarray(raw_pil.resize((size, size)).convert("RGB")))
+        columns.append(np.asarray(raw_pil.resize(target).convert("RGB")))
 
-    labels = np.concatenate([_seg_label_bar(size, t) for t in texts], axis=1)
+    labels = np.concatenate([_seg_label_bar(size_w, t) for t in texts], axis=1)
     panels = np.concatenate(columns, axis=1)
     return Image.fromarray(np.concatenate([labels, panels], axis=0))
 
@@ -196,6 +199,10 @@ def _save_checkpoint_segmentation_images(
     prompts, images = [], []
     psnrs, ssims = [], []   # quantitative metric, FIXED scenes only (see below)
     mious = []              # controllability metric, FIXED scenes only (see below)
+    # (width, height) once here -- sample_custom needs explicit height/width or
+    # it silently generates SQUARE (see src/model.py sample_custom docstring);
+    # the PSNR/SSIM/mIoU resizes below need the same PIL (width,height) target.
+    size_w, size_h = normalize_size(cfg.size)
     # Use the EXACT palette the dataset colourised with (the Grounded-SAM/
     # CARLA class palette loaded from classes_file). Taking it from the
     # dataset guarantees it matches the maps.
@@ -214,10 +221,13 @@ def _save_checkpoint_segmentation_images(
         prompt = cfg.prompt if cfg.get("prompt") else item["caption"]
 
         # Generate WITH the prompt; fixed seed per scene so checkpoints are comparable.
+        # height/width explicit: sample_custom would otherwise silently generate
+        # SQUARE regardless of cfg.size (see src/model.py sample_custom docstring).
         pred = model.sample_custom(
             prompt=[prompt], num_images_per_prompt=1, cs=cs,
             generator=torch.Generator(device=device).manual_seed(cfg.seed),
             cfg_mask=cfg_mask, skip_encode=True,
+            height=size_h, width=size_w,
         )[0]
 
         # Generate WITHOUT the prompt (pure seg adherence) — only when requested.
@@ -227,6 +237,7 @@ def _save_checkpoint_segmentation_images(
                 prompt=[""], num_images_per_prompt=1, cs=cs,
                 generator=torch.Generator(device=device).manual_seed(cfg.seed),
                 cfg_mask=cfg_mask, skip_encode=True,
+                height=size_h, width=size_w,
             )[0]
 
         img = _seg_scene_image(item["jpg"], seg[0], pred, cfg.size, raw_pil=raw)
@@ -242,8 +253,8 @@ def _save_checkpoint_segmentation_images(
         if kind == "fixed":
             orig_u8 = np.asarray(TF.to_pil_image(
                 ((item["jpg"].float() + 1) / 2).clamp(0, 1).cpu()
-            ).resize((cfg.size, cfg.size)).convert("RGB"))
-            pred_u8 = np.asarray(pred.resize((cfg.size, cfg.size)).convert("RGB"))
+            ).resize((size_w, size_h)).convert("RGB"))
+            pred_u8 = np.asarray(pred.resize((size_w, size_h)).convert("RGB"))
             p_, s_ = compute_psnr_ssim(orig_u8, pred_u8)
             psnrs.append(p_); ssims.append(s_)
 
@@ -257,10 +268,10 @@ def _save_checkpoint_segmentation_images(
             # Requires a live segmenter (SegFormer): skipped when the encoder is
             # the Grounded-SAM Tier-1 slot filler (live_available=False).
             if _live_seg:
-                target_ids = seg_ids_from_colormap(seg[0], _palette)   # [size,size] long
-                gen_t = (TF.to_tensor(pred.resize((cfg.size, cfg.size)).convert("RGB"))
+                target_ids = seg_ids_from_colormap(seg[0], _palette)   # [size_h,size_w] long
+                gen_t = (TF.to_tensor(pred.resize((size_w, size_h)).convert("RGB"))
                          .unsqueeze(0).to(device) * 2.0 - 1.0)         # [1,3,H,W] in [-1,1]
-                pred_ids = model.encoders[0].label_ids(gen_t)[0]       # [size,size] long
+                pred_ids = model.encoders[0].label_ids(gen_t)[0]       # [size_h,size_w] long
                 mious.append(compute_miou(pred_ids, target_ids,
                                           num_classes=int(_palette.shape[0])))
 
@@ -360,17 +371,36 @@ def main(cfg):
     # training-only slot filler), so only rewrite encoder.model when the encoder
     # config actually has that key (SegFormer does; GroundedSamEncoder does not).
     _enc_has_model = "model" in cfg.lora.struct.encoder
+    # Tier 2 (live Grounded-SAM) keys: present whenever configs/lora/encoder/
+    # grounded_sam.yaml is in play (regardless of live: true/false), since
+    # the encoder only actually LOADS them lazily if live=true. Rewritten to
+    # LOCAL paths the same way as every other model when offline, matching
+    # download_sd15.py's --with-live-gsam save locations.
+    _enc_has_live_models = "grounding_dino_model" in cfg.lora.struct.encoder
     if cfg.local_files_only:
         os.environ["HF_HUB_OFFLINE"]      = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         cfg.model.model_name              = os.path.join(_root, cfg.base_model_path)
         if _enc_has_model:
             cfg.lora.struct.encoder.model = os.path.join(_root, cfg.seg_model_path)
+        if _enc_has_live_models:
+            cfg.lora.struct.encoder.grounding_dino_model = os.path.join(
+                _root, "checkpoints/local_models/grounding-dino-base")
+            cfg.lora.struct.encoder.sam_model = os.path.join(
+                _root, "checkpoints/local_models/sam-vit-huge")
+        # vae_path: same relative-path-under-Hydra's-chdir problem as
+        # base_model_path/seg_model_path above -- make absolute here too, but
+        # only when actually set (default null = use the base model's own VAE,
+        # nothing to resolve).
+        if cfg.model.get("vae_path"):
+            cfg.model.vae_path = os.path.join(_root, cfg.model.vae_path)
     else:
         cfg.model.model_name              = cfg.base_model_name
         if _enc_has_model:
             cfg.lora.struct.encoder.model = cfg.seg_model_name
+    _vae_path_display = cfg.model.get("vae_path") or "(none -- using base model's own VAE)"
     print(f"[model] base             = {cfg.model.model_name}")
+    print(f"[model] vae_path         = {_vae_path_display}")
     print(f"[model] seg encoder      = {cfg.lora.struct.encoder.model if _enc_has_model else cfg.lora.struct.encoder._target_}")
     print(f"[model] local_files_only = {cfg.local_files_only}")
 

@@ -67,18 +67,27 @@ classes_file: configs/grounded_sam_classes.json
 # 0 = CARLA "Unlabeled". Only used when resize_mode=letterbox (ignored by CenterCrop).
 seg_pad_id: 0
 
-# ---- Resize technique -----------------------------
+# ---- Resize technique (2026-08 decision, supersedes letterbox default) ---- #
 # MUST match the technique the loaded checkpoint (ckpt_path) was TRAINED with
 # (grounded_sam_inference.py warns loudly on a mismatch by reading best_model/info.txt).
-#   "letterbox"  : SquarePad geometry (default).
+#   "aspect"     : direct resize to the non-square `size` below -- NO pad, NO
+#                  crop. Current default -- letterbox's pad band was confirmed
+#                  LEARNED into generated output on the segformer branch (same
+#                  SquarePad code, same mechanism applies here); aspect mode
+#                  eliminates it instead of managing it. See GENERATION_QUALITY_GROUNDED_SAM.md.
+#   "letterbox"  : SquarePad geometry. Old default, kept for comparison.
 #   "CenterCrop" : original stock LoRAdapter recipe (configs/data/local.yaml).
 # Also names the output folder below (outputs/inference/grounded_sam_<mode>/...)
 # so results are always traceable to the technique that produced them:
-#   python grounded_sam_inference.py resize_mode=CenterCrop ckpt_path=... inference.json_file=...
-resize_mode: letterbox
+#   python grounded_sam_inference.py resize_mode=letterbox ckpt_path=... inference.json_file=...
+resize_mode: aspect
 
 # ---- Global resolution (must match training) ------------------------------
-size: 512          # square canvas; must match what training/calc used
+# [width, height] -- non-square, matches 1280x800 source aspect ratio EXACTLY
+# (1280/800 = 512/320 = 1.6), divisible by 64 (SD1.5 UNet requirement), and
+# keeps the long side AT (not beyond) SD1.5's native 512 -- deliberately more
+# conservative than a larger same-ratio target like 832x512.
+size: [512, 320]
 seed: 42
 
 # ---- Device -----------------------------------------------------------
@@ -99,12 +108,18 @@ device: null
 #   local_files_only: false  -> use HUB id (base_model_name); download if missing.
 local_files_only: true
 
-base_model_name:  runwayml/stable-diffusion-v1-5
-base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
+# 2026-08 decision: matches configs/experiment/train_grounded_sam.yaml --
+# inference MUST use the SAME base checkpoint training used (parity rule).
+base_model_name:  emilianJR/epiCRealism
+base_model_path:  checkpoints/local_models/epicrealism
+
+# Paired-in VAE upgrade, must match training. See src/model.py ModelBase.__init__.
+vae_path: checkpoints/local_models/sd-vae-ft-mse
 
 # ---- Base diffusion model -------------------------------------------------
 model:
   model_name: ${base_model_name}   # default; grounded_sam_inference.py overrides to base_model_path when local_files_only=true
+  vae_path: ${vae_path}            # default; grounded_sam_inference.py overrides to an absolute path when local_files_only=true
 
 # ---- LoRA (inference mode — weights not updated) --------------------------
 lora:
@@ -143,6 +158,13 @@ inference:
   n_samples:           1    # number of generated images per input image
   num_inference_steps: 50   # diffusion denoising steps
   guidance_scale:      7.5  # CFG scale
+  # What the model should steer AWAY from. Passed straight through to the
+  # underlying diffusers pipeline (sample_easy's **kwargs -> self.pipe(...)),
+  # which natively supports negative_prompt -- no model.py change needed.
+  # Only applied to the main prompt-conditioned generation, NOT the "RAW SEG
+  # GEN" empty-prompt panel below (that panel's whole point is zero text
+  # influence -- adding a negative prompt there would defeat it).
+  negative_prompt: null
 
   # Generation-quality knobs (see model.py sample_easy docstring, and
   # LORA_ARCHITECTURE.md §8, for the full reasoning). Defaults below are all

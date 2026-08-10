@@ -61,6 +61,7 @@ class ModelBase(ABC, nn.Module):
         use_controlnet: bool = False,
         annotator: None | nn.Module = None,
         tiny_vae: bool = False,
+        vae_path: str | None = None,
     ) -> None:
         super().__init__()
         self.params_to_optimize: list[nn.Parameter] = []
@@ -83,6 +84,17 @@ class ModelBase(ABC, nn.Module):
 
         if tiny_vae:
             vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", local_files_only=local_files_only)
+            addition_config["vae"] = vae
+        elif vae_path is not None:
+            # For base checkpoints published WITHOUT a baked-in VAE (e.g. a
+            # "noVAE" community finetune) -- those checkpoints EXPECT a
+            # separate VAE to be paired in, most commonly
+            # vae-ft-mse-840000-ema-pruned. Without this, `self.vae = self.pipe.vae`
+            # (below) would silently load whatever placeholder/default VAE
+            # from_pretrained finds (or error), producing broken latents with
+            # no clear signal why. Mutually exclusive with tiny_vae.
+            from diffusers import AutoencoderKL
+            vae = AutoencoderKL.from_pretrained(vae_path, local_files_only=local_files_only)
             addition_config["vae"] = vae
 
         if self.use_controlnet:
@@ -607,10 +619,25 @@ class SD15(ModelBase):
         cfg_mask: list[bool] | None = None,
         prompt_offset_step: int = 0,
         skip_encode: bool = False,
+        height: int | None = None,
+        width: int | None = None,
         **kwargs,
     ):
-        height = self.unet.config.sample_size * self.pipe.vae_scale_factor
-        width = self.unet.config.sample_size * self.pipe.vae_scale_factor
+        # height/width default to the UNet's square sample_size (unchanged
+        # behaviour) UNLESS the caller passes them explicitly. Before this,
+        # there was NO way to produce non-square output from this method at
+        # all -- the values were computed unconditionally, so any override
+        # attempt was silently ignored. grounded_sam_training.py's
+        # checkpoint-monitoring grids call this method directly (NOT
+        # sample_easy, which threads height/width through **kwargs to the
+        # underlying pipeline) -- without this fix, every monitoring image
+        # generated during non-square ("aspect" resize_mode) training would
+        # have silently come out square and mismatched against its own
+        # (non-square) seg-map/original panels.
+        if height is None:
+            height = self.unet.config.sample_size * self.pipe.vae_scale_factor
+        if width is None:
+            width = self.unet.config.sample_size * self.pipe.vae_scale_factor
 
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1

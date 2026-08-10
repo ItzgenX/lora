@@ -56,7 +56,7 @@ class SegJsonDataset(Dataset):
         self,
         json_file: Path,
         image_transform,           # torchvision Compose for the RGB image (-> [-1,1])
-        size: int = 512,           # square side for the conditioning colour map
+        size: int | tuple = 512,   # square side, or (width, height) for resize_mode="aspect"
         project_root: Path = None,
         palette: list = None,      # class-id -> RGB; REQUIRED (no fallback —
                                    # see module docstring), loaded from your
@@ -139,7 +139,9 @@ class SegJsonDataset(Dataset):
 
     def _load_seg_colormap(self, seg_path: Path) -> torch.Tensor:
         """
-        Load a raw class-ID PNG and return a colourised map [3, size, size] in [0,1].
+        Load a raw class-ID PNG and return a colourised map [3, H, W] in [0,1],
+        where (W, H) = normalize_size(self.size) -- square unless resize_mode
+        is "aspect".
 
         Steps:
           1. Read RAW pixel values as class ids. Grounded-SAM/CARLA masks are
@@ -210,7 +212,7 @@ class SegJsonDataModule:
     def __init__(
         self,
         json_file: str,
-        size: int = 512,
+        size: int | tuple = 512,   # square side, or (width, height) for resize_mode="aspect"
         val_json_file: str = None,
         batch_size: int = 8,
         val_batch_size: int = 4,       # 4 = safe under no_grad; matches depth default

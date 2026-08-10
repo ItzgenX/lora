@@ -41,6 +41,7 @@ import colorsys
 import json
 from pathlib import Path
 
+import torch
 from torch import nn
 
 
@@ -172,65 +173,420 @@ def load_grounded_sam_palette(
 
 
 # ============================================================================ #
-#  ENCODER SLOT MODULE (Tier 1 — training only)                                 #
+#  TEXT-PROMPT PHRASING for GroundingDINO -- CamelCase class name -> a natural  #
+#  noun phrase it can actually search for.                                     #
+# ============================================================================ #
+#
+# GroundingDINO wants lowercase, period-separated noun phrases ("car. road.
+# sky."), not raw taxonomy identifiers. A few CARLA class names need manual
+# rewording (SideWalks -> "sidewalk", not "side walks"); everything else
+# falls back to a generic CamelCase -> "spaced lowercase" split.
+_PROMPT_OVERRIDES = {
+    "SideWalks":    "sidewalk",
+    "TrafficLight": "traffic light",
+    "TrafficSign":  "traffic sign",
+    "RoadLine":     "road line marking",
+    "RailTrack":    "rail track",
+    "GuardRail":    "guard rail",
+}
+
+# Classes with no clear visual referent to search for -- excluded from the
+# GroundingDINO prompt by default (left as background/Unlabeled unless a more
+# specific class is detected there). "Unlabeled" is id 0 and never prompted
+# either way.
+_DEFAULT_EXCLUDED_FROM_PROMPT = {"Unlabeled", "Static", "Dynamic", "Other"}
+
+# "Thing" classes (discrete, countable objects) vs "stuff" classes (amorphous
+# background regions) -- see GENERATION_QUALITY_GROUNDED_SAM.md for the full
+# reasoning. Compositing paints stuff FIRST, then things ON TOP (by
+# descending confidence), matching standard panoptic-segmentation practice --
+# so a car detected inside a road region isn't erased by the road mask.
+# IDs match configs/grounded_sam_classes.json (LOCKED, not duplicated here --
+# this is a behavioural classification, not a taxonomy change).
+DEFAULT_THING_CLASS_IDS = frozenset({
+    6,   # Pole
+    7,   # TrafficLight
+    8,   # TrafficSign
+    12,  # Pedestrian
+    13,  # Rider
+    14,  # Car
+    15,  # Truck
+    16,  # Bus
+    17,  # Train
+    18,  # Motorcycle
+    19,  # Bicycle
+})
+
+
+def _camel_to_prompt(name: str) -> str:
+    """'TrafficLight' -> 'traffic light' (generic fallback for _PROMPT_OVERRIDES)."""
+    if name in _PROMPT_OVERRIDES:
+        return _PROMPT_OVERRIDES[name]
+    out = []
+    for i, ch in enumerate(name):
+        if ch.isupper() and i > 0:
+            out.append(" ")
+        out.append(ch.lower())
+    return "".join(out)
+
+
+def build_grounding_dino_prompt(
+    class_names: list[str],
+    excluded: set[str] | None = None,
+) -> tuple[str, dict[str, int]]:
+    """
+    Build the period-separated GroundingDINO text prompt from the class-id ->
+    name list (index == class id, e.g. from load_grounded_sam_palette), and a
+    name -> class_id lookup for turning detections back into ids.
+
+    Returns (prompt_string, name_to_id). name_to_id keys are the EXACT
+    lowercase phrases used in the prompt, matching what
+    post_process_grounded_object_detection's text_labels will contain.
+    """
+    excluded = excluded if excluded is not None else _DEFAULT_EXCLUDED_FROM_PROMPT
+    phrases, name_to_id = [], {}
+    for class_id, name in enumerate(class_names):
+        if name in excluded:
+            continue
+        phrase = _camel_to_prompt(name)
+        phrases.append(phrase)
+        name_to_id[phrase] = class_id
+    return ". ".join(phrases) + ".", name_to_id
+
+
+# ============================================================================ #
+#  ENCODER SLOT MODULE                                                          #
+#  Tier 1 (default): training-only slot filler, zero heavy deps.               #
+#  Tier 2 (live=True): real GroundingDINO + SAM via transformers.              #
 # ============================================================================ #
 
 class GroundedSamEncoder(nn.Module):
     """
-    Lightweight encoder-slot module for TRAINING on pre-saved Grounded-SAM maps.
+    Encoder-slot module for the Grounded-SAM conditioning pipeline.
 
-    Occupies the `lora.struct.encoder` slot src/model.py's add_lora_to_unet
-    expects, and is an nn.Module so accelerate's .prepare()/.to()/.eval() treat
-    it identically to any other encoder. It holds ONLY configuration (size,
-    palette, class count) — it deliberately does NOT load GroundingDINO or
-    SAM, so training (which never calls forward(): skip_encode=True) needs
-    none of those heavy dependencies.
+    TIER 1 (default, live=False): a LIGHTWEIGHT slot filler for TRAINING on
+    pre-saved Grounded-SAM maps. Occupies the `lora.struct.encoder` slot
+    src/model.py's add_lora_to_unet expects, and is an nn.Module so
+    accelerate's .prepare()/.to()/.eval() treat it identically to any other
+    encoder. Training never calls forward() (skip_encode=True reads pre-saved
+    maps directly), so Tier 1 needs none of Tier 2's dependencies.
 
-    ENCODER-SLOT CONTRACT it would satisfy IF live: input [B,3,H,W] in [-1,1]
-    -> output colour map [B,3,size,size] in [0,1]. That live behaviour is
-    Tier 2 and is intentionally not implemented here; forward()/label_ids()
-    raise a clear error rather than silently returning wrong data.
+    TIER 2 (live=True, added 2026-08): a REAL live encoder -- runs
+    GroundingDINO (open-vocabulary detection, your class names as the text
+    prompt) then SAM (precise mask per detected box) then composites the
+    per-class masks into ONE class-ID map. Needed for (a) inference on a
+    brand-new image with no pre-computed mask, and (b) the mIoU
+    controllability metric (scores the GENERATED image by re-segmenting it
+    live). Uses transformers' native support
+    (AutoModelForZeroShotObjectDetection + SamModel) -- NOT the standalone
+    GroundingDINO/segment-anything packages an earlier version of this
+    module's docs assumed. This avoids GroundingDINO's separate repo, its
+    compiled CUDA extension, and a second package ecosystem entirely: it's
+    the SAME from_pretrained() pattern every other encoder in this project
+    already uses, on a dependency (transformers) already pinned in
+    environment.yaml. VERIFIED BY EXECUTION (2026-08, real GPU, real
+    downloaded weights, IDEA-Research/grounding-dino-tiny + facebook/sam-vit-
+    base on a synthetic test image): the exact API calls this class makes
+    (processor -> model -> post_process_grounded_object_detection -> SAM
+    processor -> SamModel -> post_process_masks) run end-to-end and produce
+    correctly-shaped output. NOT verified: real-world detection/segmentation
+    QUALITY on actual driving photos -- that needs your real data, and
+    "stuff" classes (Roads, Sky, Vegetation, ...) are a real open risk (see
+    GENERATION_QUALITY_GROUNDED_SAM.md) since GroundingDINO is fundamentally
+    an object detector, not a dense per-pixel classifier like SegFormer.
 
-    live_available = False tells grounded_sam_training.py to skip the mIoU metric (which
-    needs to segment the generated image live). All other monitoring works.
+    Weights load LAZILY (only on the first real forward()/label_ids() call,
+    not at construction) so Tier 1 usage (skip_encode=True, always true
+    during training) never downloads or holds these weights in memory even
+    when live=True is set in config.
+
+    ENCODER-SLOT CONTRACT: input [B,3,H,W] in [-1,1] (must tolerate an
+    all-zero batch half -- see model.py's CFG dropout, which zeroes the raw
+    image before it reaches a live encoder) -> output colour map
+    [B,3,H,W] in [0,1] at the SAME H,W as the input (SAM returns masks at
+    native input resolution, so no extra resize step is needed here).
+
+    live_available reflects the ACTUAL live-usability of this instance (True
+    only when live=True was passed) -- read by grounded_sam_training.py /
+    grounded_sam_inference.py to gate the mIoU metric.
 
     Args:
-      size         : final square side of the conditioning map (== cfg.size).
-      num_classes  : number of Grounded-SAM classes (== len(palette)); stored so
-                     downstream code can size things without re-reading the file.
-      palette      : class-id -> (R,G,B) list, from load_grounded_sam_palette().
+      size            : final square side of the conditioning map (== cfg.size).
+                        Used only for Tier-1 bookkeeping; Tier 2 ignores it
+                        (output matches input resolution, see above).
+      num_classes     : number of Grounded-SAM classes (== len(palette)).
+      palette         : class-id -> (R,G,B) list, from load_grounded_sam_palette().
+      live            : False (default) = Tier 1 only, forward()/label_ids()
+                        raise. True = Tier 2, real models load lazily.
+      class_names     : REQUIRED if live=True. class-id -> name list, same
+                        order as palette (from load_grounded_sam_palette).
+      grounding_dino_model : HF hub id or local path. Default
+                        "IDEA-Research/grounding-dino-base" -- the largest
+                        non-giant variant transformers ships, chosen over
+                        -tiny because a real test on this project's own
+                        synthetic image showed -tiny missing a detection
+                        -base would very likely have caught at the same
+                        threshold (see GENERATION_QUALITY_GROUNDED_SAM.md).
+      sam_model       : HF hub id or local path. Default "facebook/sam-vit-huge"
+                        (the largest/most accurate SAM checkpoint).
+      box_threshold   : GroundingDINO detection confidence cutoff (0..1).
+      text_threshold  : GroundingDINO per-token text-match cutoff (0..1).
+      excluded_classes: class NAMES to leave out of the detection prompt
+                        (no clear visual referent to search for). Default:
+                        Unlabeled/Static/Dynamic/Other.
+      thing_class_ids : class ids painted ON TOP of stuff classes during
+                        compositing (see DEFAULT_THING_CLASS_IDS above for
+                        the default and the reasoning).
+      local_files_only: passed to from_pretrained() for both live models.
+      device          : device string for the lazy-loaded live models. If
+                        None (default), inferred from this module's own
+                        device at call time (via a tracked buffer, updated
+                        by any .to(device) call -- e.g. accelerate's prepare()).
+      classes_file    : optional path to the class-definition JSON (e.g.
+                        configs/grounded_sam_classes.json). When given AND
+                        palette/class_names weren't already passed directly,
+                        loads them from this file, resolved relative to the
+                        REPO ROOT via this module's own __file__ (the same
+                        robust pattern src/data/local_seg.py's
+                        SegJsonDataModule already uses) -- correct regardless
+                        of Hydra's chdir timing, no plumbing through main()
+                        needed. Relative paths resolve as-is if absolute.
     """
-
-    live_available: bool = False   # read by grounded_sam_training.py to gate the mIoU metric
 
     def __init__(
         self,
         size: int,
         num_classes: int | None = None,
         palette: list[tuple[int, int, int]] | None = None,
+        live: bool = False,
+        class_names: list[str] | None = None,
+        classes_file: str | None = None,
+        grounding_dino_model: str = "IDEA-Research/grounding-dino-base",
+        sam_model: str = "facebook/sam-vit-huge",
+        box_threshold: float = 0.3,
+        text_threshold: float = 0.25,
+        excluded_classes: "set[str] | None" = None,
+        thing_class_ids: "set[int] | None" = None,
+        local_files_only: bool = True,
+        device: str | None = None,
     ) -> None:
         super().__init__()
+
+        # Self-loading classes_file fallback: only if the caller didn't
+        # already pass palette/class_names directly (Hydra config convenience
+        # -- lets configs/lora/encoder/grounded_sam.yaml just set
+        # classes_file: configs/grounded_sam_classes.json, matching how
+        # SegJsonDataModule already does it, without threading loaded values
+        # through main()). Resolved relative to REPO ROOT via __file__
+        # (src/encoders/ -> src/ -> root), not the process cwd, so this is
+        # correct regardless of Hydra's chdir timing.
+        if classes_file is not None and (palette is None or class_names is None):
+            _cf = Path(classes_file)
+            if not _cf.is_absolute():
+                _cf = Path(__file__).resolve().parent.parent.parent / _cf
+            class_names, palette = load_grounded_sam_palette(_cf)
+            print(f"[GroundedSamEncoder] loaded {len(palette)} classes from {classes_file}")
+
         self.size = size
         self.palette = palette
         self.num_classes = num_classes if num_classes is not None else (
             len(palette) if palette is not None else None
         )
 
+        self.live_available = bool(live)
+        self._live_loaded = False   # flips True once the real weights are actually loaded
+        self._gd_model_id = grounding_dino_model
+        self._sam_model_id = sam_model
+        self.box_threshold = box_threshold
+        self.text_threshold = text_threshold
+        self.local_files_only = local_files_only
+        self._device_override = device
+        self.thing_class_ids = set(thing_class_ids) if thing_class_ids is not None else set(DEFAULT_THING_CLASS_IDS)
+
+        # A parameter-free nn.Module has nothing for .to(device) to move, so
+        # accelerate's device placement would otherwise be invisible to the
+        # lazily-loaded submodules below. This tiny persistent=False buffer
+        # gives .to(device) something real to move, so _resolve_device() can
+        # read back wherever this module actually lives.
+        self.register_buffer("_device_tracker", torch.zeros(1), persistent=False)
+
+        if live:
+            if not class_names:
+                raise ValueError(
+                    "GroundedSamEncoder(live=True) requires class_names (pass "
+                    "the names list from load_grounded_sam_palette alongside "
+                    "the palette -- see configs/lora/encoder/grounded_sam.yaml)."
+                )
+            self._prompt, self._name_to_id = build_grounding_dino_prompt(
+                class_names, excluded=excluded_classes,
+            )
+            print(f"[GroundedSamEncoder] live=True, prompt: {self._prompt!r}")
+        else:
+            self._prompt, self._name_to_id = None, None
+
+        self._gd_processor = self._gd_model = None
+        self._sam_processor = self._sam_model = None
+
+    # ------------------------------------------------------------------ #
+    #  Tier 1 error path (kept verbatim for live=False, the default)      #
+    # ------------------------------------------------------------------ #
     def _not_live(self, what: str):
         return NotImplementedError(
-            f"GroundedSamEncoder.{what}() is not implemented on this branch. "
-            f"This encoder is the TRAINING-ONLY slot filler (Tier 1): training "
-            f"reads pre-saved Grounded-SAM maps via skip_encode=True and never "
-            f"calls the encoder. Live map generation (needed for inference on a "
-            f"NEW image, or the mIoU metric) is Tier 2 — it requires the "
-            f"GroundingDINO + segment-anything packages, their checkpoints, and "
-            f"your class-name prompts, none of which are wired up yet."
+            f"GroundedSamEncoder.{what}() was called but this instance was "
+            f"constructed with live=False (the default -- Tier 1, training-"
+            f"only). Training reads pre-saved Grounded-SAM maps via "
+            f"skip_encode=True and never calls the encoder, so this is "
+            f"expected there. To use live map generation (a NEW image with "
+            f"no pre-computed mask, or the mIoU metric), set "
+            f"lora.struct.encoder.live=true in your config."
         )
 
-    def forward(self, imgs):
-        # Would run live Grounded-SAM at inference. Not built (Tier 2).
-        raise self._not_live("forward")
+    def _resolve_device(self) -> str:
+        if self._device_override is not None:
+            return self._device_override
+        return str(self._device_tracker.device)
 
-    def label_ids(self, imgs):
-        # Would segment an image to raw class-IDs (used by the mIoU metric). Not built.
-        raise self._not_live("label_ids")
+    def _ensure_live_models_loaded(self):
+        """Lazy-load GroundingDINO + SAM on first real use, onto this module's
+        current device. Never called at all when live=False."""
+        if self._live_loaded:
+            return
+        from transformers import (
+            AutoProcessor, AutoModelForZeroShotObjectDetection, SamModel, SamProcessor,
+        )
+        device = self._resolve_device()
+        print(f"[GroundedSamEncoder] loading live models onto {device} "
+              f"(grounding_dino={self._gd_model_id}, sam={self._sam_model_id}) ...")
+        self._gd_processor = AutoProcessor.from_pretrained(
+            self._gd_model_id, local_files_only=self.local_files_only)
+        self._gd_model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            self._gd_model_id, local_files_only=self.local_files_only).to(device).eval()
+        self._sam_processor = SamProcessor.from_pretrained(
+            self._sam_model_id, local_files_only=self.local_files_only)
+        self._sam_model = SamModel.from_pretrained(
+            self._sam_model_id, local_files_only=self.local_files_only).to(device).eval()
+        self._live_loaded = True
+        print("[GroundedSamEncoder] live models ready.")
+
+    # ------------------------------------------------------------------ #
+    #  Single-image detect -> segment -> composite                        #
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def _segment_one(self, img_pil) -> "np.ndarray":
+        """
+        img_pil: a single PIL.Image (RGB). Returns a [H,W] uint8 numpy array
+        of class ids (0 = Unlabeled / nothing detected there).
+
+        All-flat/low-information input (e.g. the CFG-dropout all-zero case,
+        which after (x+1)/2 becomes a flat mid-grey image) is explicitly
+        short-circuited to an all-Unlabeled canvas BEFORE running detection
+        -- this is NOT a redundant safety net. VERIFIED BY EXECUTION
+        (2026-08, real GroundingDINO-tiny + SAM-vit-base, real GPU): fed a
+        genuinely flat mid-grey image with zero real content, GroundingDINO
+        confidently hallucinated a "sky" detection anyway (plausible cause:
+        with no competing regions to disambiguate against, a uniform grey
+        reads as low-confidence-but-above-threshold "overcast sky" to the
+        model). Without this check, CFG dropout's "no conditioning signal"
+        input would silently turn into a hallucinated real class instead of
+        the neutral/blank signal CFG dropout is supposed to produce --
+        this was caught only by actually running the real model, not by
+        reasoning about what "should" happen.
+        """
+        import numpy as np
+        device = self._resolve_device()
+        W, H = img_pil.size
+
+        arr = np.asarray(img_pil)
+        if float(arr.std()) < 1.0:   # effectively flat -- e.g. CFG dropout's all-zero input
+            return np.zeros((H, W), dtype=np.uint8)
+
+        gd_inputs = self._gd_processor(images=img_pil, text=self._prompt, return_tensors="pt").to(device)
+        gd_outputs = self._gd_model(**gd_inputs)
+        results = self._gd_processor.post_process_grounded_object_detection(
+            gd_outputs, gd_inputs.input_ids,
+            threshold=self.box_threshold, text_threshold=self.text_threshold,
+            target_sizes=[(H, W)],
+        )[0]
+
+        canvas = np.zeros((H, W), dtype=np.uint8)
+        boxes = results["boxes"]
+        if boxes.shape[0] == 0:
+            return canvas   # nothing detected at all -- all-Unlabeled, valid
+
+        # Match each detection's free-text label back to a class id. A
+        # phrase that doesn't exactly match (GroundingDINO sometimes returns
+        # a partial/merged phrase for a multi-word prompt) is dropped rather
+        # than guessed -- silently mis-assigning a class is worse than
+        # leaving that region as Unlabeled.
+        labels = results["text_labels"]
+        scores = results["scores"]
+        keep_idx, class_ids = [], []
+        dropped = 0
+        for i, label in enumerate(labels):
+            cid = self._name_to_id.get(label.strip().rstrip("."))
+            if cid is None:
+                dropped += 1
+                continue
+            keep_idx.append(i)
+            class_ids.append(cid)
+        if dropped:
+            print(f"[GroundedSamEncoder] {dropped} detection(s) had an unmatched "
+                  f"label (raw labels: {labels}) -- dropped, not guessed.")
+        if not keep_idx:
+            return canvas
+
+        kept_boxes = boxes[keep_idx].cpu().tolist()
+        kept_scores = scores[keep_idx].cpu().tolist()
+
+        sam_inputs = self._sam_processor(img_pil, input_boxes=[kept_boxes], return_tensors="pt").to(device)
+        sam_outputs = self._sam_model(**sam_inputs, multimask_output=False)
+        masks = self._sam_processor.image_processor.post_process_masks(
+            sam_outputs.pred_masks.cpu(),
+            sam_inputs["original_sizes"].cpu(),
+            sam_inputs["reshaped_input_sizes"].cpu(),
+        )[0]   # [num_boxes, 1, H, W] bool-ish
+
+        # Composite: STUFF first (background regions), THING classes on top
+        # ordered by DESCENDING confidence (so the model's most confident
+        # guess wins any overlap between two different thing detections) --
+        # see DEFAULT_THING_CLASS_IDS docstring for the full reasoning.
+        order = sorted(
+            range(len(class_ids)),
+            key=lambda i: (class_ids[i] in self.thing_class_ids, kept_scores[i]),
+        )
+        for i in order:
+            m = masks[i, 0].numpy().astype(bool)
+            canvas[m] = class_ids[i]
+
+        return canvas
+
+    def _tensor_batch_to_pil(self, imgs: torch.Tensor) -> list:
+        """imgs: [B,3,H,W] float in [-1,1] -> list of PIL.Image (RGB, uint8)."""
+        import numpy as np
+        from PIL import Image
+        arr = ((imgs.detach().float().clamp(-1, 1) + 1) / 2 * 255).round().to(torch.uint8)
+        arr = arr.permute(0, 2, 3, 1).cpu().numpy()   # [B,H,W,3]
+        return [Image.fromarray(a, mode="RGB") for a in arr]
+
+    # ------------------------------------------------------------------ #
+    #  Public encoder-slot API                                            #
+    # ------------------------------------------------------------------ #
+    def label_ids(self, imgs: torch.Tensor) -> torch.Tensor:
+        """[B,3,H,W] in [-1,1] -> [B,H,W] long class ids. Tier 2 only."""
+        if not self.live_available:
+            raise self._not_live("label_ids")
+        self._ensure_live_models_loaded()
+        import numpy as np
+        pil_imgs = self._tensor_batch_to_pil(imgs)
+        ids_list = [self._segment_one(p) for p in pil_imgs]   # one at a time -- see class docstring
+        ids = np.stack(ids_list, axis=0)   # [B,H,W]
+        return torch.from_numpy(ids.astype(np.int64)).to(imgs.device)
+
+    def forward(self, imgs: torch.Tensor) -> torch.Tensor:
+        """[B,3,H,W] in [-1,1] -> [B,3,H,W] colour map in [0,1]. Tier 2 only."""
+        if not self.live_available:
+            raise self._not_live("forward")
+        from src.data.seg_palette import seg_colorize_ids
+        ids = self.label_ids(imgs)
+        palette_t = torch.tensor(self.palette, dtype=torch.float32, device=ids.device) / 255.0
+        return seg_colorize_ids(ids, palette_t)

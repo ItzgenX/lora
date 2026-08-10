@@ -26,8 +26,18 @@ defaults:
 # unlike train_seg.yaml there are no seg_model_name/seg_model_path keys here.
 local_files_only: true
 
-base_model_name:  runwayml/stable-diffusion-v1-5
-base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
+# 2026-08 decision: stock SD1.5 output looked messy/unnatural. Switched to
+# epiCRealism, a photorealistic SD1.5-ARCHITECTURE finetune -- same UNet,
+# same state-dict keys, so add_lora_to_unet needs ZERO changes. Chosen over
+# Realistic Vision V6.0 because it ships as a ready-to-use diffusers pipeline
+# (V6.0 is safetensors-only, needs from_single_file() support this repo
+# doesn't have). Download via: python download_sd15.py
+base_model_name:  emilianJR/epiCRealism
+base_model_path:  checkpoints/local_models/epicrealism
+
+# Paired-in VAE upgrade (stabilityai/sd-vae-ft-mse) -- see model.vae_path
+# below and src/model.py ModelBase.__init__.
+vae_path: checkpoints/local_models/sd-vae-ft-mse
 
 # =============================================================================
 # HARDWARE — plain, fixed values. Nothing auto-scales at runtime.
@@ -35,20 +45,34 @@ base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
 # For a suggested starting point on your GPU + dataset (prints only, never edits):
 #   python recommend_training_params.py --data_dir data/grounded_sam
 #   Multi-GPU: accelerate launch --num_processes=N grounded_sam_training.py experiment=train_grounded_sam
-gradient_checkpointing: true
+gradient_checkpointing: false           # OFF: this is a pure recompute-vs-store speed/VRAM
+                                        # tradeoff, mathematically IDENTICAL training results
+                                        # either way -- only relevant on a memory-constrained
+                                        # GPU. On a large multi-GPU box the VRAM it would save
+                                        # is meaningless; off = faster steps for free. (batch_size
+                                        # below is NOT bumped to match -- that changes gradient
+                                        # dynamics, a real decision, not a free lunch like this one.)
 gradient_accumulation_steps: 4        # 4 batch x 4 accum = 16 effective batch
-size: 512                              # square canvas; must match SD1.5 native resolution
+size: [512, 320]                       # [width, height] -- non-square, matches 1280x800 source
+                                        # aspect ratio EXACTLY (1280/800 = 512/320 = 1.6),
+                                        # divisible by 64 (SD1.5 UNet requirement -- field guide
+                                        # Lesson 4), keeps the long side AT (not beyond) SD1.5's
+                                        # native 512 -- the safer choice vs. a larger same-ratio
+                                        # target like 832x512 (untested, higher duplication risk)
 
-# --- Resize technique -------------------------------- #
-# "letterbox" (default) = SquarePad, keeps full scene, adds a pad band.
-# "CenterCrop"           = original stock LoRAdapter recipe (configs/data/local.yaml),
-#                          no pad band, crops scene edges. Compare the two by training
-#                          twice and judging generated-image quality:
+# --- Resize technique (2026-08 decision, supersedes letterbox default) --- #
+# "aspect" (default) = direct resize to the non-square `size` above -- NO
+#   pad, NO crop. Replaces letterbox after the segformer branch's AM.jpeg
+#   checkpoint grid showed the model LEARNING the letterbox pad band as real
+#   scene content (same shared SquarePad code, same mechanism applies here).
+# "letterbox" = SquarePad, keeps full scene, adds a pad band. Old default,
+#   kept for comparison, not recommended anymore.
+# "CenterCrop" = original stock LoRAdapter recipe, no pad band, crops scene edges.
 #   python grounded_sam_training.py experiment=train_grounded_sam resize_mode=letterbox
 #   python grounded_sam_training.py experiment=train_grounded_sam resize_mode=CenterCrop
 # Drives data.resize_mode (below) AND the output folder name via `tag`, so a
 # trained model's folder always says which technique produced it.
-resize_mode: letterbox
+resize_mode: aspect
 
 # =============================================================================
 # 1. GENERAL TRAINING PARAMETERS
@@ -123,6 +147,7 @@ model:
   model_name: ${base_model_name}   # grounded_sam_training.py overrides to base_model_path when local
   local_files_only: ${local_files_only}
   guidance_scale: 7.5
+  vae_path: ${vae_path}            # sd-vae-ft-mse, see src/model.py ModelBase.__init__
 
 # =============================================================================
 # 7. LORA ARCHITECTURE  (identical to the SegFormer config)
