@@ -90,7 +90,7 @@ from tqdm import tqdm
 from hydra.utils import get_original_cwd
 from src.model import ModelBase
 from src.utils import add_lora_from_config, resolve_device, compute_miou
-from src.data.transforms import build_seg_display_preprocess
+from src.data.transforms import build_seg_display_preprocess, normalize_size
 from src.encoders.seg_encoder import seg_palette_tensor, seg_ids_from_colormap, seg_colorize_ids
 
 torch.set_float32_matmul_precision("high")
@@ -119,7 +119,7 @@ def make_seg_inference_grid(
     seg_pil:      Image.Image,
     pred_pil:     Image.Image,
     raw_pred_pil: Image.Image,
-    size: int,
+    size,
 ) -> Image.Image:
     """
     Create a single image with 4 panels SIDE BY SIDE:
@@ -128,37 +128,41 @@ def make_seg_inference_grid(
         │ ORIGINAL │  SEG MAP │PREDICTED │ RAW SEG GEN │  ← label bars (28 px)
         ├──────────┼──────────┼──────────┼─────────────┤
         │          │          │          │             │
-        │  size×   │  size×   │  size×   │   size×     │  ← image panels
-        │  size    │  size    │  size    │   size      │
+        │  size_w x│  size_w x│  size_w x│   size_w x  │  ← image panels
+        │  size_h  │  size_h  │  size_h  │   size_h    │
         └──────────┴──────────┴──────────┴─────────────┘
 
     RAW SEG GEN: same seg conditioning but empty prompt — shows pure
     segmentation adherence with no text influence. Mirrors training val grid.
-    Total image: (4*size) wide, (size + 28) tall.
+    Total image: (4*size_w) wide, (size_h + 28) tall.
+
+    `size`: int (square) or (width, height) pair — see normalize_size.
 
     The 'seg_' prefix marks this as segmentation-pipeline code. Mirrors
     depth_inference.py's make_inference_grid, with "SEG MAP"/"RAW SEG GEN".
     """
-    orig     = orig_pil.resize((size, size)).convert("RGB")
-    seg      = seg_pil.resize((size, size)).convert("RGB")
-    pred     = pred_pil.resize((size, size)).convert("RGB")
-    raw_pred = raw_pred_pil.resize((size, size)).convert("RGB")
+    size_w, size_h = normalize_size(size)
+    target = (size_w, size_h)   # PIL .resize() order: (width, height)
+    orig     = orig_pil.resize(target).convert("RGB")
+    seg      = seg_pil.resize(target).convert("RGB")
+    pred     = pred_pil.resize(target).convert("RGB")
+    raw_pred = raw_pred_pil.resize(target).convert("RGB")
 
     imgs_row  = np.concatenate([np.asarray(orig), np.asarray(seg),
                                  np.asarray(pred), np.asarray(raw_pred)], axis=1)
 
     label_row = np.concatenate([
-        _seg_label_bar(size, "ORIGINAL"),
-        _seg_label_bar(size, "SEG MAP"),
-        _seg_label_bar(size, "PREDICTED"),
-        _seg_label_bar(size, "RAW SEG GEN"),
+        _seg_label_bar(size_w, "ORIGINAL"),
+        _seg_label_bar(size_w, "SEG MAP"),
+        _seg_label_bar(size_w, "PREDICTED"),
+        _seg_label_bar(size_w, "RAW SEG GEN"),
     ], axis=1)
 
     grid = np.concatenate([label_row, imgs_row], axis=0)
     return Image.fromarray(grid)
 
 
-def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device) -> torch.Tensor:
+def _load_seg_map(seg_path: Path, size, palette: torch.Tensor, device) -> torch.Tensor:
     """
     Load a PRE-COMPUTED segmentation map (raw class-ID PNG, 8-bit, values
     0..num_classes-1 — exactly what seg_map_calculations.py saves and what
@@ -170,11 +174,12 @@ def _load_seg_map(seg_path: Path, size: int, palette: torch.Tensor, device) -> t
     signal training saw for the same file. NEAREST is required: averaging
     class ids during resize would fabricate classes that aren't in the image.
 
-    Returns [1, 3, size, size] float tensor in [0, 1].
+    Returns [1, 3, size_h, size_w] float tensor in [0, 1].
     """
+    target_wh = normalize_size(size)   # PIL order: (width, height)
     ids_pil = Image.open(seg_path).convert("L")
-    if ids_pil.size != (size, size):
-        ids_pil = ids_pil.resize((size, size), Image.NEAREST)
+    if ids_pil.size != target_wh:
+        ids_pil = ids_pil.resize(target_wh, Image.NEAREST)
     ids = torch.from_numpy(np.asarray(ids_pil, dtype=np.int64)).unsqueeze(0)   # [1, H, W]
     colour = seg_colorize_ids(ids, palette)                                    # [1, 3, size, size] in [0,1]
     return colour.to(device)
@@ -215,6 +220,7 @@ def main(cfg):
     # live squaring mismatch risk the way there is on the grounded_sam
     # branch. Still printed + recorded for a self-documenting run.
     size        = cfg.size
+    size_w, size_h = normalize_size(size)   # (width, height); square unless resize_mode=aspect
     resize_mode = cfg.get("resize_mode", "letterbox")
     print(f"[resize_mode] {resize_mode}  (display-panel geometry only; seg map's "
           f"squaring is baked in at calc time -- ensure it matches how your "
@@ -229,10 +235,17 @@ def main(cfg):
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         cfg.model.model_name          = os.path.join(_root, cfg.base_model_path)
         cfg.lora.struct.encoder.model = os.path.join(_root, cfg.seg_model_path)
+        # vae_path: same relative-path-under-Hydra's-chdir problem as
+        # base_model_path/seg_model_path above -- make absolute here too, but
+        # only when actually set (default null = use the base model's own VAE).
+        if cfg.model.get("vae_path"):
+            cfg.model.vae_path = os.path.join(_root, cfg.model.vae_path)
     else:
         cfg.model.model_name          = cfg.base_model_name
         cfg.lora.struct.encoder.model = cfg.seg_model_name
+    _vae_path_display = cfg.model.get("vae_path") or "(none -- using base model's own VAE)"
     print(f"[model] base = {cfg.model.model_name}")
+    print(f"[model] vae_path = {_vae_path_display}")
     print(f"[model] seg  = {cfg.lora.struct.encoder.model}")
     print(f"[model] local_files_only = {cfg.local_files_only}")
 
@@ -401,9 +414,9 @@ def main(cfg):
                 orig_pil = display_preprocess(Image.open(img_path).convert("RGB"))
             else:
                 print(f"[WARN] raw_image_path not found: {img_path} — using blank placeholder.")
-                orig_pil = Image.new("RGB", (size, size), color=(40, 40, 40))
+                orig_pil = Image.new("RGB", (size_w, size_h), color=(40, 40, 40))
         else:
-            orig_pil = Image.new("RGB", (size, size), color=(40, 40, 40))
+            orig_pil = Image.new("RGB", (size_w, size_h), color=(40, 40, 40))
 
         with torch.no_grad():
 
@@ -424,8 +437,22 @@ def main(cfg):
                 skip_encode=True,
                 generator=generator,
                 cfg_mask=cfg_mask,
+                # Explicit height/width: sample_easy forwards **kwargs straight
+                # to the underlying diffusers pipeline, which otherwise DEFAULTS
+                # to unet.config.sample_size * vae_scale_factor for BOTH
+                # dimensions (i.e. always square) when they're not passed. For
+                # resize_mode="aspect" (non-square), omitting these would
+                # silently generate a square image misaligned with the
+                # non-square conditioning map.
+                height=size_h,
+                width=size_w,
                 num_inference_steps=cfg.inference.get("num_inference_steps", 50),
                 guidance_scale=cfg.inference.get("guidance_scale", 7.5),
+                # negative_prompt: forwarded via **kwargs straight to the underlying
+                # diffusers pipeline (sample_easy has no explicit param for it, but
+                # it passes **kwargs through to self.pipe(...), which natively
+                # supports negative_prompt). null = diffusers' own CFG default.
+                negative_prompt=cfg.inference.get("negative_prompt", None),
                 # Generation-quality knobs (default = no-op; see model.py
                 # sample_easy docstring). conditioning_kernel_size softens hard
                 # seg-map edges; lora_scale_start/end decays structure-conditioning
@@ -462,21 +489,22 @@ def main(cfg):
         # the input map live" (which this script no longer does at all). Skipped
         # entirely when the encoder has no live path (e.g. Grounded-SAM Tier 1).
         if _live_seg_available:
-            target_ids = seg_ids_from_colormap(seg_tensor[0], _palette)   # [size,size]
-            gen_t = (TF.to_tensor(preds[0].resize((size, size)).convert("RGB"))
+            target_ids = seg_ids_from_colormap(seg_tensor[0], _palette)   # [size_h,size_w]
+            gen_t = (TF.to_tensor(preds[0].resize((size_w, size_h)).convert("RGB"))
                      .unsqueeze(0).to(device) * 2.0 - 1.0)                # [1,3,H,W] [-1,1]
             with torch.no_grad():
-                pred_ids = _enc0.label_ids(gen_t)[0]                      # [size,size]
+                pred_ids = _enc0.label_ids(gen_t)[0]                      # [size_h,size_w]
             miou = compute_miou(pred_ids, target_ids, num_classes=int(_palette.shape[0]))
             mious.append(miou)
             miou_lines.append(f"{stem}: {miou:.4f}")
             print(f"  mIoU  : {miou:.4f}")
 
         # ---- Step 3: Save outputs ----------------------------------------
-        # orig_pil is already (size,size) via display_preprocess above.
+        # orig_pil is already (size_w,size_h) via display_preprocess above.
         orig_display = orig_pil.convert("RGB")
 
         save_generated_only = cfg.inference.get("save_generated_only", False)
+        _target_wh = (size_w, size_h)   # PIL .resize() order: (width, height)
 
         for k, (pred_pil, raw_pred_pil) in enumerate(zip(preds, raw_preds)):
             suffix = f"_{k}" if len(preds) > 1 else ""
@@ -486,7 +514,7 @@ def main(cfg):
                 rel = Path(entry["seg_path"])
                 out_path = output_dir / rel.parent / f"{rel.stem}{suffix}{rel.suffix}"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                pred_pil.resize((size, size)).save(out_path, quality=95)
+                pred_pil.resize(_target_wh).save(out_path, quality=95)
                 print(f"  -> {out_path}")
             else:
                 # Full debug output: 4-panel grid + individual panels.
@@ -497,13 +525,13 @@ def main(cfg):
                 orig_display.save(
                     output_dir / f"{stem}_original.jpg"
                 )
-                seg_pil.resize((size, size)).convert("RGB").save(
+                seg_pil.resize(_target_wh).convert("RGB").save(
                     output_dir / f"{stem}_seg.jpg"
                 )
-                pred_pil.resize((size, size)).save(
+                pred_pil.resize(_target_wh).save(
                     output_dir / f"{stem}{suffix}_predicted.jpg", quality=95
                 )
-                raw_pred_pil.resize((size, size)).save(
+                raw_pred_pil.resize(_target_wh).save(
                     output_dir / f"{stem}{suffix}_raw_seg_gen.jpg", quality=95
                 )
                 print(f"  -> {grid_path}")

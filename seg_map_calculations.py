@@ -26,12 +26,18 @@ vs depth, each deliberate:
 LOCKED MODEL: nvidia/segformer-b5-finetuned-cityscapes-1024-1024
   (references.md §9 — b5 chosen for best segmentation accuracy)
 
-RESIZE_MODE (user decision 2026-07-20, SEGMENTATION.md's resize_mode section):
+RESIZE_MODE (user decision 2026-07-20, SEGMENTATION.md's resize_mode section;
+  "aspect" added 2026-08 after AM.jpeg showed the model LEARNING the letterbox
+  pad band as real scene content):
   --resize_mode letterbox (default, SquarePad) or --resize_mode CenterCrop
-  (original stock LoRAdapter recipe). UNLIKE the grounded_sam branch, this
-  gets BAKED INTO THE SAVED MAP -- output folders/filenames are mode-named
-  so two runs never collide, and segformer_training.py/segformer_inference.py
-  must be configured with the SAME resize_mode used here.
+  (original stock LoRAdapter recipe) or --resize_mode aspect (non-square,
+  no pad no crop -- see --width/--height below). UNLIKE the grounded_sam
+  branch, this gets BAKED INTO THE SAVED MAP -- output folders/filenames are
+  mode-named so two runs never collide, and segformer_training.py/
+  segformer_inference.py must be configured with the SAME resize_mode used here.
+
+  # --- Non-square target (no pad band), matching a 1280x800 source ---
+  python seg_map_calculations.py --data_dir data/ --resize_mode aspect --width 512 --height 320
 
 TYPICAL WORKFLOW (data_dir mode — recommended, mirrors depth):
   # builds data/seg_training_letterbox/{train,val,test}.jsonl from data/{train,val,test}.jsonl
@@ -1118,7 +1124,24 @@ def main():
     )
     parser.add_argument(
         "--size", type=int, default=512,
-        help="Square size for seg maps. Default 512 (matches cfg.size).",
+        help="Square size for seg maps (used for resize_mode letterbox/CenterCrop, "
+             "or as a fallback when --width/--height are not both given). Default 512.",
+    )
+    parser.add_argument(
+        "--width", type=int, default=None,
+        help="Non-square target width, e.g. 512. REQUIRES --height and "
+             "--resize_mode aspect. Overrides --size. Both must be divisible "
+             "by 64 (see the field guide's Lesson 4 for why) and chosen close "
+             "to the source aspect ratio to keep distortion negligible -- "
+             "e.g. 512x320 for 1280x800 source (1280:800=1.6, 512:320=1.6 "
+             "exactly). Prefer capping the long side at SD1.5's native 512 "
+             "(512x320) over a larger same-ratio target (e.g. 832x512) unless "
+             "you've specifically tested the larger one holds up quality-wise.",
+    )
+    parser.add_argument(
+        "--height", type=int, default=None,
+        help="Non-square target height, e.g. 320. REQUIRES --width and "
+             "--resize_mode aspect. Overrides --size.",
     )
     parser.add_argument(
         "--batch_size", type=int, default=None,
@@ -1156,17 +1179,22 @@ def main():
     )
     parser.add_argument(
         "--resize_mode", type=str, default="letterbox",
-        choices=["letterbox", "CenterCrop"],
+        choices=["letterbox", "CenterCrop", "aspect"],
         help=(
-            "Squaring technique applied to the RGB BEFORE SegFormer sees it "
-            "(user decision 2026-07-20). 'letterbox' (default) = SquarePad, "
-            "keeps the full scene, adds a flat pad band. 'CenterCrop' = the "
-            "original stock LoRAdapter recipe (configs/data/local.yaml), no "
-            "pad band, crops scene edges. THIS GETS BAKED INTO THE SAVED "
-            "MAP (unlike the grounded_sam branch) -- output folders/"
-            "filenames are mode-named so a letterbox run and a CenterCrop "
-            "run never collide, and training/inference must be configured "
-            "with the SAME resize_mode used here."
+            "Geometry technique applied to the RGB BEFORE SegFormer sees it "
+            "(user decision 2026-07-20; 'aspect' added later after AM.jpeg "
+            "showed the model LEARNING the letterbox pad band as real scene "
+            "content). 'letterbox' (default) = SquarePad, keeps the full "
+            "scene, adds a flat pad band. 'CenterCrop' = the original stock "
+            "LoRAdapter recipe (configs/data/local.yaml), no pad band, crops "
+            "scene edges. 'aspect' = NO pad, NO crop -- direct resize to an "
+            "explicit non-square --width/--height chosen close to the source "
+            "aspect ratio (e.g. 512x320 for a 1280x800 source), eliminating "
+            "the pad band entirely instead of managing it. THIS GETS BAKED "
+            "INTO THE SAVED MAP (unlike the grounded_sam branch) -- output "
+            "folders/filenames are mode-named so runs of different modes "
+            "never collide, and training/inference must be configured with "
+            "the SAME resize_mode used here."
         ),
     )
     parser.add_argument(
@@ -1256,6 +1284,28 @@ def main():
             "  Example: --dataset_dir /data/custome_dataset --data_dir data/ --image_path target"
         )
 
+    # ---- Resolve --size vs --width/--height into one `seg_size` value ------ #
+    # int -> square (letterbox/CenterCrop, or aspect with a square target).
+    # (width, height) tuple -> non-square, only valid with resize_mode="aspect".
+    if (args.width is None) != (args.height is None):
+        parser.error("--width and --height must be given together, or not at all.")
+    if args.width is not None:
+        if args.resize_mode != "aspect":
+            parser.error("--width/--height require --resize_mode aspect "
+                          "(letterbox/CenterCrop always produce a square).")
+        if args.width % 64 or args.height % 64:
+            parser.error(f"--width {args.width} and --height {args.height} must both be "
+                          f"divisible by 64 (SD1.5's VAE÷8 x UNet÷8 -- see field guide Lesson 4).")
+        seg_size = (args.width, args.height)
+    else:
+        seg_size = args.size
+    # Overwrite in place: every downstream function below reads `args.size`
+    # directly (not a separate parameter), so this one assignment propagates
+    # the resolved int-or-(width,height) value everywhere without threading
+    # a new argument through run_seg_directory_mode/run_single_image_mode/
+    # run_json_file_mode/build_seg_training_from_scan/build_segmentation_training_jsons.
+    args.size = seg_size
+
     # Belt-and-suspenders offline lock: set env vars so NOTHING touches the network,
     # on top of local_files_only=True being passed to from_pretrained.
     if args.local_files_only:
@@ -1275,7 +1325,8 @@ def main():
         args.batch_size = auto_batch_size(default=4, device=args.device)
 
     print(f"Device           : {args.device}")
-    print(f"Size             : {args.size}x{args.size}")
+    _size_str = f"{args.size}x{args.size}" if isinstance(args.size, int) else f"{args.size[0]}x{args.size[1]} (non-square, resize_mode=aspect)"
+    print(f"Size             : {_size_str}")
     print(f"resize_mode      : {args.resize_mode}  (letterbox=SquarePad, CenterCrop=original repo recipe; baked into the saved map)")
     print(f"Batch            : {args.batch_size}")
     print(f"Model            : {args.model}")

@@ -24,8 +24,21 @@ defaults:
 # Local paths are relative to the repo root; the code makes them absolute.
 local_files_only: true
 
-base_model_name:  runwayml/stable-diffusion-v1-5
-base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
+# 2026-08 decision: stock SD1.5 output looked messy/unnatural (see the
+# AM.jpeg/result.jpeg diagnosis session). Switched to epiCRealism, a
+# photorealistic SD1.5-ARCHITECTURE finetune -- same UNet, same state-dict
+# keys, so add_lora_to_unet needs ZERO changes. Chosen over Realistic Vision
+# V6.0 because it ships as a ready-to-use diffusers pipeline (V6.0 is
+# safetensors-only and would need from_single_file() support this repo
+# doesn't have). Download via: python download_sd15.py
+base_model_name:  emilianJR/epiCRealism
+base_model_path:  checkpoints/local_models/epicrealism
+
+# Paired-in VAE upgrade (stabilityai/sd-vae-ft-mse) -- see model.vae_path
+# below and src/model.py ModelBase.__init__. Also REQUIRED if you ever swap
+# to a "noVAE"-style checkpoint (e.g. Realistic Vision's noVAE build), which
+# ships without its own VAE weights at all.
+vae_path: checkpoints/local_models/sd-vae-ft-mse
 
 # DIFF: SegFormer b5 (was dpt-hybrid-midas).
 # LOCKED: b5 for best seg map quality — references.md §9.
@@ -42,24 +55,38 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes
 #   For cluster: accelerate launch --num_processes=N segformer_training.py ...
 #   (values below are PER-GPU; re-run recommend_training_params.py and edit
 #   this file yourself if cluster GPUs have a different VRAM size)
-gradient_checkpointing: true           # REQUIRED on 12 GB — saves ~800MB VRAM (measured) at ~20% compute cost
+gradient_checkpointing: false           # OFF: this is a pure recompute-vs-store speed/VRAM
+                                        # tradeoff, mathematically IDENTICAL training results
+                                        # either way -- only relevant on a memory-constrained
+                                        # GPU. On 4x95GB the ~800MB it would save is meaningless;
+                                        # off = ~20% faster steps for free. (batch_size below is
+                                        # NOT bumped to match -- that changes gradient dynamics,
+                                        # a real decision, not a free lunch like this one.)
 gradient_accumulation_steps: 4        # 4 bsz x 4 accum = 16 effective batch
-size: 512                              # square canvas; must match SD1.5 native resolution
+size: [512, 320]                       # [width, height] -- non-square, matches 1280x800 source
+                                        # aspect ratio (1.6:1) EXACTLY (1280/800 = 512/320 = 1.6),
+                                        # divisible by 64 (SD1.5 UNet requirement -- field guide
+                                        # Lesson 4), and caps the LONG side at exactly SD1.5's
+                                        # native 512 -- the safest non-square choice re: the
+                                        # high-resolution duplication-artifact risk (a larger
+                                        # same-ratio target like 832x512 exceeds native by 62%
+                                        # on the long side; untested, don't assume it's fine)
 
-# --- Resize technique (user decision 2026-07-20) -------------------------------- #
-# "letterbox" (default) = SquarePad, keeps full scene, adds a pad band.
-# "CenterCrop"           = original stock LoRAdapter recipe (configs/data/local.yaml),
-#                          no pad band, crops scene edges. MUST match the mode
-#                          seg_map_calculations.py used to compute your maps
-#                          (SEGMENTATION.md's resize_mode section). Compare the
-#                          two by calculating + training twice and judging
-#                          generated-image quality:
-#   python seg_map_calculations.py --data_dir data/ --resize_mode letterbox
-#   python segformer_training.py experiment=train_seg resize_mode=letterbox
+# --- Resize technique (2026-08 decision, supersedes 2026-07-20's letterbox default) --- #
+# "aspect" = direct resize to the non-square (width,height) `size` above -- NO
+#            pad, NO crop. Replaces letterbox after AM.jpeg showed the model
+#            LEARNING the letterbox pad band as real scene content (visible in
+#            ORIGINAL, SEG MAP, and PREDICTED panels of a real checkpoint grid).
+# "letterbox" = SquarePad, keeps full scene, adds a pad band. Old default, kept
+#              available for comparison, not recommended anymore.
+# "CenterCrop" = original stock LoRAdapter recipe, no pad band, crops scene edges.
+# MUST match the mode seg_map_calculations.py used to compute your maps.
+#   python seg_map_calculations.py --data_dir data/ --resize_mode aspect --width 512 --height 320
+#   python segformer_training.py experiment=train_seg resize_mode=aspect
 # Drives data.resize_mode (below, via ${resize_mode}) AND the output folder
 # name via `tag`, so a trained model's folder always says which technique
 # (and therefore which map set) produced it.
-resize_mode: letterbox
+resize_mode: aspect
 
 # =============================================================================
 # 1. GENERAL TRAINING PARAMETERS  (identical to depth — required for valid comparison)
@@ -150,6 +177,7 @@ model:
   model_name: ${base_model_name}   # train_seg.py overrides to base_model_path when local
   local_files_only: ${local_files_only}
   guidance_scale: 7.5
+  vae_path: ${vae_path}            # sd-vae-ft-mse, see src/model.py ModelBase.__init__
 
 # =============================================================================
 # 7. LORA ARCHITECTURE  (rank/c_dim/adaption_mode IDENTICAL to depth: 128/128/only_res_conv)

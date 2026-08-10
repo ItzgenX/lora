@@ -39,7 +39,7 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE, seg_palette_tensor, seg_colorize_ids
-from src.data.transforms import build_seg_preprocess, RESIZE_MODES
+from src.data.transforms import build_seg_preprocess, RESIZE_MODES, normalize_size
 
 
 # Matches the mode stamp seg_map_calculations.py always bakes into its output
@@ -73,7 +73,7 @@ class SegJsonDataset(Dataset):
         self,
         json_file: Path,
         image_transform,           # torchvision Compose for the RGB image (-> [-1,1])
-        size: int = 512,           # square side for the conditioning colour map
+        size: int | tuple = 512,   # square side, or (width, height) for resize_mode="aspect"
         project_root: Path = None,
         palette: list = None,      # class-id -> RGB; defaults to Cityscapes SSOT
         image_root: Path = None,
@@ -98,7 +98,11 @@ class SegJsonDataset(Dataset):
         self.json_dir     = self.json_file.parent
         self.project_root = Path(project_root) if project_root else self.json_dir
         self.image_root   = Path(image_root) if image_root else None
-        self.size         = size
+        # (width, height) — normalized once here so every downstream PIL resize
+        # call uses PIL's own (width, height) order explicitly, never the bare
+        # `size` value (see _load_seg_colormap: PIL.Image.resize() takes
+        # (width, height), the OPPOSITE axis order from torchvision's Resize).
+        self.size_w, self.size_h = normalize_size(size)
         self.resize_mode  = resize_mode
         self.image_transform = image_transform
         # Configurable manifest keys: default to the SegFormer pipeline's names,
@@ -202,21 +206,28 @@ class SegJsonDataset(Dataset):
 
     def _load_seg_colormap(self, seg_path: Path) -> torch.Tensor:
         """
-        Load a raw class-ID PNG and return a colourised map [3, size, size] in [0,1].
+        Load a raw class-ID PNG and return a colourised map [3, H, W] in [0,1],
+        where (W, H) = (self.size_w, self.size_h) — square unless resize_mode
+        is "aspect".
 
         Steps (the two seg-specific points live here):
           1. Open as "L" (8-bit single channel) — pixel values ARE class ids.
-          2. NEAREST resize to (size, size) — label-preserving (NEVER bilinear).
-          3. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
+          2. NEAREST resize to (size_w, size_h) — label-preserving (NEVER bilinear).
+          3. seg_colorize_ids() with the shared palette -> [1,3,H,W] in [0,1].
 
-        Returns [3, size, size] float tensor in [0, 1].
+        Returns [3, H, W] float tensor in [0, 1].
         """
         ids_pil = Image.open(seg_path).convert("L")
 
         # NEAREST is REQUIRED for a class-ID map: bilinear would average class
         # ids and produce fabricated class values. PIL.Image.NEAREST is the flag.
-        if ids_pil.size != (self.size, self.size):
-            ids_pil = ids_pil.resize((self.size, self.size), Image.NEAREST)
+        # PIL's .size and .resize() both use (width, height) order — matches
+        # (self.size_w, self.size_h) directly, no swap needed here (unlike the
+        # torchvision.transforms.Resize / F.interpolate call sites elsewhere,
+        # which take (height, width) — do not copy this ordering there).
+        target_wh = (self.size_w, self.size_h)
+        if ids_pil.size != target_wh:
+            ids_pil = ids_pil.resize(target_wh, Image.NEAREST)
 
         ids = torch.from_numpy(np.asarray(ids_pil, dtype=np.int64))   # [size, size]
 
@@ -257,7 +268,7 @@ class SegJsonDataModule:
     def __init__(
         self,
         json_file: str,
-        size: int = 512,
+        size: int | tuple = 512,   # square side, or (width, height) for resize_mode="aspect"
         val_json_file: str = None,
         batch_size: int = 8,
         val_batch_size: int = 4,       # 4 = safe under no_grad; matches depth default

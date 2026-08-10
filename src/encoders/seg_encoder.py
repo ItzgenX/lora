@@ -17,7 +17,8 @@ WHY THIS FILE EXISTS:
                 (model.forward passes the raw image tensor; in sample_easy() the
                  batch is cat([zeros, img]) for CFG, so the encoder must also
                  tolerate an all-zeros half — it does, zeros are in range).
-        OUTPUT: [B, 3, size, size] float in [0, 1].
+        OUTPUT: [B, 3, size_h, size_w] float in [0, 1] (square if `size` was
+                given as a single int; non-square for the "aspect" resize_mode).
                 midas returns a 3x-replicated grayscale depth map in [0,1];
                 we return a 3-channel RGB colour segmentation map in [0,1].
                 The mapper (FixedStructureMapper15) is Conv2d(3, ...), so any
@@ -235,7 +236,7 @@ class SegmentationEncoder(nn.Module):
 
     def __init__(
         self,
-        size: int,
+        size: int | tuple[int, int],
         model: str = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
         seg_input_size: int = 512,
         local_files_only: bool = True,
@@ -243,8 +244,19 @@ class SegmentationEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.model_name   = model
-        self.size         = size
-        self.seg_input_size = seg_input_size
+        # `size` is an int (square, original behaviour) or a (width, height)
+        # pair (non-square "aspect" resize_mode -- see src/data/transforms.py
+        # normalize_size). Normalized to explicit (width, height) here so the
+        # final upsample below always knows both dimensions unambiguously.
+        # seg_input_size stays SQUARE regardless -- SegFormer-b5 is trained on
+        # roughly-square crops, so feeding it a square input keeps its own
+        # prediction in-distribution; only the FINAL conditioning map (after
+        # SegFormer) is stretched to the (possibly non-square) output size.
+        if isinstance(size, int):
+            self.size_w, self.size_h = size, size
+        else:
+            self.size_w, self.size_h = int(size[0]), int(size[1])
+        self.seg_input_size  = seg_input_size
 
         # Import here (not at module level) so the rest of the project can import
         # seg_encoder.py without requiring transformers to be installed — only the
@@ -300,16 +312,18 @@ class SegmentationEncoder(nn.Module):
              A 512x512 input is already square (letterboxed by SquarePad before it
              reaches this encoder), so this is a uniform rescale, never a crop.
              (Unlike MiDaS, SegFormer has no forced internal center-crop — squaring
-             the image beforehand is still required so the encoder call in
-             sample_easy never receives a non-square tensor, but SegFormer itself
-             handles any H×W cleanly.)
+             the image beforehand is still required for resize_mode="letterbox"/
+             "CenterCrop" (both square); resize_mode="aspect" deliberately feeds
+             a non-square tensor here on purpose -- SegFormer itself handles any
+             H×W cleanly, and seg_input_size (above) keeps ITS OWN internal input
+             square regardless, so this is safe either way.)
           4. ImageNet normalize: (x - mean) / std. Buffers broadcast and match
              the device/dtype of x automatically.
           5. SegFormer forward: logits [B, 19, H/4, W/4].
-          6. Bilinear-upsample logits to (size, size), THEN argmax(dim=1).
+          6. Bilinear-upsample logits to (size_h, size_w), THEN argmax(dim=1).
              (Upsample logits then argmax produces smoother class boundaries than
              argmax-then-nearest-upsample — the standard HF recipe.)
-          7. Return [B, size, size] long ids in [0, num_classes-1].
+          7. Return [B, size_h, size_w] long ids in [0, num_classes-1].
         """
         assert imgs.dim() == 4,          f"expected [B,3,H,W], got {tuple(imgs.shape)}"
         assert imgs.shape[1] == 3,       "segmentation encoder input must have 3 channels"
@@ -332,11 +346,15 @@ class SegmentationEncoder(nn.Module):
         logits = self.seg_model(pixel_values=x).logits   # [B, 19, H/4, W/4]
 
         # Upsample class logits to the conditioning canvas, then pick the winner.
+        # F.interpolate's `size` is (H_out, W_out) -- height first, matching
+        # NCHW convention -- so this is self.size_h then self.size_w, not the
+        # reverse; getting this backwards would silently swap width/height for
+        # any non-square target.
         logits = F.interpolate(
-            logits.float(), size=(self.size, self.size),
+            logits.float(), size=(self.size_h, self.size_w),
             mode="bilinear", align_corners=False,
         )
-        ids = logits.argmax(dim=1)   # [B, size, size] long
+        ids = logits.argmax(dim=1)   # [B, size_h, size_w] long
         return ids
 
     @torch.no_grad()

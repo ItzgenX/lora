@@ -169,30 +169,80 @@ class SquarePad:
 from torchvision import transforms as _tv   # local alias: avoids shadowing outer scope
 
 
-RESIZE_MODES = ("letterbox", "CenterCrop")
+RESIZE_MODES = ("letterbox", "CenterCrop", "aspect")
+
+
+def normalize_size(size) -> tuple:
+    """
+    Normalize a config `size` value to an explicit (width, height) pair.
+
+    Accepts:
+      - a single int  -> square (size, size), the original behaviour.
+      - a (width, height) list/tuple -> used as-is.
+
+    Centralised here because "size" now means two different things depending
+    on resize_mode: "letterbox"/"CenterCrop" always PRODUCE a square, so they
+    only ever accept an int; "aspect" (see below) targets an explicit
+    (width, height) that need not be square, so it accepts either an int
+    (square, backward compatible) or a (width, height) pair.
+    """
+    if isinstance(size, int):
+        return (size, size)
+    w, h = size
+    return (int(w), int(h))
 
 
 def _square_rgb_steps(size: int, resize_mode: str) -> list:
     """
-    The GEOMETRIC steps (no ToTensor/Normalize) that square a PIL RGB image,
+    The GEOMETRIC steps (no ToTensor/Normalize) that resize a PIL RGB image,
     for the chosen resize_mode. Shared by build_seg_preprocess (adds tensor
     conversion, for the model) and build_seg_display_preprocess (stays PIL,
     for on-screen panels) so the two can never geometrically disagree.
 
       "letterbox"  : SquarePad (flat-fill pad, current default) then Resize.
                      Keeps 100% of the scene; adds a flat-colour pad band.
+                     `size` must be an int (letterbox always produces a square).
       "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
                      — torchvision Resize(size) [shorter edge -> size, aspect kept]
                      then CenterCrop(size). No pad band, but crops the longer
                      edge's overhang off the left/right (or top/bottom).
+                     `size` must be an int (CenterCrop always produces a square).
+      "aspect"     : NO pad, NO crop — a direct resize to an explicit
+                     (width, height) target that is chosen to already closely
+                     match the source aspect ratio (e.g. 512x320 for a
+                     1280x800 source: 1280/800 = 1.6 = 512/320 exactly, both
+                     divisible by 64 — see Lesson 4/Fig.2 of the field guide
+                     for why 64. 512x320 caps the LONG side at exactly SD1.5's
+                     native 512, the safest non-square choice re: the
+                     high-resolution duplication-artifact risk discussed for
+                     this project -- prefer it over a larger same-ratio target
+                     like 832x512 unless you've specifically tested the larger
+                     one holds up.) Because the target ratio is chosen close
+                     to the source ratio, the residual distortion is
+                     negligible — unlike forcing a 1.6:1 source into a 1:1
+                     square, which is severe stretch. This mode exists
+                     specifically to eliminate the letterbox pad band
+                     (confirmed learned into generated output, see AM.jpeg)
+                     without cropping any content. `size` may be an int
+                     (square target) or a (width, height) pair.
     """
     assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
     if resize_mode == "letterbox":
+        assert isinstance(size, int), "letterbox requires a square int size"
         return [SquarePad(), _tv.Resize((size, size))]
-    return [_tv.Resize(size), _tv.CenterCrop(size)]
+    if resize_mode == "CenterCrop":
+        assert isinstance(size, int), "CenterCrop requires a square int size"
+        return [_tv.Resize(size), _tv.CenterCrop(size)]
+    # "aspect": direct resize to (width, height), no pad, no crop.
+    # torchvision.transforms.Resize's tuple form is (height, width) — the
+    # OPPOSITE axis order from PIL's (width, height); getting this backwards
+    # silently swaps width/height for any non-square target, so it is spelled
+    # out explicitly here rather than passed through positionally.
+    w, h = normalize_size(size)
+    return [_tv.Resize((h, w))]
 
 
-def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
+def build_seg_preprocess(size, resize_mode: str = "letterbox"):
     """
     Build the ONE canonical RGB preprocessing pipeline for the SEGMENTATION pipeline.
 
@@ -208,25 +258,28 @@ def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     satisfies the user's visual-identity rule: segmentation code has "seg" in name.
 
     INPUT  (of the returned callable): PIL.Image of any size, any aspect ratio.
-    OUTPUT (of the returned callable): float tensor [3, size, size] in [-1, 1].
-      This is the range every encoder slot in src/model.py expects
-      (asserted by SegmentationEncoder._predict_ids).
+    OUTPUT (of the returned callable): float tensor [3, H, W] in [-1, 1], where
+      (W, H) = normalize_size(size). This is the range every encoder slot in
+      src/model.py expects (asserted by SegmentationEncoder._predict_ids).
 
     Args:
-        size: final square side in pixels (e.g. 512). Must match cfg.size
-              and the size used when the offline seg PNGs were computed.
-        resize_mode: "letterbox" (default) or "CenterCrop" — see _square_rgb_steps.
+        size: an int (square side, e.g. 512) or a (width, height) pair
+              (e.g. (512, 320), only valid with resize_mode="aspect"). Must
+              match cfg.size and whatever the offline seg PNGs were computed with.
+        resize_mode: "letterbox" (square, default) / "CenterCrop" (square) /
+          "aspect" (non-square, no pad no crop) — see _square_rgb_steps.
           User decision 2026-07-20 (mirrored from the grounded_sam branch):
-          both techniques are selectable via the `resize_mode` config key so
-          results can be compared by training/calculating twice, once per mode.
-          UNLIKE the grounded_sam branch, this mode must also match what
-          seg_map_calculations.py used to COMPUTE the saved maps (the map's
-          squaring is baked in at calc time here, not re-applied live at load
-          time) — see seg_map_calculations.py's own resize_mode docs.
+          multiple techniques are selectable via the `resize_mode` config key
+          so results can be compared. UNLIKE the grounded_sam branch, this
+          mode must also match what seg_map_calculations.py used to COMPUTE
+          the saved maps (the map's geometry is baked in at calc time here,
+          not re-applied live at load time) — see seg_map_calculations.py's
+          own resize_mode docs.
 
-    Correctness note: the image is a (size, size) square before the ToTensor
-    step, so SegmentationEncoder always receives exactly (size, size) input
-    and never triggers the kind of internal forced-crop that MiDaS does.
+    Correctness note: the image is exactly (W, H) before the ToTensor step
+    (square for letterbox/CenterCrop, possibly non-square for aspect), so
+    SegmentationEncoder always receives that exact shape and never triggers
+    the kind of internal forced-crop that MiDaS does.
     """
     return _tv.Compose(_square_rgb_steps(size, resize_mode) + [
         _tv.ToTensor(),                 # PIL [0,255] -> tensor [0,1]
@@ -235,12 +288,12 @@ def build_seg_preprocess(size: int, resize_mode: str = "letterbox"):
     ])
 
 
-def build_seg_display_preprocess(size: int, resize_mode: str = "letterbox"):
+def build_seg_display_preprocess(size, resize_mode: str = "letterbox"):
     """
-    Same geometry as build_seg_preprocess, but stops after squaring — returns a
-    PIL.Image, not a tensor. For DISPLAY-ONLY panels (e.g. the inference grid's
-    ORIGINAL panel) that must visually match what the model actually saw,
-    without needing the [-1,1] tensor conversion.
+    Same geometry as build_seg_preprocess, but stops after resizing — returns
+    a PIL.Image, not a tensor. For DISPLAY-ONLY panels (e.g. the inference
+    grid's ORIGINAL panel) that must visually match what the model actually
+    saw, without needing the [-1,1] tensor conversion.
     """
     return _tv.Compose(_square_rgb_steps(size, resize_mode))
 

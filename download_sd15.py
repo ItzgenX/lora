@@ -8,11 +8,32 @@ Run this ONCE on a machine with internet access, then copy
 checkpoints/local_models/ to your training machine and set
 local_files_only: true in all configs.
 
+SKIP-EXISTING: each model is checked BEFORE downloading -- if its folder
+already has the right marker file (model_index.json for a diffusers
+pipeline, config.json for a bare transformers/AutoencoderKL model), it is
+SKIPPED, not re-downloaded. Safe to re-run this script any time you add a
+new model to the list below; only the new one actually downloads. Pass
+--force to ignore this and re-download everything anyway.
+
 Models downloaded:
-  1. stable-diffusion-v1-5       -- base diffusion model (backbone, always frozen)
-  2. dpt-hybrid-midas            -- stock upstream depth encoder (src/annotators/midas.py)
-  3. segformer-b5-cityscapes     -- live segmentation encoder (src/encoders/seg_encoder.py)
-  4. taesd                       -- Tiny AutoEncoder (fast VAE preview, optional)
+  1. stable-diffusion-v1-5       -- stock SD1.5 (kept for comparison / fallback)
+  2. epiCRealism                 -- photorealistic SD1.5-architecture finetune,
+                                     THE BASE MODEL this project actually trains
+                                     against now (2026-08 decision: stock SD1.5's
+                                     output looked messy/unnatural; epiCRealism
+                                     chosen over Realistic Vision V6.0 because it
+                                     ships in ready-to-use diffusers format --
+                                     V6.0 is safetensors-only and would need
+                                     from_single_file() support this repo doesn't
+                                     have)
+  3. sd-vae-ft-mse                -- improved SD1.5 VAE (stabilityai/sd-vae-ft-mse).
+                                     Paired in via the model.vae_path config
+                                     (src/model.py) -- needed for any "noVAE"-style
+                                     community checkpoint, harmless to also have
+                                     on hand for epiCRealism.
+  4. dpt-hybrid-midas            -- stock upstream depth encoder (src/annotators/midas.py)
+  5. segformer-b5-cityscapes     -- live segmentation encoder (src/encoders/seg_encoder.py)
+  6. taesd                       -- Tiny AutoEncoder (fast VAE preview, optional)
 
 NOTE — DPTImageProcessor for the MiDaS model is saved but not used at runtime
   (DepthEstimator does manual preprocessing; the processor call is commented out
@@ -20,14 +41,16 @@ NOTE — DPTImageProcessor for the MiDaS model is saved but not used at runtime
 
 Usage:
   python download_sd15.py
+  python download_sd15.py --force        # re-download even if already present
 
   With a HF token (required for gated models, optional here since all models
   below are public):
     Set HF_TOKEN below, or export HF_TOKEN=your_token before running.
 """
 
+import argparse
 import os
-from diffusers import StableDiffusionPipeline, AutoencoderTiny
+from diffusers import StableDiffusionPipeline, AutoencoderTiny, AutoencoderKL
 from transformers import (
     DPTForDepthEstimation,
     DPTImageProcessor,
@@ -41,8 +64,14 @@ from transformers import (
 # Safer: export HF_TOKEN=hf_xxx in your shell, then use token=os.environ.get("HF_TOKEN")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
+_parser = argparse.ArgumentParser(description=__doc__)
+_parser.add_argument("--force", action="store_true",
+                      help="Re-download every model even if already present locally.")
+FORCE = _parser.parse_args().force
+
 LOCAL_MODEL_DIR = "checkpoints/local_models"
 os.makedirs(LOCAL_MODEL_DIR, exist_ok=True)
+
 
 # Helper: print a section banner
 def banner(title: str):
@@ -51,18 +80,83 @@ def banner(title: str):
     print(f"{'='*60}")
 
 
-# ── 1. Stable Diffusion 1.5 (base model, always frozen) ──────────────────── #
-banner("1/5  Stable Diffusion 1.5")
-sd_pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
-    token=HF_TOKEN or None,
-)
+def already_downloaded(local_path: str, marker: str = "model_index.json") -> bool:
+    """
+    True if `local_path` already contains `marker` (i.e. this model was
+    already fully saved by a previous run of this script) AND --force was
+    not passed. This is the skip-existing check every model below runs
+    before doing any network I/O.
+
+    marker: "model_index.json" for a full diffusers pipeline (SD1.5,
+      epiCRealism); "config.json" for a bare single model (MiDaS, SegFormer,
+      TAESD, the VAE) -- diffusers pipelines don't write a config.json at
+      their own root, only inside subfolders, so the two marker files are
+      how this distinguishes "a whole pipeline was saved here" from "just
+      one component."
+    """
+    if FORCE:
+        return False
+    return os.path.isfile(os.path.join(local_path, marker))
+
+
+# ── 1. Stable Diffusion 1.5 (kept for comparison / fallback, no longer the
+#       default training base -- see epiCRealism below) ─────────────────── #
+banner("1/6  Stable Diffusion 1.5")
 sd_path = os.path.join(LOCAL_MODEL_DIR, "stable-diffusion-v1-5")
-sd_pipe.save_pretrained(sd_path)
-print(f"  Saved -> {sd_path}")
+if already_downloaded(sd_path):
+    print(f"  Already present -> {sd_path}  (skipped; pass --force to re-download)")
+else:
+    sd_pipe = StableDiffusionPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        token=HF_TOKEN or None,
+    )
+    sd_pipe.save_pretrained(sd_path)
+    print(f"  Saved -> {sd_path}")
 
 
-# ── 2. MiDaS / DPT-Hybrid (stock upstream depth encoder, src/annotators/midas.py) ─ #
+# ── 2. epiCRealism (photorealistic SD1.5-architecture finetune) ──────────── #
+#
+# THE ACTUAL TRAINING BASE now (2026-08 decision, see docstring). Same UNet
+# architecture/state-dict keys as stock SD1.5, so add_lora_to_unet works on
+# it completely unchanged -- only base_model_name/base_model_path in the
+# experiment/inference configs need to point here instead of stable-diffusion-v1-5.
+# Ships as a full diffusers pipeline (unlike Realistic Vision, which is
+# safetensors-only) -- from_pretrained works exactly like SD1.5 above.
+banner("2/6  epiCRealism (photorealistic base checkpoint)")
+epic_path = os.path.join(LOCAL_MODEL_DIR, "epicrealism")
+if already_downloaded(epic_path):
+    print(f"  Already present -> {epic_path}  (skipped; pass --force to re-download)")
+else:
+    epic_pipe = StableDiffusionPipeline.from_pretrained(
+        "emilianJR/epiCRealism",
+        token=HF_TOKEN or None,
+    )
+    epic_pipe.save_pretrained(epic_path)
+    print(f"  Saved -> {epic_path}")
+
+
+# ── 3. sd-vae-ft-mse (improved SD1.5 VAE) ─────────────────────────────────── #
+#
+# Paired in via the model.vae_path config (src/model.py ModelBase.__init__,
+# mirrors the existing tiny_vae pattern) -- REQUIRED for any "noVAE"-style
+# community checkpoint (e.g. if you later switch to Realistic Vision's noVAE
+# build), and a safe quality upgrade over epiCRealism's own baked-in VAE too.
+# Not auto-applied: model.vae_path stays null (= use whatever VAE the base
+# checkpoint ships with) until you explicitly set it in a config.
+banner("3/6  sd-vae-ft-mse (VAE)")
+vae_ft_path = os.path.join(LOCAL_MODEL_DIR, "sd-vae-ft-mse")
+if already_downloaded(vae_ft_path, marker="config.json"):
+    print(f"  Already present -> {vae_ft_path}  (skipped; pass --force to re-download)")
+else:
+    vae_ft = AutoencoderKL.from_pretrained(
+        "stabilityai/sd-vae-ft-mse",
+        token=HF_TOKEN or None,
+    )
+    vae_ft.save_pretrained(vae_ft_path)
+    print(f"  Saved -> {vae_ft_path}")
+
+
+# ── 4. MiDaS / DPT-Hybrid (stock upstream depth encoder, src/annotators/midas.py) ─ #
 #
 # NOTE on DPTImageProcessor:
 #   DepthEstimator (src/annotators/midas.py) does NOT use DPTImageProcessor at
@@ -70,63 +164,76 @@ print(f"  Saved -> {sd_path}")
 #   preprocessing ((x+1)/2 -> better_resize -> direct model call).
 #   We still save the processor here so the checkpoint folder is complete and
 #   no tool ever complains about a missing preprocessor_config.json.
-banner("2/5  MiDaS DPT-Hybrid (depth encoder)")
-midas_model = DPTForDepthEstimation.from_pretrained(
-    "Intel/dpt-hybrid-midas",
-    token=HF_TOKEN or None,
-)
-midas_processor = DPTImageProcessor.from_pretrained(
-    "Intel/dpt-hybrid-midas",
-    token=HF_TOKEN or None,
-)
+banner("4/6  MiDaS DPT-Hybrid (depth encoder)")
 midas_path = os.path.join(LOCAL_MODEL_DIR, "dpt-hybrid-midas")
-midas_model.save_pretrained(midas_path)
-midas_processor.save_pretrained(midas_path)
-print(f"  Saved -> {midas_path}")
-print(f"  (DPTImageProcessor saved for completeness — not used at runtime)")
+if already_downloaded(midas_path, marker="config.json"):
+    print(f"  Already present -> {midas_path}  (skipped; pass --force to re-download)")
+else:
+    midas_model = DPTForDepthEstimation.from_pretrained(
+        "Intel/dpt-hybrid-midas",
+        token=HF_TOKEN or None,
+    )
+    midas_processor = DPTImageProcessor.from_pretrained(
+        "Intel/dpt-hybrid-midas",
+        token=HF_TOKEN or None,
+    )
+    midas_model.save_pretrained(midas_path)
+    midas_processor.save_pretrained(midas_path)
+    print(f"  Saved -> {midas_path}")
+    print(f"  (DPTImageProcessor saved for completeness — not used at runtime)")
 
 
-# ── 3. SegFormer-b5-Cityscapes (live segmentation encoder) ──────────────── #
+# ── 5. SegFormer-b5-Cityscapes (live segmentation encoder) ──────────────── #
 #
 # LOCKED MODEL: b5, NOT b0 (references.md §9 / SEGMENTATION.md). No separate
 # image processor is downloaded — SegmentationEncoder (src/encoders/seg_encoder.py)
 # does not load one at runtime, only SegformerForSemanticSegmentation itself.
-banner("3/5  SegFormer-b5-Cityscapes (segmentation encoder)")
-seg_model = SegformerForSemanticSegmentation.from_pretrained(
-    "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
-    token=HF_TOKEN or None,
-)
+banner("5/6  SegFormer-b5-Cityscapes (segmentation encoder)")
 seg_path = os.path.join(LOCAL_MODEL_DIR, "segformer-b5-cityscapes")
-seg_model.save_pretrained(seg_path)
-print(f"  Saved -> {seg_path}")
+if already_downloaded(seg_path, marker="config.json"):
+    print(f"  Already present -> {seg_path}  (skipped; pass --force to re-download)")
+else:
+    seg_model = SegformerForSemanticSegmentation.from_pretrained(
+        "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
+        token=HF_TOKEN or None,
+    )
+    seg_model.save_pretrained(seg_path)
+    print(f"  Saved -> {seg_path}")
 
 
-# ── 4. Tiny VAE / TAESD (fast VAE preview — optional) ────────────────────── #
-banner("4/5  Tiny VAE (TAESD)")
-tiny_vae = AutoencoderTiny.from_pretrained(
-    "madebyollin/taesd",
-    token=HF_TOKEN or None,
-)
-vae_path = os.path.join(LOCAL_MODEL_DIR, "taesd")
-tiny_vae.save_pretrained(vae_path)
-print(f"  Saved -> {vae_path}")
+# ── 6. Tiny VAE / TAESD (fast VAE preview — optional) ────────────────────── #
+banner("6/6  Tiny VAE (TAESD)")
+taesd_path = os.path.join(LOCAL_MODEL_DIR, "taesd")
+if already_downloaded(taesd_path, marker="config.json"):
+    print(f"  Already present -> {taesd_path}  (skipped; pass --force to re-download)")
+else:
+    tiny_vae = AutoencoderTiny.from_pretrained(
+        "madebyollin/taesd",
+        token=HF_TOKEN or None,
+    )
+    tiny_vae.save_pretrained(taesd_path)
+    print(f"  Saved -> {taesd_path}")
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 print(f"\n{'='*60}")
-print("  All models downloaded.")
+print("  All models ready (downloaded now, or already present and skipped).")
 print(f"  Location: {os.path.abspath(LOCAL_MODEL_DIR)}/")
 print()
 print("  Folder structure:")
-for name in [
-    "stable-diffusion-v1-5",
-    "dpt-hybrid-midas",
-    "segformer-b5-cityscapes",
-    "taesd",
+for name, marker in [
+    ("stable-diffusion-v1-5", "model_index.json"),
+    ("epicrealism", "model_index.json"),
+    ("sd-vae-ft-mse", "config.json"),
+    ("dpt-hybrid-midas", "config.json"),
+    ("segformer-b5-cityscapes", "config.json"),
+    ("taesd", "config.json"),
 ]:
     path = os.path.join(LOCAL_MODEL_DIR, name)
-    status = "OK" if os.path.isdir(path) else "MISSING"
+    status = "OK" if os.path.isfile(os.path.join(path, marker)) else "MISSING"
     print(f"    [{status}]  {name}")
 print()
-print("  Next step: set local_files_only: true in all configs.")
+print("  Next step: point base_model_path at epicrealism/ in the experiment/")
+print("  inference configs (instead of stable-diffusion-v1-5/), and set")
+print("  local_files_only: true everywhere.")
 print(f"{'='*60}\n")

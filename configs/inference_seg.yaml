@@ -51,16 +51,17 @@ defaults:
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
 ckpt_path: ???     # e.g. outputs/train/seg_letterbox/runs/2026-01-01/00-00-00/best_model
 
-# ---- Resize technique (user decision 2026-07-20) -----------------------------
-# Only affects the ORIGINAL display panel's geometry here (cosmetic) — the
-# seg map itself was already squared at CALC time (seg_map_calculations.py),
-# so there's no live squaring mismatch risk the way there is on the
-# grounded_sam branch. Still recorded in run_params.txt for a self-documenting
-# result folder, and names the output folder below.
-resize_mode: letterbox
+# ---- Resize technique (2026-08 decision, supersedes 2026-07-20's letterbox) -- #
+# "aspect" (current default) only affects the ORIGINAL display panel's
+# geometry here (cosmetic) — the seg map itself was already resized at CALC
+# time (seg_map_calculations.py), so there's no live squaring mismatch risk
+# the way there is on the grounded_sam branch. Still recorded in
+# run_params.txt for a self-documenting result folder, and names the output
+# folder below. MUST match the resize_mode + size used to compute your maps.
+resize_mode: aspect
 
 # ---- Global resolution (must match training) ------------------------------
-size: 512          # square canvas; must match what training/calc used
+size: [512, 320]    # [width, height] -- non-square, matches training config
 seed: 42
 
 # ---- Device -----------------------------------------------------------
@@ -84,8 +85,14 @@ device: null
 # root; the code makes them absolute.
 local_files_only: true
 
-base_model_name:  runwayml/stable-diffusion-v1-5
-base_model_path:  checkpoints/local_models/stable-diffusion-v1-5
+# 2026-08 decision: matches configs/experiment/train_seg.yaml -- inference
+# MUST use the SAME base checkpoint training used (parity rule). See that
+# file's comments for why epiCRealism over stock SD1.5 / Realistic Vision V6.0.
+base_model_name:  emilianJR/epiCRealism
+base_model_path:  checkpoints/local_models/epicrealism
+
+# Paired-in VAE upgrade, must match training. See src/model.py ModelBase.__init__.
+vae_path: checkpoints/local_models/sd-vae-ft-mse
 
 # LOCKED MODEL: b5 (references.md §9). Must match the model used during training.
 seg_model_name: nvidia/segformer-b5-finetuned-cityscapes-1024-1024
@@ -94,6 +101,7 @@ seg_model_path: checkpoints/local_models/segformer-b5-cityscapes
 # ---- Base diffusion model -------------------------------------------------
 model:
   model_name: ${base_model_name}   # default; segformer_inference.py overrides to base_model_path when local_files_only=true
+  vae_path: ${vae_path}            # default; segformer_inference.py overrides to an absolute path when local_files_only=true
 
 # ---- LoRA (inference mode — weights not updated) --------------------------
 lora:
