@@ -24,9 +24,7 @@ defaults:
 # Local paths are relative to the repo root; the code makes them absolute.
 local_files_only: true
 
-# 2026-08 decision: stock SD1.5 output looked messy/unnatural (see the
-# AM.jpeg/result.jpeg diagnosis session). Switched to epiCRealism, a
-# photorealistic SD1.5-ARCHITECTURE finetune -- same UNet, same state-dict
+# epiCRealism, a photorealistic SD1.5-ARCHITECTURE finetune -- same UNet, same state-dict
 # keys, so add_lora_to_unet needs ZERO changes. Chosen over Realistic Vision
 # V6.0 because it ships as a ready-to-use diffusers pipeline (V6.0 is
 # safetensors-only and would need from_single_file() support this repo
@@ -72,13 +70,10 @@ size: [512, 320]                       # [width, height] -- non-square, matches 
                                         # same-ratio target like 832x512 exceeds native by 62%
                                         # on the long side; untested, don't assume it's fine)
 
-# --- Resize technique (2026-08 decision, supersedes 2026-07-20's letterbox default) --- #
+# --- Resize technique --- #
 # "aspect" = direct resize to the non-square (width,height) `size` above -- NO
-#            pad, NO crop. Replaces letterbox after AM.jpeg showed the model
-#            LEARNING the letterbox pad band as real scene content (visible in
-#            ORIGINAL, SEG MAP, and PREDICTED panels of a real checkpoint grid).
-# "letterbox" = SquarePad, keeps full scene, adds a pad band. Old default, kept
-#              available for comparison, not recommended anymore.
+#            pad, NO crop.
+# "letterbox" = SquarePad, keeps full scene, adds a pad band.
 # "CenterCrop" = original stock LoRAdapter recipe, no pad band, crops scene edges.
 # MUST match the mode seg_map_calculations.py used to compute your maps.
 #   python seg_map_calculations.py --data_dir data/ --resize_mode aspect --width 512 --height 320

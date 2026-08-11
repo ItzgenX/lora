@@ -14,7 +14,7 @@ val_batch_size: 4       # 4 is safe under no_grad; matches depth default (was 1)
 workers: 4
 val_workers: 2
 
-# --- Resize technique (user decision 2026-07-20) -------------------------------- #
+# --- Resize technique -------------------------------------------------------- #
 # "letterbox"  : SquarePad (flat-fill pad) then Resize — keeps 100% of the
 #                scene, adds a flat-colour pad band. Default.
 # "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)

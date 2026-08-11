@@ -199,32 +199,20 @@ def _square_rgb_steps(size: int, resize_mode: str) -> list:
     conversion, for the model) and build_seg_display_preprocess (stays PIL,
     for on-screen panels) so the two can never geometrically disagree.
 
-      "letterbox"  : SquarePad (flat-fill pad, current default) then Resize.
+      "letterbox"  : SquarePad (flat-fill pad) then Resize.
                      Keeps 100% of the scene; adds a flat-colour pad band.
                      `size` must be an int (letterbox always produces a square).
-      "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
-                     — torchvision Resize(size) [shorter edge -> size, aspect kept]
-                     then CenterCrop(size). No pad band, but crops the longer
-                     edge's overhang off the left/right (or top/bottom).
+      "CenterCrop" : torchvision Resize(size) [shorter edge -> size, aspect
+                     kept] then CenterCrop(size). No pad band, but crops the
+                     longer edge's overhang off the left/right (or top/bottom).
                      `size` must be an int (CenterCrop always produces a square).
       "aspect"     : NO pad, NO crop — a direct resize to an explicit
-                     (width, height) target that is chosen to already closely
-                     match the source aspect ratio (e.g. 512x320 for a
-                     1280x800 source: 1280/800 = 1.6 = 512/320 exactly, both
-                     divisible by 64 — see Lesson 4/Fig.2 of the field guide
-                     for why 64. 512x320 caps the LONG side at exactly SD1.5's
-                     native 512, the safest non-square choice re: the
-                     high-resolution duplication-artifact risk discussed for
-                     this project -- prefer it over a larger same-ratio target
-                     like 832x512 unless you've specifically tested the larger
-                     one holds up.) Because the target ratio is chosen close
-                     to the source ratio, the residual distortion is
-                     negligible — unlike forcing a 1.6:1 source into a 1:1
-                     square, which is severe stretch. This mode exists
-                     specifically to eliminate the letterbox pad band
-                     (confirmed learned into generated output, see AM.jpeg)
-                     without cropping any content. `size` may be an int
-                     (square target) or a (width, height) pair.
+                     (width, height) target. Distortion is negligible when the
+                     target ratio is chosen close to the source ratio (e.g.
+                     512x320 for a 1280x800 source: 1280/800 = 1.6 = 512/320
+                     exactly); both dimensions must be divisible by 64 (SD1.5
+                     UNet requirement). `size` may be an int (square target)
+                     or a (width, height) pair.
     """
     assert resize_mode in RESIZE_MODES, f"unknown resize_mode: {resize_mode!r}"
     if resize_mode == "letterbox":
@@ -268,13 +256,10 @@ def build_seg_preprocess(size, resize_mode: str = "letterbox"):
               match cfg.size and whatever the offline seg PNGs were computed with.
         resize_mode: "letterbox" (square, default) / "CenterCrop" (square) /
           "aspect" (non-square, no pad no crop) — see _square_rgb_steps.
-          User decision 2026-07-20 (mirrored from the grounded_sam branch):
-          multiple techniques are selectable via the `resize_mode` config key
-          so results can be compared. UNLIKE the grounded_sam branch, this
-          mode must also match what seg_map_calculations.py used to COMPUTE
-          the saved maps (the map's geometry is baked in at calc time here,
-          not re-applied live at load time) — see seg_map_calculations.py's
-          own resize_mode docs.
+          Must match what seg_map_calculations.py used to COMPUTE the saved
+          maps (the map's geometry is baked in at calc time here, not
+          re-applied live at load time) — see seg_map_calculations.py's own
+          resize_mode docs.
 
     Correctness note: the image is exactly (W, H) before the ToTensor step
     (square for letterbox/CenterCrop, possibly non-square for aspect), so

@@ -84,9 +84,7 @@ class SegJsonDataset(Dataset):
                                              # used to COMPUTE these maps (baked in at
                                              # calc time, unlike the grounded_sam branch)
                                              # -- used ONLY to cross-check seg_path's own
-                                             # mode stamp below, catching a real silent
-                                             # training-data-misalignment risk found by
-                                             # self-review 2026-07-20: this dataset's own
+                                             # mode stamp below: this dataset's own
                                              # image_transform (built from resize_mode)
                                              # squares the RGB HERE, live, while the
                                              # paired seg map was squared PERMANENTLY at
@@ -126,7 +124,7 @@ class SegJsonDataset(Dataset):
         # Early, loud missing-file check — catch a bad manifest before the
         # dataloader workers surface a confusing deep stack trace mid-training.
         missing_img = missing_seg = 0
-        # resize_mode cross-check (2026-07-20): seg_map_calculations.py always
+        # resize_mode cross-check: seg_map_calculations.py always
         # stamps its output path with the mode used to compute it (folder or
         # filename, see _detect_seg_map_resize_mode) -- collect what modes are
         # ACTUALLY present across this manifest's seg_path entries, so a single
@@ -180,7 +178,7 @@ class SegJsonDataset(Dataset):
             print(
                 f"[SegJsonDataset] NOTE: {_unstamped}/{len(self.items)} seg_path "
                 f"entries have no recognisable resize_mode stamp in their path "
-                f"(hand-placed or pre-2026-07-20 maps) -- not checked against "
+                f"(hand-placed maps) -- not checked against "
                 f"resize_mode={self.resize_mode!r}."
             )
 
@@ -279,17 +277,16 @@ class SegJsonDataModule:
         image_key: str = "raw_image_path",
         seg_key: str = "seg_path",
         prompt_key: str = "prompt",
-        resize_mode: str = "letterbox",  # "letterbox" or "CenterCrop" (user decision
-                                       # 2026-07-20) — built ONCE here from
-                                       # build_seg_preprocess so train/val use the
-                                       # identical RGB transform. UNLIKE the
-                                       # grounded_sam branch, this does NOT re-square
-                                       # the seg map (already squared at calc time by
-                                       # seg_map_calculations.py) — it MUST match
-                                       # whatever mode that script used, and IS cross-
-                                       # checked against each seg_path's own mode
-                                       # stamp in SegJsonDataset (loud warning on
-                                       # mismatch, found by self-review 2026-07-20).
+        resize_mode: str = "letterbox",  # "letterbox" / "CenterCrop" / "aspect" —
+                                       # built ONCE here from build_seg_preprocess so
+                                       # train/val use the identical RGB transform.
+                                       # UNLIKE the grounded_sam branch, this does NOT
+                                       # re-square the seg map (already squared at
+                                       # calc time by seg_map_calculations.py) — it
+                                       # MUST match whatever mode that script used, and
+                                       # IS cross-checked against each seg_path's own
+                                       # mode stamp in SegJsonDataset (loud warning on
+                                       # mismatch).
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent

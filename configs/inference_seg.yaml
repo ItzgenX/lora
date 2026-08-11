@@ -3,16 +3,14 @@
 # Base config for segformer_inference.py — the segmentation twin of inference_depth.yaml.
 #
 # Loads a trained segmentation-conditioned LoRAdapter checkpoint and generates
-# images conditioned on the LIVE SegFormer-b5-Cityscapes segmentation of each input.
+# images conditioned on a PROVIDED SegFormer-b5-Cityscapes segmentation map
+# for each input.
 #
 # HOW IT WORKS:
-#   - CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED
-#     segmentation map (seg_path) -- it NEVER computes one live from a raw
-#     photo. The paragraph this replaces (claiming live SegFormer inference)
-#     went stale when that change landed and was corrected 2026-07-20 -- the
-#     `inference:` block's own comments below were already accurate; this
-#     header wasn't. See segformer_inference.py's module docstring for the
-#     full mechanism (skip_encode=True, exactly like training).
+#   - Inference ALWAYS uses a PROVIDED segmentation map (seg_path) -- it
+#     NEVER computes one live from a raw photo. See segformer_inference.py's
+#     module docstring for the full mechanism (skip_encode=True, exactly
+#     like training).
 #   - resize_mode (below) only affects the ORIGINAL display panel's geometry
 #     (cosmetic) -- the seg map itself was already squared at CALC time by
 #     seg_map_calculations.py, so there is no live train/inference squaring
@@ -51,7 +49,7 @@ defaults:
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
 ckpt_path: ???     # e.g. outputs/train/seg_letterbox/runs/2026-01-01/00-00-00/best_model
 
-# ---- Resize technique (2026-08 decision, supersedes 2026-07-20's letterbox) -- #
+# ---- Resize technique ------------------------------------------------------
 # "aspect" (current default) only affects the ORIGINAL display panel's
 # geometry here (cosmetic) — the seg map itself was already resized at CALC
 # time (seg_map_calculations.py), so there's no live squaring mismatch risk
@@ -115,11 +113,10 @@ lora:
       model: ${seg_model_name}   # default; segformer_inference.py overrides to seg_model_path when local_files_only=true
 
 # ---- Inference parameters -------------------------------------------------
-# CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED
-# segmentation map -- it never computes one live from a raw photo. seg_maps/
-# seg_path is REQUIRED; images/raw_image_path is now OPTIONAL and used ONLY
-# to display the ORIGINAL panel (no model ever runs on it). See segformer_inference.py
-# module docstring for the full reasoning.
+# Inference ALWAYS uses a PROVIDED segmentation map -- it never computes one
+# live from a raw photo. seg_maps/seg_path is REQUIRED; images/raw_image_path
+# is OPTIONAL and used ONLY to display the ORIGINAL panel (no model ever runs
+# on it). See segformer_inference.py module docstring for the full reasoning.
 inference:
   # Input — choose ONE:
   seg_maps:  []         # list of PRE-COMPUTED seg map paths (REQUIRED for this mode),
@@ -135,9 +132,9 @@ inference:
   save_generated_only: false   # true → save only predicted image, mirroring folder structure
 
   # Preprocessing: squaring technique is controlled by the top-level
-  # `resize_mode` key above (user decision 2026-07-20) -- affects ONLY the
-  # ORIGINAL display panel here (cosmetic); the seg map's own squaring is
-  # already baked in at calc time and unaffected by this key.
+  # `resize_mode` key above -- affects ONLY the ORIGINAL display panel here
+  # (cosmetic); the seg map's own squaring is already baked in at calc time
+  # and unaffected by this key.
 
   # Generation:
   n_samples:           1    # number of generated images per input image

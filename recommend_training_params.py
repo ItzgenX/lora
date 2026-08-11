@@ -17,9 +17,8 @@ recommendation instead of hidden runtime behaviour.
 
 --data_dir has NO default and is REQUIRED: point it at your real
 data/seg_training_<resize_mode> directory (train.jsonl/val.jsonl/test.jsonl,
-mode-named since seg_map_calculations.py wrote it -- user decision
-2026-07-20) -- there is no sensible default across different
-machines/datasets/modes, so it's always explicit.
+mode-named since seg_map_calculations.py wrote it) -- there is no sensible
+default across different machines/datasets/modes, so it's always explicit.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   python recommend_training_params.py --data_dir data/seg_training_letterbox --epochs 10
@@ -193,12 +192,10 @@ def main():
     print(f"  n_grid_images                : 10   (5 fixed + 5 fresh -- already-validated default)")
     print(f"  size                         : [512, 320]  (width, height -- non-square, no pad band,")
     print(f"                                  caps long side at SD1.5's native 512)")
-    print(f"  resize_mode                  : aspect  [2026-08 decision -- see below, not the old default]")
-    print(f"    aspect (added 2026-08): direct resize to a non-square (width, height) target chosen")
-    print(f"    close to the source aspect ratio -- NO pad, NO crop. Replaces letterbox as the")
-    print(f"    default after AM.jpeg showed the model LEARNING the letterbox pad band as real")
-    print(f"    scene content (visible in ORIGINAL, SEG MAP, and PREDICTED panels alike).")
-    print(f"    letterbox (SquarePad, old default) keeps 100% of the scene but adds a pad band.")
+    print(f"  resize_mode                  : aspect")
+    print(f"    aspect: direct resize to a non-square (width, height) target chosen close to")
+    print(f"    the source aspect ratio -- NO pad, NO crop.")
+    print(f"    letterbox (SquarePad) keeps 100% of the scene but adds a pad band.")
     print(f"    CenterCrop (original stock LoRAdapter recipe) has no pad band, crops scene edges.")
     print(f"    UNLIKE the grounded_sam branch, this mode is baked into the SAVED MAP -- you")
     print(f"    must run seg_map_calculations.py with the SAME --resize_mode (and, for aspect,")

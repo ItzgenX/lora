@@ -45,9 +45,12 @@ Findings from the user's own real generated-image samples
 (`data/info/test/*`, `data/info/test2_real_world_iamge/*`) and a real
 `analyze_car_coverage.py` scan of the actual 59,766-image training set
 (`data/info/analysis res.jpeg`). Scoped to the **segformer branch only** —
-its own calc script, its own 512x512 pre-squared maps, no CARLA/Grounded-SAM
-content here (see `GENERATION_QUALITY_GROUNDED_SAM.md` on the `grounded_sam`
-branch for that pipeline's own findings).
+its own calc script, no CARLA/Grounded-SAM content here (see
+`GENERATION_QUALITY_GROUNDED_SAM.md` on the `grounded_sam` branch for that
+pipeline's own findings). The samples these findings are drawn from were
+generated under the OLD 512x512 letterbox default — that's what exposed the
+pad-band bug in §2 below. Current default is 512x320 `aspect` (no pad, no
+crop); see §2.
 
 ---
 
@@ -218,6 +221,16 @@ Also untouched: `train.py`, `sample.py`, `src/data/local.py`,
 image, so it must run first, with `--resize_mode`/`--width`/`--height`
 matching whatever you'll train with (the geometry is baked into the saved map
 permanently, unlike `grounded_sam` which squares live at load time).
+
+**`--image_path` gotcha, confirmed by execution 2026-08-11**: the script's
+own `--data_dir` default (`--image_path raw_image_path`) does NOT match this
+project's real local `data/{train,val,test}.jsonl` — those entries use the
+key `target`. Running the docstring's own "TYPICAL WORKFLOW" command exactly
+as written (`seg_map_calculations.py --data_dir data/ --resize_mode ...`)
+raises `KeyError: Entry has neither 'raw_image_path' nor 'raw_image_path'.`
+against this real file. Always add `--image_path target` for this dataset —
+already the default `seg_map_calculations.py --dataset_dir ...` scan-mode
+example shows, but the plain `--data_dir` quick command doesn't.
 
 ## 6. Verification status
 

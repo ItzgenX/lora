@@ -3,16 +3,14 @@ segformer_inference.py
 ----------------
 Run inference with a trained segmentation-conditioned LoRAdapter.
 
-CHANGED 2026-07-17 (user decision): inference ALWAYS uses a PROVIDED segmentation
-map — it never computes one live from a raw photo. Previously this script ran
-SegFormer live on an input photo to produce the conditioning map (mirroring the
-paper's original depth pipeline). That's gone: now you must supply `seg_path`
-(a pre-computed class-ID PNG, same format seg_map_calculations.py saves and
-training already reads), exactly like training does via skip_encode=True. This
-also means the script works identically for any segmentation source that
-plugs into this encoder-slot contract, not just SegFormer — a source with no
-live path at all (e.g. a Grounded-SAM-style encoder, maintained on its own
-branch of this repo) needs no special-casing here.
+Inference ALWAYS uses a PROVIDED segmentation map — it never computes one
+live from a raw photo. You must supply `seg_path` (a pre-computed class-ID
+PNG, same format seg_map_calculations.py saves and training already reads),
+exactly like training does via skip_encode=True. This also means the script
+works identically for any segmentation source that plugs into this
+encoder-slot contract, not just SegFormer — a source with no live path at
+all (e.g. a Grounded-SAM-style encoder, maintained on its own branch of this
+repo) needs no special-casing here.
 
 This script:
   1. Loads the SD 1.5 base model + trained LoRA/mapper from a checkpoint.
@@ -28,8 +26,8 @@ This script:
      scoring the OUTPUT after generation, a separate thing from "computing the
      conditioning map live."
 
-RESIZE_MODE (user decision 2026-07-20): pass resize_mode=letterbox (default)
-  or resize_mode=CenterCrop -- affects ONLY the ORIGINAL display panel's
+RESIZE_MODE: pass resize_mode=letterbox (default), resize_mode=CenterCrop,
+  or resize_mode=aspect -- affects ONLY the ORIGINAL display panel's
   geometry here (cosmetic); the seg map itself was already squared at CALC
   time by seg_map_calculations.py. Also names the output folder:
   outputs/inference/seg_<mode>/results/.
@@ -197,11 +195,11 @@ def main(cfg):
     device = resolve_device(cfg.device)
 
     # Resolve output_dir from the original repo root (not Hydra's run dir),
-    # then make it UNIQUE PER RUN (user spec 2026-07-20: every inference run
-    # stores its results in its own folder — two runs can never overwrite or
-    # mix outputs). A timestamped subfolder is appended to the configured
-    # base path; Hydra's own run dir already embeds the same date/time format,
-    # so the two are easy to correlate when debugging a specific run.
+    # then make it UNIQUE PER RUN: every inference run stores its results in
+    # its own folder, so two runs can never overwrite or mix outputs. A
+    # timestamped subfolder is appended to the configured base path; Hydra's
+    # own run dir already embeds the same date/time format, so the two are
+    # easy to correlate when debugging a specific run.
     _root = get_original_cwd()
     _out = Path(cfg.inference.output_dir)
     _out = _out if _out.is_absolute() else Path(_root) / _out
@@ -214,11 +212,11 @@ def main(cfg):
     print(f"  Output dir : {output_dir}")
     print(f"{'='*60}\n")
 
-    # resize_mode (user decision 2026-07-20): only affects the ORIGINAL
-    # display panel's geometry here (cosmetic) -- the seg map itself was
-    # already squared at CALC time (seg_map_calculations.py), so there is no
-    # live squaring mismatch risk the way there is on the grounded_sam
-    # branch. Still printed + recorded for a self-documenting run.
+    # resize_mode only affects the ORIGINAL display panel's geometry here
+    # (cosmetic) -- the seg map itself was already squared at CALC time
+    # (seg_map_calculations.py), so there is no live squaring mismatch risk
+    # the way there is on the grounded_sam branch. Still printed + recorded
+    # for a self-documenting run.
     size        = cfg.size
     size_w, size_h = normalize_size(size)   # (width, height); square unless resize_mode=aspect
     resize_mode = cfg.get("resize_mode", "letterbox")
@@ -321,10 +319,8 @@ def main(cfg):
 
     # Raw-image preprocessing — DISPLAY ONLY (never fed to any model): squares
     # an optional raw image with the SAME resize_mode geometry as training's
-    # RGB convention, so the ORIGINAL and SEG MAP grid panels visually align
-    # (previously this panel used a plain stretch-resize while the SEG MAP
-    # panel was letterboxed -- the two didn't align; fixed 2026-07-20,
-    # mirrored from the grounded_sam branch). Output: PIL.Image.
+    # RGB convention, so the ORIGINAL and SEG MAP grid panels visually align.
+    # Output: PIL.Image.
     display_preprocess = build_seg_display_preprocess(size=size, resize_mode=resize_mode)
 
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
@@ -348,11 +344,10 @@ def main(cfg):
 
     # ------------------------------------------------------------------ #
     # run_params.txt — the full recipe of THIS run, saved with its outputs #
-    # (user spec 2026-07-20). Every generation-affecting setting is        #
-    # recorded so any result folder is self-documenting: you can look at   #
-    # an image weeks later and know exactly how it was made, or re-run the #
-    # identical command. Written BEFORE generating, so even a crashed run  #
-    # leaves its recipe behind.                                            #
+    # Every generation-affecting setting is recorded so any result folder  #
+    # is self-documenting: you can look at an image weeks later and know   #
+    # exactly how it was made, or re-run the identical command. Written    #
+    # BEFORE generating, so even a crashed run leaves its recipe behind.   #
     # ------------------------------------------------------------------ #
     _inf = cfg.inference
     _params_lines = [
