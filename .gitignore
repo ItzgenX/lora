@@ -13,5 +13,6 @@ ignore
 
 /data/
 /.claude/
+/results/
 
 docs_word/
