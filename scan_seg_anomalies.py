@@ -33,11 +33,13 @@ them — your original train.jsonl and seg maps are untouched either way.
 
 CACHING
 -------
-Reuses check_seg_coverage.py's --cache_file .npz format for per-class
-fractions (import, not reimplementation) — if you already built one for that
-script against this same manifest, pass the same path here and this script
-skips straight to flagging. Brightness is cached separately (--brightness_cache)
-since it reads the RAW image, not the seg map.
+The --cache_file .npz format (fractions[N,NUM_CLASSES] + n) is the same one
+check_seg_coverage.py uses -- if you already built one for that script
+against this same manifest, pass the same path here and this script skips
+straight to flagging. Brightness is cached separately (--brightness_cache)
+since it reads the RAW image, not the seg map. This script is fully
+standalone -- it does not import from check_seg_coverage.py, it just shares
+its cache file format so a cache built by either script works with both.
 
 USAGE
 ------
@@ -60,11 +62,21 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from check_seg_coverage import (
-    CLASS_NAMES,
-    NUM_CLASSES,
-    build_or_load_training_distribution,
-)
+# SEG_CITYSCAPES_PALETTE is the project's single source of truth for
+# class-id -> colour (src/encoders/seg_encoder.py). Importing it here (rather
+# than re-typing the table) means this diagnostic can never silently drift
+# out of sync with the real encoder.
+from src.encoders.seg_encoder import SEG_CITYSCAPES_PALETTE
+
+# Class NAMES are diagnostic-only labels, not used by training -- they must
+# stay in the exact order of SEG_CITYSCAPES_PALETTE (index == class id).
+CLASS_NAMES = [
+    "road", "sidewalk", "building", "wall", "fence", "pole",
+    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
+    "person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle",
+]
+NUM_CLASSES = len(SEG_CITYSCAPES_PALETTE)
+assert len(CLASS_NAMES) == NUM_CLASSES, "CLASS_NAMES / SEG_CITYSCAPES_PALETTE length mismatch"
 
 ROAD_CLASS_ID = CLASS_NAMES.index("road")
 
@@ -84,6 +96,49 @@ def _resolve(p: str, image_root: str | None) -> Path:
     if image_root and not path.is_absolute():
         path = Path(image_root) / path
     return path
+
+
+def _class_fractions_from_ids(ids: np.ndarray) -> np.ndarray:
+    """ids: HxW array of class indices 0..NUM_CLASSES-1 -> per-class pixel fraction."""
+    counts = np.bincount(ids.ravel(), minlength=NUM_CLASSES)[:NUM_CLASSES]
+    return counts / counts.sum()
+
+
+def build_or_load_training_distribution(json_file: Path, cache_file: Path | None) -> tuple[np.ndarray, int]:
+    """Returns (fractions [N,NUM_CLASSES], N). Uses cache_file if present and matching."""
+    entries = _read_entries(json_file)
+    n = len(entries)
+
+    if cache_file is not None and cache_file.exists():
+        cached = np.load(cache_file)
+        if int(cached["n"]) == n:
+            print(f"[scan_seg_anomalies] Loaded cached distribution ({n} images) from {cache_file}")
+            return cached["fractions"], n
+        print(f"[scan_seg_anomalies] Cache at {cache_file} has {int(cached['n'])} images, "
+              f"manifest now has {n} -- recomputing.")
+
+    print(f"[scan_seg_anomalies] Computing per-class coverage for {n} training images "
+          f"(one-time cost; pass --cache_file to reuse this next time)...")
+    fractions = np.zeros((n, NUM_CLASSES), dtype=np.float32)
+    missing = 0
+    for i, item in enumerate(entries):
+        seg_path = Path(item["seg_path"])
+        if not seg_path.exists():
+            missing += 1
+            continue
+        ids = np.array(Image.open(seg_path).convert("L"))
+        fractions[i] = _class_fractions_from_ids(ids)
+        if (i + 1) % 5000 == 0:
+            print(f"  ...{i + 1}/{n}")
+    if missing:
+        print(f"[scan_seg_anomalies] WARNING: {missing} seg_path files not found, left as zero-rows")
+
+    if cache_file is not None:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_file, fractions=fractions, n=n)
+        print(f"[scan_seg_anomalies] Cached to {cache_file}")
+
+    return fractions, n
 
 
 def build_or_load_brightness(
