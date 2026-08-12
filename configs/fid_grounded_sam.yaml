@@ -1,0 +1,29 @@
+# configs/fid_grounded_sam.yaml
+# -------------------------------
+# Base config for grounded_sam_fid_eval.py. Extends inference_grounded_sam.yaml
+# (same base model, VAE, checkpoint format, resize_mode, classes_file) so the
+# model FID measures is guaranteed identical to what grounded_sam_inference.py
+# actually runs -- only the fid: block below is new.
+
+defaults:
+  - inference_grounded_sam
+  - _self_
+
+fid:
+  # REQUIRED: manifest to draw (seg_path, raw_image_path, prompt) triplets
+  # from. raw_image_path is REQUIRED here (unlike inference_grounded_sam.yaml,
+  # where it's display-only) -- FID needs a real photo to compare each
+  # generation against the real-image distribution.
+  json_file: ???
+
+  # FID is a distribution-distance metric, not a per-image score -- it needs
+  # a large pool to be stable (>=1000 is the common floor in FID literature).
+  n_samples: 1000
+
+  output_dir: outputs/fid/grounded_sam_${resize_mode}/results
+
+hydra:
+  run:
+    dir: outputs/fid/grounded_sam_${resize_mode}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true

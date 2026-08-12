@@ -26,16 +26,17 @@
 #     attempting to rebuild your own from scratch)
 # ==============================================================================
 #
-# NO CALC JOB EXISTS FOR THIS PIPELINE, AND THAT IS CORRECT, NOT A GAP:
+# NO CALC JOB IS NEEDED FOR THIS TRAINING RUN, AND THAT IS CORRECT, NOT A GAP:
 # your CARLA masks (class_map.png, I;16, 1280x800) are produced BY CARLA
 # ITSELF when you capture with the instance-segmentation-camera enabled —
 # the "calculation" already happened at capture time on your simulation
-# machine. This repo's grounded_sam branch never runs a live segmentation
-# model (GroundedSamEncoder.forward() intentionally raises NotImplementedError
-# — see src/encoders/grounded_sam_encoder.py's own docstring, "Tier 2" was
-# deliberately never built). There is nothing to submit to this cluster to
-# "compute" a grounded_sam map — just stage your already-captured masks (see
-# step 2 below) and train directly.
+# machine. Training reads these pre-saved maps via skip_encode=True and never
+# calls the encoder. A live Tier 2 encoder (real GroundingDINO+SAM,
+# src/encoders/grounded_sam_encoder.py, live=True) DOES exist on this branch
+# for generating fresh maps on new images or scoring mIoU on generated
+# output, but this training job doesn't need it. There is nothing to submit
+# to this cluster to "compute" a grounded_sam map for training — just stage
+# your already-captured masks (see step 2 below) and train directly.
 # =============================================================================
 
 #SBATCH --job-name=loradapter-gs-jupiter

@@ -6,8 +6,11 @@ Run inference with a trained segmentation-conditioned LoRAdapter.
 Inference ALWAYS uses a PROVIDED segmentation
 map — it never computes one live from a raw photo. You must supply `seg_path`
 (a pre-computed class-ID PNG), exactly like training does via skip_encode=True.
-GroundedSamEncoder (src/encoders/grounded_sam_encoder.py) has no live encoding
-path (Tier 1 only — see the module docstring there).
+This is a design choice, not a limitation of GroundedSamEncoder: a live Tier 2
+path (real GroundingDINO+SAM, live=true) does exist on this branch, but this
+script never uses it for the conditioning input — see the module docstring
+at src/encoders/grounded_sam_encoder.py for what Tier 2 is actually for
+(fresh maps on new images, or the mIoU metric below).
 
 This script:
   1. Loads the SD 1.5 base model + trained LoRA/mapper from a checkpoint.
