@@ -18,21 +18,18 @@
 #     the same _enc_has_model guard grounded_sam_training.py already uses and skips
 #     the rewrite + the live-segmenter mIoU metric automatically.
 #
-# RESIZE_MODE: pass resize_mode=letterbox (default)
-# or resize_mode=CenterCrop -- MUST MATCH what ckpt_path was trained with (a
-# mismatch is warned about loudly at runtime). Also names ckpt_path's folder
+# RESIZE_MODE: resize_mode=aspect (only mode supported, also the default) --
+# MUST MATCH what ckpt_path was trained with. Also names ckpt_path's folder
 # AND this run's output folder (see `resize_mode:` key below).
 #
 # USAGE — from a JSON manifest (recommended):
 #   python grounded_sam_inference.py --config-name inference_grounded_sam \
-#       ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
-#       resize_mode=letterbox \
+#       ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \
 #       inference.json_file=data/grounded_sam/test.jsonl
 #
 # USAGE — direct seg map + optional raw image for the display panel:
 #   python grounded_sam_inference.py --config-name inference_grounded_sam \
-#       ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
-#       resize_mode=letterbox \
+#       ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \
 #       "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" \
 #       "inference.prompts=['a car driving down a rainy street']"
 #
@@ -53,7 +50,7 @@ defaults:
 # Path to the checkpoint directory produced by grounded_sam_training.py experiment=train_grounded_sam.
 # Structure expected:  <ckpt_path>/struct/lora-checkpoint.pt
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
-ckpt_path: ???     # e.g. outputs/train/grounded_sam_letterbox/runs/2026-01-01/00-00-00/best_model
+ckpt_path: ???     # e.g. outputs/train/grounded_sam_aspect/runs/2026-01-01/00-00-00/best_model
 
 # ---- Class palette ---------------------------------------------------------
 # MUST match what the seg maps were saved with (configs/data/local_grounded_sam.yaml
@@ -62,24 +59,16 @@ ckpt_path: ???     # e.g. outputs/train/grounded_sam_letterbox/runs/2026-01-01/0
 classes_file: configs/grounded_sam_classes.json
 
 # ---- Non-square map handling ------------------------------------------------
-# Letterbox fill class for non-square provided maps (the real 1280x800 16-bit
-# PNGs) -- MUST match training's pad_id (configs/data/local_grounded_sam.yaml).
-# 0 = CARLA "Unlabeled". Only used when resize_mode=letterbox (ignored by CenterCrop).
+# Unused in "aspect" mode (nothing is padded) -- kept for call-site
+# compatibility with training's pad_id (configs/data/local_grounded_sam.yaml).
 seg_pad_id: 0
 
-# ---- Resize technique (2026-08 decision, supersedes letterbox default) ---- #
+# ---- Resize technique ------------------------------------------------------ #
 # MUST match the technique the loaded checkpoint (ckpt_path) was TRAINED with
 # (grounded_sam_inference.py warns loudly on a mismatch by reading best_model/info.txt).
-#   "aspect"     : direct resize to the non-square `size` below -- NO pad, NO
-#                  crop. Current default -- letterbox's pad band was confirmed
-#                  LEARNED into generated output on the segformer branch (same
-#                  SquarePad code, same mechanism applies here); aspect mode
-#                  eliminates it instead of managing it. See GENERATION_QUALITY_GROUNDED_SAM.md.
-#   "letterbox"  : SquarePad geometry. Old default, kept for comparison.
-#   "CenterCrop" : original stock LoRAdapter recipe (configs/data/local.yaml).
-# Also names the output folder below (outputs/inference/grounded_sam_<mode>/...)
-# so results are always traceable to the technique that produced them:
-#   python grounded_sam_inference.py resize_mode=letterbox ckpt_path=... inference.json_file=...
+# "aspect" (only mode supported): direct resize to the non-square `size`
+# below -- NO pad, NO crop. Also names the output folder below
+# (outputs/inference/grounded_sam_aspect/...).
 resize_mode: aspect
 
 # ---- Global resolution (must match training) ------------------------------

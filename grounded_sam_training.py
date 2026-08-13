@@ -5,27 +5,22 @@ Train the segmentation-conditioned LoRAdapter on PRE-SAVED segmentation colour
 maps. On this branch the maps come from Grounded-SAM (see GROUNDED_SAM.md); the
 class palette + manifests are selected by the experiment config.
 
-RESIZE_MODE (see GROUNDED_SAM.md §5.0b): pass
-  resize_mode=letterbox (default, SquarePad) or resize_mode=CenterCrop
-  (original stock LoRAdapter recipe) to pick the squaring technique. It names
-  the output folder too: outputs/train/grounded_sam_<mode>/runs/... — so a
-  trained model's folder always says which technique produced it.
+RESIZE_MODE: resize_mode=aspect (only mode supported, also the default) --
+  direct resize to the non-square target, no pad, no crop. Names the output
+  folder too: outputs/train/grounded_sam_aspect/runs/...
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Smoke test (a few images, 3 short epochs) ---
   python grounded_sam_training.py experiment=train_grounded_sam epochs=3 data.batch_size=1 gradient_accumulation_steps=1 val_steps=5 ckpt_steps=10
 
-  # --- Full training run (letterbox, the default) ---
+  # --- Full training run ---
   python grounded_sam_training.py experiment=train_grounded_sam
-
-  # --- Full training run, CenterCrop instead ---
-  python grounded_sam_training.py experiment=train_grounded_sam resize_mode=CenterCrop
 
   # --- Full training — 4-GPU cluster ---
   accelerate launch --num_processes=4 grounded_sam_training.py experiment=train_grounded_sam
 
-  # --- Resume from checkpoint (folder name includes the resize_mode it trained with) ---
-  python grounded_sam_training.py experiment=train_grounded_sam resize_mode=letterbox "lora.struct.ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
+  # --- Resume from checkpoint ---
+  python grounded_sam_training.py experiment=train_grounded_sam "lora.struct.ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/checkpoint-epoch1/step1000"
 
 GPU / HARDWARE:
   data.batch_size, gradient_accumulation_steps, and gradient_checkpointing in
@@ -506,7 +501,7 @@ def main(cfg):
         logger.info("")
         logger.info("=" * 64)
         logger.info(f"  PIPELINE   :  SEGMENTATION  ({_pipeline_label})")
-        logger.info(f"  resize_mode:  {cfg.get('resize_mode', 'letterbox')}")
+        logger.info(f"  resize_mode:  {cfg.get('resize_mode', 'aspect')}")
         logger.info(f"  Output     :  {output_path}")
         logger.info(f"  TensorBoard:  tensorboard --logdir \"{tb_dir}\"")
         logger.info(f"  Train      :  {len(dm.train_dataset):,} images  |  Val: {len(dm.val_dataset):,} images")
@@ -710,7 +705,7 @@ def main(cfg):
                 f"timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 # resize_mode: read back by grounded_sam_inference.py to warn if inference
                 # is run with a DIFFERENT technique than this checkpoint trained with.
-                f"resize_mode: {cfg.get('resize_mode', 'letterbox')}",
+                f"resize_mode: {cfg.get('resize_mode', 'aspect')}",
             ]
             save_seg_ckpt_and_grid("best_model", is_best=True, info_lines=info)
             if accelerator.is_main_process:

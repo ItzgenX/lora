@@ -43,36 +43,31 @@ OUTPUT MODES:
   Batch eval (save_generated_only=true, json_file required):
     Saves ONLY the generated image, mirroring folder structure from the JSON.
 
-RESIZE_MODE (see GROUNDED_SAM.md §5.0b): pass
-  resize_mode=letterbox (default) or resize_mode=CenterCrop -- MUST MATCH
-  what the loaded checkpoint was trained with (a mismatch is warned about
-  loudly, reading the stamp grounded_sam_training.py writes to best_model/info.txt).
-  Also names the output folder: outputs/inference/grounded_sam_<mode>/results/.
+RESIZE_MODE: resize_mode=aspect (only mode supported, also the default) --
+  MUST MATCH what the loaded checkpoint was trained with (a mismatch is
+  warned about loudly, reading the stamp grounded_sam_training.py writes to
+  best_model/info.txt). Also names the output folder:
+  outputs/inference/grounded_sam_aspect/results/.
 
 USAGE (this branch's default config is inference_grounded_sam.yaml):
   # Standard inference from a manifest (seg_path required, raw_image_path optional):
   python grounded_sam_inference.py \\
-      ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      resize_mode=letterbox \\
+      ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
       inference.json_file=data/grounded_sam/test.jsonl
 
   # Direct seg map + optional raw image for the display panel:
   python grounded_sam_inference.py \\
-      ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      resize_mode=letterbox \\
+      ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
       "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" \\
       "inference.images=[data/raw/000001/raw_image.jpg]" \\
       "inference.prompts=['a car driving down a rainy street']"
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Single map dry run (replace YYYY-MM-DD/HH-MM-SS with actual run folder) ---
-  python grounded_sam_inference.py ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=letterbox "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" "inference.prompts=['a car driving down a rainy street']"
+  python grounded_sam_inference.py ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.seg_maps=[data/grounded_sam_raw/000001/000001_seg_map.png]" "inference.prompts=['a car driving down a rainy street']"
 
   # --- Batch test-set inference ---
-  python grounded_sam_inference.py ckpt_path=outputs/train/grounded_sam_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=letterbox inference.json_file=data/grounded_sam/test.jsonl
-
-  # --- Same, but the checkpoint was trained with CenterCrop ---
-  python grounded_sam_inference.py ckpt_path=outputs/train/grounded_sam_CenterCrop/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=CenterCrop inference.json_file=data/grounded_sam/test.jsonl
+  python grounded_sam_inference.py ckpt_path=outputs/train/grounded_sam_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model inference.json_file=data/grounded_sam/test.jsonl
 """
 
 import hydra
@@ -157,7 +152,7 @@ def make_seg_inference_grid(
 
 
 def _load_seg_map(seg_path: Path, size, palette: torch.Tensor, device,
-                  pad_id: int = 0, resize_mode: str = "letterbox") -> torch.Tensor:
+                  pad_id: int = 0, resize_mode: str = "aspect") -> torch.Tensor:
     """
     Load a PRE-COMPUTED segmentation map (raw class-ID PNG) and colourise it.
 
@@ -165,18 +160,16 @@ def _load_seg_map(seg_path: Path, size, palette: torch.Tensor, device,
     (same raw read, same square_id_map geometry, same seg_colorize_ids call,
     same palette) — this is what guarantees a map loaded here produces the
     identical conditioning signal training saw for the same file, AS LONG AS
-    resize_mode matches what that checkpoint was trained with (see the
+    the target size matches what that checkpoint was trained with (see the
     resize_mode-vs-checkpoint check in main()).
 
       1. RAW pixel read via np.asarray, NO .convert("L") — the real
          Grounded-SAM/CARLA masks are 16-bit PNGs (PIL mode I;16, ids 0..28)
          and I;16 -> L behaviour differs between Pillow versions; reading raw
          works for both I;16 and the 8-bit "L" maps identically everywhere.
-      2. Squared via square_id_map() (src/data/transforms.py) using the SAME
-         `resize_mode` the RGB display panel uses — "letterbox" (SquarePad
-         geometry, pad_id fill) or "CenterCrop" (torchvision Resize+CenterCrop
-         geometry). NEAREST-only throughout — averaging class ids would
-         fabricate classes that don't exist.
+      2. Resized via square_id_map() (src/data/transforms.py) using the same
+         NEAREST-only "aspect" geometry the RGB display panel uses —
+         averaging class ids would fabricate classes that don't exist.
 
     Returns [1, 3, size, size] float tensor in [0, 1].
     """
@@ -207,7 +200,10 @@ def _find_trained_resize_mode(ckpt_path: Path) -> str | None:
          run, at the run's root folder. Covers checkpoints info.txt misses.
 
     A found file with no resize_mode line (a run predating this feature) is
-    treated as 'letterbox' -- the only mode that existed before.
+    treated as 'letterbox' -- the only mode that existed then. That mode no
+    longer exists on this branch (RESIZE_MODES is "aspect"-only now), so a
+    checkpoint that reports 'letterbox' here is flagged by the mismatch
+    warning below as genuinely incompatible, not just a different valid choice.
 
     Returns the mode string, or None if neither file could be found.
     """
@@ -227,9 +223,8 @@ def _find_trained_resize_mode(ckpt_path: Path) -> str | None:
         for line in c.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("resize_mode"):
-                # training_params.txt has trailing comment text after the
-                # value ("letterbox  (letterbox=SquarePad, ...)") -- take
-                # only the first token.
+                # training_params.txt may have trailing comment text after
+                # the value -- take only the first token.
                 return line.split(":", 1)[1].strip().split()[0]
 
     return "letterbox" if candidates else None
@@ -265,15 +260,15 @@ def main(cfg):
     print(f"{'='*60}\n")
 
     # ------------------------------------------------------------------ #
-    # resize_mode — "letterbox" or "CenterCrop". MUST match the technique  #
-    # the loaded checkpoint was TRAINED with, or the seg map fed to the    #
-    # model here won't align with what the LoRA/mapper learned. Checked    #
-    # before any model loading. Three outcomes, each prints a distinct     #
-    # message (verified / mismatch / unverified).                          #
+    # resize_mode MUST match the technique the loaded checkpoint was       #
+    # TRAINED with, or the seg map fed to the model here won't align with  #
+    # what the LoRA/mapper learned. Checked before any model loading.      #
+    # Three outcomes, each prints a distinct message                       #
+    # (verified / mismatch / unverified).                                  #
     # ------------------------------------------------------------------ #
     size        = cfg.size
-    size_w, size_h = normalize_size(size)   # (width, height); square unless resize_mode=aspect
-    resize_mode = cfg.get("resize_mode", "letterbox")
+    size_w, size_h = normalize_size(size)   # (width, height)
+    resize_mode = cfg.get("resize_mode", "aspect")
     # Resolve ckpt_path against _root (the ORIGINAL repo-root cwd): hydra:
     # job: chdir: true has already moved the process cwd to the Hydra run
     # dir by the time this line runs. Same resolution rule
@@ -460,7 +455,7 @@ def main(cfg):
         f"ckpt_path                    : {cfg.ckpt_path}",
         f"seed                         : {cfg.seed}",
         f"size                         : {cfg.size}",
-        f"resize_mode                  : {resize_mode}  (letterbox=SquarePad, CenterCrop=original repo recipe)",
+        f"resize_mode                  : {resize_mode}",
         f"num_inference_steps          : {_inf.get('num_inference_steps', 50)}",
         f"guidance_scale               : {_inf.get('guidance_scale', 7.5)}",
         f"n_samples                    : {_inf.get('n_samples', 1)}",
@@ -470,7 +465,7 @@ def main(cfg):
         f"lora_scale_decay_start_frac  : {_inf.get('lora_scale_decay_start_frac', 0.3)}",
         f"base model                   : {_base_model_name}",
         f"classes_file                 : {_classes_file or '(none — Cityscapes fallback palette)'}",
-        f"seg_pad_id                   : {cfg.get('seg_pad_id', 0)}  (letterbox fill class for non-square maps)",
+        f"seg_pad_id                   : {cfg.get('seg_pad_id', 0)}  (unused in aspect mode)",
         f"input mode                   : {'json_file: ' + str(_inf.json_file) if _inf.get('json_file') else 'direct seg_maps list'}",
         f"entries                      : {len(entries)}",
         "",
@@ -509,10 +504,8 @@ def main(cfg):
             if not img_path.is_absolute():
                 img_path = Path(_root) / img_path
             if img_path.exists():
-                # Square with the SAME technique as the seg map (resize_mode),
-                # so the ORIGINAL panel visually matches what SEG MAP shows
-                # (previously this panel used a plain stretch-resize while the
-                # seg map was letterboxed -- the two panels didn't align).
+                # Resize with the SAME technique as the seg map (resize_mode),
+                # so the ORIGINAL panel visually matches what SEG MAP shows.
                 orig_pil = display_preprocess(Image.open(img_path).convert("RGB"))
             else:
                 print(f"[WARN] raw_image_path not found: {img_path} — using blank placeholder.")
@@ -525,8 +518,8 @@ def main(cfg):
             # ---- Step 1: Load + colourise the PROVIDED seg map ----
             # No model runs here -- this is a file load + palette lookup, not a
             # live computation. See _load_seg_map (mirrors local_seg.py exactly).
-            # pad_id: letterbox fill class for non-square maps (base config
-            # `seg_pad_id`, default 0 = CARLA Unlabeled) — must match training.
+            # pad_id: unused in "aspect" mode (nothing is padded); kept for
+            # call-site compatibility (base config `seg_pad_id`, default 0).
             seg_tensor = _load_seg_map(seg_path, size, _palette, device,
                                        pad_id=int(cfg.get("seg_pad_id", 0)),
                                        resize_mode=resize_mode)   # [1,3,size,size] in [0,1]

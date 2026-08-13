@@ -68,7 +68,7 @@ def main(cfg):
 
     size = cfg.size
     size_w, size_h = normalize_size(size)
-    resize_mode = cfg.get("resize_mode", "letterbox")
+    resize_mode = cfg.get("resize_mode", "aspect")
     seg_pad_id = cfg.get("seg_pad_id", 0)
 
     # ── Palette: required, no fallback on this branch (29 CARLA classes) ────

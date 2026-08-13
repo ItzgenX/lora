@@ -342,6 +342,8 @@
       <li><a href="#l10">10 · Why your SegFormer swap is free</a></li>
       <li><a href="#l11">11 · Maintainer audit: verified</a></li>
       <li><a href="#l12">12 · grounded_sam branch, audited</a></li>
+      <li><a href="#l13">13 · One resize mode, cross-dataset, proven live</a></li>
+      <li><a href="#l14">14 · grounded_sam: the same simplification, verified independently</a></li>
       <li><a href="#glossary">Glossary</a></li>
       <li><a href="#study">Further study</a></li>
     </ol>
@@ -831,6 +833,52 @@ def get_batch(self): return self.batch</code></pre>
       </div>
       <div class="honest">
         <b>What's different here, and still unverified:</b> Grounded-SAM's live Tier-2 encoder (real GroundingDINO+SAM, built this session) was execution-tested against synthetic images and the CFG-dropout all-zero case, not real driving photos — flagged in this branch's own docs as the real open risk, since GroundingDINO is an object detector, not a dense per-pixel classifier the way SegFormer is, and "stuff" classes (road, sky, vegetation) don't have clean box-shaped extents. That gap is named, not papered over.
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- GLOSSARY -->
+    <!-- ============================================================ -->
+    <!-- ============================================================ -->
+    <!-- LESSON 13 -->
+    <!-- ============================================================ -->
+    <section class="lesson" id="l13">
+      <div class="lesson-kicker"><span class="lesson-num">13</span><span class="tag">Simplify, then prove it live</span></div>
+      <h2 class="lesson-title">One resize mode, cross-dataset, proven live</h2>
+      <div class="panel concept">
+        <p class="panel-eyebrow"><span class="dot"></span>Concept</p>
+        <p><span class="mono">letterbox</span> and <span class="mono">CenterCrop</span> were never removed because they were wrong — <span class="mono">aspect</span> (Lesson 10's honest note) was already the validated fix for the pad-band bug. They were removed because a settled decision left as a "choice" is still surface area: a config a future run could accidentally select, code paths that have to keep compiling, docs that have to keep agreeing with each other. Once a question is actually closed, closing the door on it is its own kind of correctness.</p>
+        <p>Removing options doesn't remove the underlying problem they were managing, though — it just means the ONE remaining path has to actually handle every case. That got tested for real this lesson, not assumed.</p>
+      </div>
+      <div class="panel repo">
+        <p class="panel-eyebrow"><span class="dot"></span>In this repo</p>
+        <p><b>letterbox/CenterCrop deleted, not just deprecated.</b> <span class="mono">RESIZE_MODES</span> (<span class="mono">src/data/transforms.py</span>) is now <code class="inline">("aspect",)</code> — one entry, not three. <span class="mono">_square_rgb_steps</span> lost the branches that built <span class="mono">SquarePad</span>/<span class="mono">CenterCrop</span> pipelines; every default parameter that used to read <code class="inline">"letterbox"</code> now reads <code class="inline">"aspect"</code>, across <span class="mono">seg_map_calculations.py</span>, <span class="mono">local_seg.py</span>, both configs, and <span class="mono">recommend_training_params.py</span>. <span class="mono">SquarePad</span> the class stays — the stock depth pipeline (kept, untouched, per an explicit "keep original-repo files" decision) still uses it — only segmentation's own dispatch logic lost the other two branches.</p>
+        <p><b>Cross-dataset resize, actually measured, not assumed.</b> Adding Cityscapes as extra training data raised a real question: Cityscapes ships at 2048×1024 (2:1), not this project's 1280×800 (1.6:1). Pulling a real image straight out of <span class="mono">leftImg8bit_trainvaltest.zip</span> and running it through the real <span class="mono">aspect</span> pipeline confirmed it — <code class="inline">w_scale=0.25, h_scale=0.3125</code>, a measured 25% relative axis skew, visible on inspection as egg-shaped cobblestones and hood-ornament in the output. The fix wasn't to reopen <span class="mono">resize_mode</span> — it was a new script, <span class="mono">cityscapes_map_calculations.py</span>, that center-crops each Cityscapes image AND its matching label map (identical crop box, so the pair never drifts out of alignment) to 1.6:1 <i>before</i> either ever reaches the shared resize step. Re-running the same image afterward: round again, real content (people, cars, buildings) intact, only empty margin trimmed. The shared pipeline itself stayed exactly as simple as Lesson 10 left it — the fix lives in the Cityscapes-specific ingestion script, where a source-specific quirk belongs.</p>
+        <p><b>epiCRealism + sd-vae-ft-mse: loaded and generated, not just downloaded.</b> Both were missing locally all session. Downloaded for real via <span class="mono">download_sd15.py</span>, then loaded through this repo's own <span class="mono">SD15</span> class and run through a real <code class="inline">6</code>-step generation at the exact locked resolution — <code class="inline">model.pipe(..., height=320, width=512)</code> — on a real GPU. Output image: 512×320 exactly, recognizable street-scene composition. <span class="mono">UNet.block_out_channels = [320, 640, 1280, 1280]</span> read back from the loaded model matches Fig. 2 exactly — the architecture math from Lesson 4 isn't theoretical, it's what's actually sitting in memory.</p>
+      </div>
+      <div class="honest">
+        <b>What's still unverified:</b> the 6-step generation above is a load/shape/dtype smoke test, not a quality measurement — it deliberately used too few steps to judge photorealism from. <span class="mono">cityscapes_map_calculations.py</span> itself is verified against a synthetic folder tree matching Cityscapes' real naming convention (22 passing checks), not yet run against the real 5,000-image download. Both are named as open, not glossed over.
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- LESSON 14 -->
+    <!-- ============================================================ -->
+    <section class="lesson" id="l14">
+      <div class="lesson-kicker"><span class="lesson-num">14</span><span class="tag">Same fix, independent branch</span></div>
+      <h2 class="lesson-title">grounded_sam: the same simplification, verified independently</h2>
+      <div class="panel concept">
+        <p class="panel-eyebrow"><span class="dot"></span>Concept</p>
+        <p>Lesson 13's resize simplification happened on segformer branch. Nothing about it automatically applied here — this branch has its own copy of <span class="mono">src/data/transforms.py</span> (with an extra function, <span class="mono">square_id_map</span>, since this branch resizes the mask LIVE at load time instead of baking geometry into a saved file at calc time — Lesson 10's architecture note about the two branches' different squaring strategies, still true). Every fix had to be re-applied, and re-verified, on its own real code, not assumed to carry over by family resemblance.</p>
+      </div>
+      <div class="panel repo">
+        <p class="panel-eyebrow"><span class="dot"></span>In this repo</p>
+        <p><b>letterbox/CenterCrop removed here too — including a second function Lesson 13 didn't have to touch.</b> <span class="mono">RESIZE_MODES</span> is <code class="inline">("aspect",)</code> on this branch's own <span class="mono">transforms.py</span> as well, but here that meant simplifying <i>two</i> functions instead of one: <span class="mono">_square_rgb_steps</span> (RGB, same as segformer) AND <span class="mono">square_id_map</span> (the live mask-squaring function unique to this branch — its letterbox branch built a padded canvas by hand, its CenterCrop branch replicated torchvision's exact crop-offset math; both deleted, only the direct NEAREST resize remains). <span class="mono">grounded_sam_inference.py</span>'s checkpoint-compatibility check — reading an old checkpoint's <span class="mono">info.txt</span> to warn if it was trained with a mode this branch no longer supports — was kept deliberately: removing an option doesn't mean checkpoints trained under the old one stop existing, and silently mis-loading one would be worse than a loud warning.</p>
+        <p><b>1280×800 → 512×320, verified on this branch's actual mask format, not assumed from segformer's RGB test.</b> A synthetic mask built to match the real confirmed format exactly (16-bit, mode I;16, values spanning the real 29-class CARLA palette range) went through <span class="mono">square_id_map</span> → <span class="mono">seg_colorize_ids</span> — the identical path <span class="mono">grounded_sam_inference.py</span>'s real <span class="mono">_load_seg_map</span> uses. Output: exactly 512×320, correct <code class="inline">[1,3,320,512]</code> conditioning tensor, values in <code class="inline">[0,1]</code>. Zero distortion, for the same arithmetic reason as Lesson 11 — this branch's real masks are already 1280×800, matching 512×320's ratio exactly.</p>
+        <p><b>epiCRealism + sd-vae-ft-mse re-verified through this branch's own import path.</b> Same checkpoint files as Lesson 13 (the model files live outside git, shared across branches) — but loading them through <i>this branch's</i> <span class="mono">SD15</span> class and generating at 512×320 was checked independently anyway, not inferred from the segformer-branch result. 3.4s load, 1.3s for a real 6-step generation, correct output size.</p>
+      </div>
+      <div class="honest">
+        <b>What's still open, same honesty as Lesson 13:</b> the generation test above uses the base model unconditioned — no trained LoRA checkpoint exists yet on this branch to test the full conditioned pipeline end to end. <span class="mono">grounded_sam_map_calculations.py</span>'s real path-assembly logic was run for real against this repo's actual local manifest (correctly reported missing masks — expected, since that local data has no real CARLA masks sitting beside it, not a bug in the script). The live Tier-2 encoder's real-photo accuracy remains the one finding from earlier in this project that no amount of this lesson's config cleanup changes: still unverified against real driving photos, still named as the open risk it is.
       </div>
     </section>
 

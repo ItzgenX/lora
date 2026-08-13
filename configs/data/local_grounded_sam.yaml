@@ -25,24 +25,18 @@ seg_key:    seg_path
 prompt_key: prompt
 
 # --- Non-square map handling --------------------------------------------------- #
-# The REAL masks (16-bit PNG, mode I;16,
-# 1280x800, CARLA ids) are SQUARED by the loader using the SAME technique
-# (resize_mode, below) as the paired RGB image, then NEAREST-resized. Never
-# stretched independently (stretching misaligned map vs image by up to ~19%
-# of the frame). 0 = CARLA "Unlabeled"; change only if your taxonomy uses a
-# different void class.
+# The REAL masks (16-bit PNG, mode I;16, 1280x800, CARLA ids) are resized by
+# the loader using the SAME technique (resize_mode, below) as the paired RGB
+# image, then NEAREST-resized. Never stretched independently. 0 = CARLA
+# "Unlabeled"; pad_id is unused in "aspect" mode (nothing is padded), kept
+# for call-site compatibility.
 pad_id: 0
 
 # --- Resize technique -------------------------------- #
-# "letterbox"  : SquarePad (flat-fill pad) then Resize — keeps 100% of the
-#                scene, adds a flat-colour pad band top/bottom. Default.
-# "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
-#                — Resize(size) then CenterCrop(size). No pad band, but crops
-#                ~37% of width off the left/right for this project's frames.
-# Drives BOTH the RGB transform and the seg-map geometry (SegJsonDataModule
-# builds both from this one key via src/data/transforms.py), so they can
-# never disagree. Override on the command line to compare the two:
-#   python grounded_sam_training.py experiment=train_grounded_sam resize_mode=CenterCrop
+# "aspect" (only mode supported): direct resize to the non-square (width,
+# height) `size` below, no pad, no crop. Drives BOTH the RGB transform and
+# the seg-map geometry (SegJsonDataModule builds both from this one key via
+# src/data/transforms.py), so they can never disagree.
 resize_mode: ${resize_mode}
 
 size: ${size}
@@ -51,7 +45,7 @@ val_batch_size: 4
 workers: 4
 val_workers: 2
 
-# RGB preprocessing (letterbox-or-crop -> resize -> [-1,1]) is built in Python
-# by SegJsonDataModule from `resize_mode` above (src/data/transforms.py
+# RGB preprocessing (resize -> [-1,1]) is built in Python by
+# SegJsonDataModule from `resize_mode` above (src/data/transforms.py
 # build_seg_preprocess) — not declared as a Hydra transform list here, so
 # there is exactly one code path to keep in sync, not two.

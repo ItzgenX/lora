@@ -202,12 +202,10 @@ def main():
 
     print()
     print(f"  n_grid_images                : 10   (5 fixed + 5 fresh -- already-validated default)")
-    print(f"  size                         : 512")
-    print(f"  resize_mode                  : letterbox  [default -- YOUR CHOICE, not a recommendation]")
-    print(f"    letterbox (SquarePad, default) keeps 100% of the scene, adds a pad band.")
-    print(f"    CenterCrop (original stock LoRAdapter recipe) has no pad band, crops scene edges.")
-    print(f"    This tool doesn't pick for you -- train both and compare by generated-image quality")
-    print(f"    (GROUNDED_SAM.md Sec 5.0b): resize_mode=letterbox or resize_mode=CenterCrop on the CLI.")
+    print(f"  size                         : [512, 320]  (width, height -- non-square, matches")
+    print(f"                                  1280x800 source aspect ratio exactly)")
+    print(f"  resize_mode                  : aspect  (only mode supported -- direct resize to a")
+    print(f"    non-square (width, height) target close to the source aspect ratio, NO pad, NO crop)")
 
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()

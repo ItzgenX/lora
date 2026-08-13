@@ -65,13 +65,11 @@ class SegJsonDataset(Dataset):
         image_key: str = "raw_image_path",   # JSONL key for the source RGB image
         seg_key: str = "seg_path",           # JSONL key for the class-ID seg map
         prompt_key: str = "prompt",          # JSONL key for the text caption
-        pad_id: int = 0,                     # class id used to letterbox non-square
-                                             # maps (CARLA 0 = Unlabeled; see
-                                             # _load_seg_colormap step 2)
-        resize_mode: str = "letterbox",      # "letterbox" or "CenterCrop" — MUST
-                                             # match the RGB image_transform's mode
-                                             # (SegJsonDataModule builds both from
-                                             # the same key, so this can't drift).
+        pad_id: int = 0,                     # unused (no pad in "aspect" mode); kept
+                                             # for call-site compatibility
+        resize_mode: str = "aspect",         # MUST match the RGB image_transform's
+                                             # mode (SegJsonDataModule builds both
+                                             # from the same key, so this can't drift).
     ):
         self.json_file    = Path(json_file)
         self.pad_id       = pad_id
@@ -140,8 +138,8 @@ class SegJsonDataset(Dataset):
     def _load_seg_colormap(self, seg_path: Path) -> torch.Tensor:
         """
         Load a raw class-ID PNG and return a colourised map [3, H, W] in [0,1],
-        where (W, H) = normalize_size(self.size) -- square unless resize_mode
-        is "aspect".
+        where (W, H) = normalize_size(self.size) -- non-square, matching the
+        target aspect ratio.
 
         Steps:
           1. Read RAW pixel values as class ids. Grounded-SAM/CARLA masks are
@@ -150,12 +148,11 @@ class SegJsonDataset(Dataset):
              opened image handles both without a .convert("L") -- I;16 -> L
              conversion behaviour is Pillow-version-dependent, reading raw
              values is not.
-          2. Square the map (real masks are 1280x800) using the SAME
-             `resize_mode` ("letterbox" or "CenterCrop") the paired RGB
-             image_transform used -- square_id_map() (src/data/transforms.py)
-             is the single shared geometry, so image and map can't drift
-             apart. NEAREST-only: a bilinear resize/stretch here misaligns
-             conditioning vs target by up to ~19% of the frame (letterbox mode).
+          2. Resize the map (real masks are 1280x800) using the SAME
+             geometry (square_id_map(), src/data/transforms.py) the paired
+             RGB image_transform used, so image and map can't drift apart.
+             NEAREST-only: a bilinear resize/stretch here misaligns
+             conditioning vs target.
           3. seg_colorize_ids() with the shared palette -> [1,3,size,size] in [0,1].
 
         Returns [3, size, size] float tensor in [0, 1].
@@ -224,11 +221,11 @@ class SegJsonDataModule:
         image_key: str = "raw_image_path",
         seg_key: str = "seg_path",
         prompt_key: str = "prompt",
-        pad_id: int = 0,               # letterbox fill class for non-square maps
-                                       # (0 = Unlabeled in the CARLA taxonomy)
-        resize_mode: str = "letterbox",  # "letterbox" or "CenterCrop" — drives
-                                       # both the RGB transform (build_seg_preprocess)
-                                       # and the seg map geometry (square_id_map).
+        pad_id: int = 0,               # unused (no pad in "aspect" mode); kept
+                                       # for call-site compatibility
+        resize_mode: str = "aspect",   # drives both the RGB transform
+                                       # (build_seg_preprocess) and the seg
+                                       # map geometry (square_id_map).
     ):
         # project_root: three levels up from this file (src/data/ -> src/ -> root).
         project_root = Path(os.path.abspath(__file__)).parent.parent.parent
