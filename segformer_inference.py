@@ -26,16 +26,15 @@ This script:
      scoring the OUTPUT after generation, a separate thing from "computing the
      conditioning map live."
 
-RESIZE_MODE: pass resize_mode=letterbox (default), resize_mode=CenterCrop,
-  or resize_mode=aspect -- affects ONLY the ORIGINAL display panel's
-  geometry here (cosmetic); the seg map itself was already squared at CALC
-  time by seg_map_calculations.py. Also names the output folder:
-  outputs/inference/seg_<mode>/results/.
+RESIZE_MODE: resize_mode=aspect (only mode supported, also the default) --
+  affects ONLY the ORIGINAL display panel's geometry here (cosmetic); the
+  seg map itself was already resized at CALC time by seg_map_calculations.py.
+  Also names the output folder: outputs/inference/seg_aspect/results/.
 
 INPUT OPTIONS — SAME SCHEMA training's manifests already use:
   a) JSON manifest file (recommended) — each entry needs "seg_path" (required),
      "raw_image_path" (optional, display only), "prompt" (optional):
-       inference.json_file=data/seg_training_letterbox/test.jsonl
+       inference.json_file=data/seg_training_aspect/test.jsonl
   b) Direct lists:
        "inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]"
        "inference.images=[data/raw/000417/raw_image.jpg]"   # optional, display only
@@ -54,24 +53,22 @@ OUTPUT MODES:
 USAGE:
   # Standard inference from a manifest (seg_path required, raw_image_path optional):
   python segformer_inference.py \\
-      ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      resize_mode=letterbox \\
-      inference.json_file=data/seg_training_letterbox/test.jsonl
+      ckpt_path=outputs/train/seg_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
+      inference.json_file=data/seg_training_aspect/test.jsonl
 
   # Direct seg map + optional raw image for the display panel:
   python segformer_inference.py \\
-      ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
-      resize_mode=letterbox \\
+      ckpt_path=outputs/train/seg_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \\
       "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" \\
       "inference.images=[data/raw/000888/raw_image.jpg]" \\
       "inference.prompts=['two windows on a brick building with vines']"
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
   # --- Single map dry run (replace YYYY-MM-DD/HH-MM-SS with actual run folder) ---
-  python segformer_inference.py ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=letterbox "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" "inference.prompts=['two windows on a brick building with vines']"
+  python segformer_inference.py ckpt_path=outputs/train/seg_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model "inference.seg_maps=[data/raw_seg/000888/000888_seg_map.png]" "inference.prompts=['two windows on a brick building with vines']"
 
   # --- Batch test-set inference ---
-  python segformer_inference.py ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model resize_mode=letterbox inference.json_file=data/seg_training_letterbox/test.jsonl
+  python segformer_inference.py ckpt_path=outputs/train/seg_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model inference.json_file=data/seg_training_aspect/test.jsonl
 """
 
 import hydra
@@ -219,7 +216,7 @@ def main(cfg):
     # for a self-documenting run.
     size        = cfg.size
     size_w, size_h = normalize_size(size)   # (width, height); square unless resize_mode=aspect
-    resize_mode = cfg.get("resize_mode", "letterbox")
+    resize_mode = cfg.get("resize_mode", "aspect")
     print(f"[resize_mode] {resize_mode}  (display-panel geometry only; seg map's "
           f"squaring is baked in at calc time -- ensure it matches how your "
           f"maps were computed)")
@@ -313,7 +310,7 @@ def main(cfg):
 
     if not entries:
         print("[ERROR] No input seg maps provided (this script requires a PROVIDED map, not a raw photo).")
-        print("  Set inference.json_file=data/seg_training_letterbox/test.jsonl  (entries need 'seg_path')")
+        print("  Set inference.json_file=data/seg_training_aspect/test.jsonl  (entries need 'seg_path')")
         print("  or  \"inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]\"")
         return
 

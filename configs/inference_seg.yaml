@@ -18,14 +18,14 @@
 #
 # USAGE — from a JSON manifest (recommended):
 #   python segformer_inference.py \
-#       ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
-#       resize_mode=letterbox \
-#       inference.json_file=data/seg_training_letterbox/test.jsonl
+#       ckpt_path=outputs/train/seg_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       resize_mode=aspect \
+#       inference.json_file=data/seg_training_aspect/test.jsonl
 #
 # USAGE — direct seg map + optional raw image for the display panel:
 #   python segformer_inference.py \
-#       ckpt_path=outputs/train/seg_letterbox/runs/YYYY-MM-DD/HH-MM-SS/best_model \
-#       resize_mode=letterbox \
+#       ckpt_path=outputs/train/seg_aspect/runs/YYYY-MM-DD/HH-MM-SS/best_model \
+#       resize_mode=aspect \
 #       "inference.seg_maps=[data/raw_seg/000417/000417_seg_map.png]" \
 #       "inference.images=[data/raw/000417/raw_image.jpg]" \
 #       "inference.prompts=['driving in rain at night']"
@@ -47,10 +47,10 @@ defaults:
 # Path to the checkpoint directory produced by segformer_training.py.
 # Structure expected:  <ckpt_path>/struct/lora-checkpoint.pt
 #                      <ckpt_path>/struct/mapper-checkpoint.pt
-ckpt_path: ???     # e.g. outputs/train/seg_letterbox/runs/2026-01-01/00-00-00/best_model
+ckpt_path: ???     # e.g. outputs/train/seg_aspect/runs/2026-01-01/00-00-00/best_model
 
 # ---- Resize technique ------------------------------------------------------
-# "aspect" (current default) only affects the ORIGINAL display panel's
+# "aspect" (only mode supported) only affects the ORIGINAL display panel's
 # geometry here (cosmetic) — the seg map itself was already resized at CALC
 # time (seg_map_calculations.py), so there's no live squaring mismatch risk
 # the way there is on the grounded_sam branch. Still recorded in

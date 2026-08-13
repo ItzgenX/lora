@@ -476,7 +476,7 @@ def main(cfg):
         logger.info("")
         logger.info("=" * 64)
         logger.info("  PIPELINE   :  SEGMENTATION  (SegFormer-b5 Cityscapes conditioning)")
-        logger.info(f"  resize_mode:  {cfg.get('resize_mode', 'letterbox')}")
+        logger.info(f"  resize_mode:  {cfg.get('resize_mode', 'aspect')}")
         logger.info(f"  Output     :  {output_path}")
         logger.info(f"  TensorBoard:  tensorboard --logdir \"{tb_dir}\"")
         logger.info(f"  Train      :  {len(dm.train_dataset):,} images  |  Val: {len(dm.val_dataset):,} images")
@@ -682,7 +682,7 @@ def main(cfg):
                 # segformer's seg map squaring is baked in at CALC time, so
                 # there's no live train/inference mismatch to warn about; this
                 # just documents which technique's manifest this run used.
-                f"resize_mode: {cfg.get('resize_mode', 'letterbox')}",
+                f"resize_mode: {cfg.get('resize_mode', 'aspect')}",
             ]
             save_seg_ckpt_and_grid("best_model", is_best=True, info_lines=info)
             if accelerator.is_main_process:

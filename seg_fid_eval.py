@@ -85,7 +85,7 @@ def main(cfg):
 
     size = cfg.size
     size_w, size_h = normalize_size(size)
-    resize_mode = cfg.get("resize_mode", "letterbox")
+    resize_mode = cfg.get("resize_mode", "aspect")
 
     # ── Pick LOCAL model folders vs HUB ids from local_files_only ────────────
     # Identical to segformer_inference.py's own resolution logic -- same

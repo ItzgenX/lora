@@ -15,15 +15,11 @@ workers: 4
 val_workers: 2
 
 # --- Resize technique -------------------------------------------------------- #
-# "letterbox"  : SquarePad (flat-fill pad) then Resize — keeps 100% of the
-#                scene, adds a flat-colour pad band. Default.
-# "CenterCrop" : the ORIGINAL stock LoRAdapter recipe (configs/data/local.yaml)
-#                — Resize(size) then CenterCrop(size). No pad band, crops edges.
-# Drives the RGB transform (SegJsonDataModule builds it from this key via
-# src/data/transforms.py build_seg_preprocess). MUST match the resize_mode
-# seg_map_calculations.py used to COMPUTE the seg maps this manifest's
-# seg_path entries point at — unlike the grounded_sam branch, the map's
-# geometry is baked in at calc time here, not re-applied live at load time.
-# Override on the command line to compare the two:
-#   python segformer_training.py experiment=train_seg resize_mode=CenterCrop
+# "aspect" (only mode supported): direct resize to the non-square (width,
+# height) `size`, no pad, no crop. Drives the RGB transform (SegJsonDataModule
+# builds it from this key via src/data/transforms.py build_seg_preprocess).
+# MUST match the resize_mode seg_map_calculations.py used to COMPUTE the seg
+# maps this manifest's seg_path entries point at — unlike the grounded_sam
+# branch, the map's geometry is baked in at calc time here, not re-applied
+# live at load time.
 resize_mode: ${resize_mode}

@@ -71,10 +71,8 @@ size: [512, 320]                       # [width, height] -- non-square, matches 
                                         # on the long side; untested, don't assume it's fine)
 
 # --- Resize technique --- #
-# "aspect" = direct resize to the non-square (width,height) `size` above -- NO
-#            pad, NO crop.
-# "letterbox" = SquarePad, keeps full scene, adds a pad band.
-# "CenterCrop" = original stock LoRAdapter recipe, no pad band, crops scene edges.
+# "aspect" (only mode supported) = direct resize to the non-square
+# (width,height) `size` above -- NO pad, NO crop.
 # MUST match the mode seg_map_calculations.py used to compute your maps.
 #   python seg_map_calculations.py --data_dir data/ --resize_mode aspect --width 512 --height 320
 #   python segformer_training.py experiment=train_seg resize_mode=aspect
@@ -130,7 +128,7 @@ data:
   workers:        4
   val_workers:    2
   # DIFF: seg_training/ (was depth_training/). Mode-named (resize_mode above):
-  # Built by: python seg_map_calculations.py --data_dir data/ --resize_mode letterbox
+  # Built by: python seg_map_calculations.py --data_dir data/ --resize_mode aspect --width 512 --height 320
   json_file:     data/seg_training_${resize_mode}/train.jsonl
   val_json_file: data/seg_training_${resize_mode}/val.jsonl   # NEVER test.jsonl here (references.md §8)
 
@@ -161,7 +159,7 @@ grid_include_empty_prompt: false # OFF -> generate WITH prompt only (matches dep
 # =============================================================================
 bf16: true
 ignore_check: true                # live: silences the checkpoint-key completeness assert in add_lora_from_config
-tag: seg_${resize_mode}           # DIFF: "seg_letterbox"/"seg_CenterCrop" -> outputs/train/seg_<mode>/...
+tag: seg_${resize_mode}           # DIFF: "seg_aspect" -> outputs/train/seg_aspect/...
 
 # =============================================================================
 # 6. MODEL OVERRIDES  (identical to depth)

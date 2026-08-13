@@ -3,8 +3,6 @@ STANDALONE DIAGNOSTIC — not part of any of the 4 pipeline stages.
 
 WHY THIS EXISTS
 ----------------
-check_seg_coverage.py answers "is THIS ONE seg map's composition normal
-compared to the training set?" for a query image you already picked by hand.
 At 70K images, nobody can hand-pick which ones to check. This script scans
 the WHOLE manifest and flags images whose seg map looks like a SegFormer
 failure (a single class swallowing most of the frame, or almost no distinct
@@ -33,13 +31,10 @@ them — your original train.jsonl and seg maps are untouched either way.
 
 CACHING
 -------
-The --cache_file .npz format (fractions[N,NUM_CLASSES] + n) is the same one
-check_seg_coverage.py uses -- if you already built one for that script
-against this same manifest, pass the same path here and this script skips
-straight to flagging. Brightness is cached separately (--brightness_cache)
-since it reads the RAW image, not the seg map. This script is fully
-standalone -- it does not import from check_seg_coverage.py, it just shares
-its cache file format so a cache built by either script works with both.
+--cache_file (.npz: fractions[N,NUM_CLASSES] + n) avoids recomputing
+per-class coverage on a re-run against the same manifest. Brightness is
+cached separately (--brightness_cache) since it reads the RAW image, not the
+seg map. Fully standalone -- no dependency on any other script in this repo.
 
 USAGE
 ------
@@ -183,7 +178,7 @@ def main() -> None:
     ap.add_argument("--json_file", required=True, help="training manifest, e.g. data/seg_training_aspect/train.jsonl")
     ap.add_argument("--image_key", default="raw_image_path", help="JSONL key for the raw RGB image. Default: raw_image_path")
     ap.add_argument("--image_root", default=None, help="prefix for relative paths, if any")
-    ap.add_argument("--cache_file", default=None, help="optional .npz cache for per-class fractions (check_seg_coverage.py format)")
+    ap.add_argument("--cache_file", default=None, help="optional .npz cache for per-class fractions")
     ap.add_argument("--brightness_cache", default=None, help="optional .npz cache for raw-image brightness")
     ap.add_argument("--dominance_threshold", type=float, default=0.60, help="flag if one class covers more than this fraction. Default: 0.60")
     ap.add_argument("--min_classes", type=int, default=3, help="flag if fewer than this many distinct classes are present. Default: 3")

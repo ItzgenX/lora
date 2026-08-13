@@ -21,8 +21,8 @@ mode-named since seg_map_calculations.py wrote it) -- there is no sensible
 default across different machines/datasets/modes, so it's always explicit.
 
 QUICK COMMANDS (run from repo root with conda loradapter env active):
-  python recommend_training_params.py --data_dir data/seg_training_letterbox --epochs 10
-  python recommend_training_params.py --data_dir data/seg_training_letterbox --device cuda:1
+  python recommend_training_params.py --data_dir data/seg_training_aspect --epochs 10
+  python recommend_training_params.py --data_dir data/seg_training_aspect --device cuda:1
 
 NOTE ON CONFIDENCE: the batch_size/gradient_checkpointing recommendation for a
 ~12GB GPU is MEASURED (real training runs, this project, 2026-07-02). For any
@@ -84,7 +84,7 @@ def main():
         "--data_dir", type=str, default=None, required=True,
         help="Folder with train.jsonl/val.jsonl/test.jsonl to count real images from. "
              "REQUIRED, no default -- there is no sensible default across "
-             "different machines/datasets. Example: --data_dir data/seg_training_letterbox.",
+             "different machines/datasets. Example: --data_dir data/seg_training_aspect.",
     )
     parser.add_argument("--epochs", type=int, default=5, help="Epochs to compute step totals for. Default: 5.")
     parser.add_argument("--device", type=str, default=None, help="cuda / cuda:N / cpu. Default: auto-detect.")
@@ -192,14 +192,10 @@ def main():
     print(f"  n_grid_images                : 10   (5 fixed + 5 fresh -- already-validated default)")
     print(f"  size                         : [512, 320]  (width, height -- non-square, no pad band,")
     print(f"                                  caps long side at SD1.5's native 512)")
-    print(f"  resize_mode                  : aspect")
-    print(f"    aspect: direct resize to a non-square (width, height) target chosen close to")
-    print(f"    the source aspect ratio -- NO pad, NO crop.")
-    print(f"    letterbox (SquarePad) keeps 100% of the scene but adds a pad band.")
-    print(f"    CenterCrop (original stock LoRAdapter recipe) has no pad band, crops scene edges.")
+    print(f"  resize_mode                  : aspect  (only mode supported -- direct resize to a")
+    print(f"    non-square (width, height) target close to the source aspect ratio, NO pad, NO crop)")
     print(f"    UNLIKE the grounded_sam branch, this mode is baked into the SAVED MAP -- you")
-    print(f"    must run seg_map_calculations.py with the SAME --resize_mode (and, for aspect,")
-    print(f"    the SAME --width/--height) before training.")
+    print(f"    must run seg_map_calculations.py with the SAME --width/--height before training.")
 
     # ---- 6. Ready-to-paste snippet ------------------------------------------ #
     print()

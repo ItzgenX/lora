@@ -245,7 +245,7 @@ def write_training_params_txt(cfg, output_path: Path, device: str, original_cwd:
         f"train manifest   : {cfg.data.json_file}  ({train_n} images)",
         f"val manifest     : {cfg.data.get('val_json_file', 'null')}  ({val_n} images)",
         f"image size       : {cfg.get('size', '?')}",
-        f"resize_mode      : {cfg.get('resize_mode', 'letterbox')}  (letterbox=SquarePad, CenterCrop=original repo recipe)",
+        f"resize_mode      : {cfg.get('resize_mode', 'aspect')}",
         "",
         "-- Schedule --",
         f"epochs           : {cfg.get('epochs', '?')}",

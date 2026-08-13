@@ -341,6 +341,8 @@
       <li><a href="#l9">9 · Encoder → Mapper → DataProvider</a></li>
       <li><a href="#l10">10 · Why your SegFormer swap is free</a></li>
       <li><a href="#l11">11 · Maintainer audit: verified</a></li>
+      <li><a href="#l12">12 · grounded_sam branch, audited</a></li>
+      <li><a href="#l13">13 · One resize mode, cross-dataset, proven live</a></li>
       <li><a href="#glossary">Glossary</a></li>
       <li><a href="#study">Further study</a></li>
     </ol>
@@ -803,6 +805,58 @@ def get_batch(self): return self.batch</code></pre>
       </div>
       <div class="honest">
         <b>What "verified" means here, precisely:</b> every claim above was checked by reading the real file on disk or by actually running the code (Hydra compose, torch_fidelity call, py_compile, real import) — not inferred from how the pieces are supposed to work. The one piece still unverified by execution — FID against a real checkpoint's real generations — is named as such, not glossed over.
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- LESSON 12 -->
+    <!-- ============================================================ -->
+    <section class="lesson" id="l12">
+      <div class="lesson-kicker"><span class="lesson-num">12</span><span class="tag">Second branch, audited</span></div>
+      <h2 class="lesson-title">grounded_sam: same architecture, different encoder</h2>
+      <div class="panel concept">
+        <p class="panel-eyebrow"><span class="dot"></span>Concept</p>
+        <p>Lesson 10's whole point — the encoder slot only cares about shape and value range, not what produced the map — is what makes a second branch possible at all. <span class="mono">grounded_sam</span> swaps SegFormer's dense per-pixel classifier for Grounded-SAM (GroundingDINO detection + SAM segmentation, open-vocabulary, 29 CARLA classes instead of 19 Cityscapes ones) without touching the UNet, the mapper, or the FiLM math from Lessons 6–9 at all.</p>
+      </div>
+      <div class="panel repo">
+        <p class="panel-eyebrow"><span class="dot"></span>In this repo</p>
+        <p>Same audit as Lesson 11, run again on this branch's real files — every item confirmed independently, not assumed from the segformer result:</p>
+        <ul class="tight">
+          <li><b>Configuration B</b> — identical: <code class="inline">adaption_mode: only_res_conv</code>, <code class="inline">rank: 128</code>, <code class="inline">c_dim: 128</code>, confirmed in this branch's own <span class="mono">configs/lora/struct.yaml</span> and <span class="mono">configs/experiment/train_grounded_sam.yaml</span>.</li>
+          <li><b>UNet ↔ mapper alignment</b> — same <span class="mono">FixedStructureMapper15</span>, same shared engine file, not branch-specific — Lesson 11's stride-2 computation applies unchanged.</li>
+          <li><b>Config wiring</b> — <span class="mono">hydra.compose()</span> run for real on both <span class="mono">train_seg.yaml + experiment=train_grounded_sam</span> and <span class="mono">inference_grounded_sam.yaml</span>: both resolve cleanly, <code class="inline">size=[512,320]</code>, <code class="inline">resize_mode=aspect</code>, same base model and VAE as segformer.</li>
+          <li><b>Image/seg size + prompt usage</b> — same <span class="mono">SegJsonDataModule</span> single-source-of-truth pattern for size; the training loop's loss call uses <code class="inline">batch["caption"]</code> the same way.</li>
+          <li><b>mIoU</b> — same <span class="mono">compute_miou</span>, gated by <span class="mono">live_available</span> (Grounded-SAM's Tier-1 slot filler is <code class="inline">False</code> by design — see the honest note below).</li>
+          <li><b>FID — was missing here too, now added.</b> <span class="mono">grounded_sam_fid_eval.py</span> + <span class="mono">configs/fid_grounded_sam.yaml</span>, same design as Lesson 11's segformer version, adapted for this branch's 29-class palette (<span class="mono">load_grounded_sam_palette</span>) and non-square pad handling. Verified by execution: compiles, imports safely, config composes correctly.</li>
+        </ul>
+      </div>
+      <div class="honest">
+        <b>What's different here, and still unverified:</b> Grounded-SAM's live Tier-2 encoder (real GroundingDINO+SAM, built this session) was execution-tested against synthetic images and the CFG-dropout all-zero case, not real driving photos — flagged in this branch's own docs as the real open risk, since GroundingDINO is an object detector, not a dense per-pixel classifier the way SegFormer is, and "stuff" classes (road, sky, vegetation) don't have clean box-shaped extents. That gap is named, not papered over.
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- GLOSSARY -->
+    <!-- ============================================================ -->
+    <!-- ============================================================ -->
+    <!-- LESSON 13 -->
+    <!-- ============================================================ -->
+    <section class="lesson" id="l13">
+      <div class="lesson-kicker"><span class="lesson-num">13</span><span class="tag">Simplify, then prove it live</span></div>
+      <h2 class="lesson-title">One resize mode, cross-dataset, proven live</h2>
+      <div class="panel concept">
+        <p class="panel-eyebrow"><span class="dot"></span>Concept</p>
+        <p><span class="mono">letterbox</span> and <span class="mono">CenterCrop</span> were never removed because they were wrong — <span class="mono">aspect</span> (Lesson 10's honest note) was already the validated fix for the pad-band bug. They were removed because a settled decision left as a "choice" is still surface area: a config a future run could accidentally select, code paths that have to keep compiling, docs that have to keep agreeing with each other. Once a question is actually closed, closing the door on it is its own kind of correctness.</p>
+        <p>Removing options doesn't remove the underlying problem they were managing, though — it just means the ONE remaining path has to actually handle every case. That got tested for real this lesson, not assumed.</p>
+      </div>
+      <div class="panel repo">
+        <p class="panel-eyebrow"><span class="dot"></span>In this repo</p>
+        <p><b>letterbox/CenterCrop deleted, not just deprecated.</b> <span class="mono">RESIZE_MODES</span> (<span class="mono">src/data/transforms.py</span>) is now <code class="inline">("aspect",)</code> — one entry, not three. <span class="mono">_square_rgb_steps</span> lost the branches that built <span class="mono">SquarePad</span>/<span class="mono">CenterCrop</span> pipelines; every default parameter that used to read <code class="inline">"letterbox"</code> now reads <code class="inline">"aspect"</code>, across <span class="mono">seg_map_calculations.py</span>, <span class="mono">local_seg.py</span>, both configs, and <span class="mono">recommend_training_params.py</span>. <span class="mono">SquarePad</span> the class stays — the stock depth pipeline (kept, untouched, per an explicit "keep original-repo files" decision) still uses it — only segmentation's own dispatch logic lost the other two branches.</p>
+        <p><b>Cross-dataset resize, actually measured, not assumed.</b> Adding Cityscapes as extra training data raised a real question: Cityscapes ships at 2048×1024 (2:1), not this project's 1280×800 (1.6:1). Pulling a real image straight out of <span class="mono">leftImg8bit_trainvaltest.zip</span> and running it through the real <span class="mono">aspect</span> pipeline confirmed it — <code class="inline">w_scale=0.25, h_scale=0.3125</code>, a measured 25% relative axis skew, visible on inspection as egg-shaped cobblestones and hood-ornament in the output. The fix wasn't to reopen <span class="mono">resize_mode</span> — it was a new script, <span class="mono">cityscapes_map_calculations.py</span>, that center-crops each Cityscapes image AND its matching label map (identical crop box, so the pair never drifts out of alignment) to 1.6:1 <i>before</i> either ever reaches the shared resize step. Re-running the same image afterward: round again, real content (people, cars, buildings) intact, only empty margin trimmed. The shared pipeline itself stayed exactly as simple as Lesson 10 left it — the fix lives in the Cityscapes-specific ingestion script, where a source-specific quirk belongs.</p>
+        <p><b>epiCRealism + sd-vae-ft-mse: loaded and generated, not just downloaded.</b> Both were missing locally all session. Downloaded for real via <span class="mono">download_sd15.py</span>, then loaded through this repo's own <span class="mono">SD15</span> class and run through a real <code class="inline">6</code>-step generation at the exact locked resolution — <code class="inline">model.pipe(..., height=320, width=512)</code> — on a real GPU. Output image: 512×320 exactly, recognizable street-scene composition. <span class="mono">UNet.block_out_channels = [320, 640, 1280, 1280]</span> read back from the loaded model matches Fig. 2 exactly — the architecture math from Lesson 4 isn't theoretical, it's what's actually sitting in memory.</p>
+      </div>
+      <div class="honest">
+        <b>What's still unverified:</b> the 6-step generation above is a load/shape/dtype smoke test, not a quality measurement — it deliberately used too few steps to judge photorealism from. <span class="mono">cityscapes_map_calculations.py</span> itself is verified against a synthetic folder tree matching Cityscapes' real naming convention (22 passing checks), not yet run against the real 5,000-image download. Both are named as open, not glossed over.
       </div>
     </section>
 

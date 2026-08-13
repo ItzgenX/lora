@@ -43,8 +43,8 @@ from src.data.transforms import build_seg_preprocess, RESIZE_MODES, normalize_si
 
 
 # Matches the mode stamp seg_map_calculations.py always bakes into its output
-# path (folder name for scan/data_dir/json_file modes: "..._seg_map_letterbox/...";
-# filename for single-image mode: "<stem>_seg_map_letterbox.png") -- reused here
+# path (folder name for scan/data_dir/json_file modes: "..._seg_map_aspect/...";
+# filename for single-image mode: "<stem>_seg_map_aspect.png") -- reused here
 # (not a separate marker file) since it's already guaranteed present by every
 # calc-mode's own naming convention.
 _SEG_MAP_MODE_RE = re.compile(r"_seg_map_(" + "|".join(RESIZE_MODES) + r")\b")
@@ -80,7 +80,7 @@ class SegJsonDataset(Dataset):
         image_key: str = "raw_image_path",   # JSONL key for the source RGB image
         seg_key: str = "seg_path",           # JSONL key for the class-ID seg map
         prompt_key: str = "prompt",          # JSONL key for the text caption
-        resize_mode: str = "letterbox",      # MUST match what seg_map_calculations.py
+        resize_mode: str = "aspect",         # MUST match what seg_map_calculations.py
                                              # used to COMPUTE these maps (baked in at
                                              # calc time, unlike the grounded_sam branch)
                                              # -- used ONLY to cross-check seg_path's own
@@ -277,8 +277,7 @@ class SegJsonDataModule:
         image_key: str = "raw_image_path",
         seg_key: str = "seg_path",
         prompt_key: str = "prompt",
-        resize_mode: str = "letterbox",  # "letterbox" / "CenterCrop" / "aspect" —
-                                       # built ONCE here from build_seg_preprocess so
+        resize_mode: str = "aspect",     # built ONCE here from build_seg_preprocess so
                                        # train/val use the identical RGB transform.
                                        # UNLIKE the grounded_sam branch, this does NOT
                                        # re-square the seg map (already squared at

@@ -110,7 +110,8 @@ implemented, not just proposed:
 ## 3. Artifact — mangled/melted vehicles
 
 **Cause (verified from the user's own scan, not a guess):**
-`analyze_car_coverage.py` run on the real 59,766-image training set found
+`analyze_car_coverage.py` (later removed from the repo; this finding stands
+on its own) run on the real 59,766-image training set found
 **98.5% of images have under 1% car pixels; mean car-pixel fraction is
 0.08%; zero images have a car covering >20% of the frame.** The LoRA has
 essentially never seen a large, clearly-visible car, so it has no learned

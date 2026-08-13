@@ -309,14 +309,11 @@ class SegmentationEncoder(nn.Module):
           1. Assert input contract: 4-D, 3-channel, in [-1, 1] (same asserts as midas).
           2. (x + 1.0) / 2.0  ->  [0, 1].
           3. Resize to seg_input_size (bilinear) — SegFormer's expected input scale.
-             A 512x512 input is already square (letterboxed by SquarePad before it
-             reaches this encoder), so this is a uniform rescale, never a crop.
-             (Unlike MiDaS, SegFormer has no forced internal center-crop — squaring
-             the image beforehand is still required for resize_mode="letterbox"/
-             "CenterCrop" (both square); resize_mode="aspect" deliberately feeds
-             a non-square tensor here on purpose -- SegFormer itself handles any
-             H×W cleanly, and seg_input_size (above) keeps ITS OWN internal input
-             square regardless, so this is safe either way.)
+             The input is non-square (resize_mode="aspect" feeds an unpadded,
+             uncropped tensor here on purpose), but SegFormer itself handles
+             any H×W cleanly, and seg_input_size (above) keeps ITS OWN
+             internal input square regardless — unlike MiDaS, SegFormer has
+             no forced internal center-crop, so this is a safe uniform rescale.
           4. ImageNet normalize: (x - mean) / std. Buffers broadcast and match
              the device/dtype of x automatically.
           5. SegFormer forward: logits [B, 19, H/4, W/4].
@@ -332,9 +329,8 @@ class SegmentationEncoder(nn.Module):
 
         x = (imgs + 1.0) / 2.0                       # [-1,1] -> [0,1]
 
-        # Resize to SegFormer's input scale. The input is already square
-        # (letterboxed before it gets here), so this is a uniform rescale,
-        # no distortion.
+        # Resize to SegFormer's input scale -- a uniform rescale to a square
+        # working size regardless of the (possibly non-square) input shape.
         x = F.interpolate(
             x, size=(self.seg_input_size, self.seg_input_size),
             mode="bilinear", align_corners=False,
